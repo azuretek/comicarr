@@ -146,7 +146,12 @@ if ( sys.platform == 'win32' and sys.executable.split( '\\' )[-1] == 'pythonw.ex
     sys.stderr = open(os.devnull, "w")
 
 def handler_sigterm(signum, frame):
-    comicarr.SIGNAL = 'shutdown'
+    # Guard the write (documented prior regression): the shutdown/restart
+    # API endpoints set comicarr.SIGNAL *before* sending SIGTERM. An
+    # unconditional write here clobbers a pending 'restart'/'update'/
+    # 'maintenance' intent, degrading a restart to a plain stop.
+    if not comicarr.SIGNAL:
+        comicarr.SIGNAL = 'shutdown'
 
 def check_stale_pidfile(pidfile):
     ''' Return True if pidfile doesn't hold a numeric value, or it
@@ -553,7 +558,25 @@ def main():
     # Start the background threads
     comicarr.start()
 
+    # Register the SIGTERM handler before startup replay: replay_pipeline()
+    # below can spend real time probing downloaders and inline-redriving PP,
+    # so a SIGTERM during that window must be caught here to preserve any
+    # pending restart/update intent (handler_sigterm guards comicarr.SIGNAL).
     signal.signal(signal.SIGTERM, handler_sigterm)
+
+    # Startup recovery replay (U6). MUST run here: after comicarr.start()
+    # returns (start() is one unbroken `with INIT_LOCK:` block, so the lock is
+    # now released — replay never acquires INIT_LOCK and cannot starve a
+    # concurrent SIGTERM halt()), and after credential decryption (encrypt_items
+    # ran inside comicarr.initialize() above, so downloader-client creds are no
+    # longer ciphertext), and before uvicorn.run() (workers are already running
+    # so re-enqueued/STILL items are picked up by the live monitors). Idempotent
+    # and re-runnable; a per-row failure is logged and skipped, never fatal.
+    try:
+        from comicarr.app.downloads import recovery
+        recovery.replay_pipeline()
+    except Exception as e:
+        logger.error('[RECOVERY] Startup replay raised — continuing startup (resumable next start): %s' % e)
 
     import uvicorn
 

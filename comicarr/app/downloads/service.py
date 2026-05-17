@@ -29,6 +29,15 @@ from comicarr.app.downloads import queries as dl_queries
 from comicarr.downloaders import mediafire, mega, pixeldrain
 from comicarr.tables import annuals, comics, ddl_info, issues, storyarcs, weekly
 
+# P1: bounded re-enqueue cap for the DDL atomic begin()-blocks. On a journal
+# raise inside one of those blocks BOTH ddl_info and journal roll back AND the
+# GetComics DDL path wrote no prior journal/foundsearch row — so nothing
+# (replay_pipeline / _reconstruct_anchors) would ever rescan it: the item is
+# lost forever. We re-put it on DDL_QUEUE (idempotent upsert + idempotent
+# record_transition ⇒ retry-safe) so it is genuinely recoverable, but cap the
+# requeues so a persistent DB failure surfaces loudly instead of hot-looping.
+_DDL_JOURNAL_REQUEUE_CAP = 3
+
 # ---------------------------------------------------------------------------
 # Download history
 # ---------------------------------------------------------------------------
@@ -768,9 +777,118 @@ def ddl_downloader(queue):
                 pass
 
             logger.info("Now loading request from DDL queue: %s" % item["series"])
+            # ctrlval (lowercase "id") is consumed by the out-of-scope legacy
+            # db.upsert("ddl_info", …) calls later in this function; the U2/U3
+            # atomic blocks use db.upsert_conn with the real "ID" column.
             ctrlval = {"id": item["id"]}
             val = {"status": "Downloading", "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
-            db.upsert("ddl_info", val, ctrlval)
+
+            # --- DDL snatch: ddl_info status='Downloading' + journal snatched ---
+            # Unlike the NZB/torrent seam (where db.upsert owns its own txn so
+            # the journal write is ordered-LAST), the DDL "download started"
+            # write is atomic-capable: a single explicit begin() block writes
+            # the ddl_info row AND the journal `snatched` row together via
+            # db.upsert_conn (same dialect-aware ON CONFLICT as db.upsert, on
+            # the shared conn), so there is NO residual window — if the block
+            # raises, BOTH rows roll back. The ddl_info conflict key column is
+            # "ID" (UPSERT_KEYS["ddl_info"]); the key_dict uses the real column
+            # name, not the legacy lowercase "id" alias.
+            from comicarr.app.downloads import journal
+
+            ddl_issueid = item.get("issueid")
+            ddl_payload = {
+                "issueid": ddl_issueid,
+                "comicid": item.get("comicid"),
+                "provider": "DDL",
+                "id": item["id"],
+                "series": item.get("series"),
+                "filename": item.get("filename"),
+                "ddl": True,
+            }
+            ddl_rkey = journal.release_key(
+                ddl_issueid,
+                "DDL",
+                nzbname=item.get("filename"),
+                hash=None,
+                discriminant=item["id"],
+            )
+            try:
+                with db.get_engine().begin() as conn:
+                    db.upsert_conn(conn, "ddl_info", val, {"ID": item["id"]})
+                    journal.record_transition(
+                        ddl_rkey,
+                        journal.SNATCHED,
+                        payload=ddl_payload,
+                        conn=conn,
+                        issueid=ddl_issueid,
+                        provider="DDL",
+                        downloader_type="ddl",
+                        nzbname=item.get("filename"),
+                    )
+            except Exception as e:
+                # P1: a journal raise (OperationalError 5-retry cap, or
+                # IntegrityError) inside this atomic block must NOT propagate
+                # through the `while True` loop and permanently kill the DDL
+                # worker thread. begin() auto-rolls-back, so ddl_info + journal
+                # roll back together (consistent). But the GetComics DDL path
+                # writes ddl_info+DDL_QUEUE.put with NO prior journal/
+                # foundsearch row, so on rollback there is NO journal row,
+                # ddl_info reverts, and NOTHING (replay/_reconstruct_anchors,
+                # which never scans ddl_info) would recover it — the item is
+                # lost forever. Re-enqueue it (the ddl_info upsert + journal
+                # record_transition are idempotent ⇒ retry-safe), bounded so a
+                # persistent DB failure surfaces loudly instead of hot-looping.
+                item["_journal_retry"] = item.get("_journal_retry", 0) + 1
+                if item["_journal_retry"] > _DDL_JOURNAL_REQUEUE_CAP:
+                    logger.error(
+                        "[DOWNLOADS-DDL] snatch atomic block failed %d times for "
+                        "%s (id=%s) — exceeded requeue cap (%d); NOT requeuing. "
+                        "This indicates a persistent DB failure (system down) — "
+                        "surfacing loudly rather than spinning: %s"
+                        % (
+                            item["_journal_retry"],
+                            item.get("series"),
+                            item.get("id"),
+                            _DDL_JOURNAL_REQUEUE_CAP,
+                            e,
+                        )
+                    )
+                    # Item is abandoned (cap exceeded, not requeued): mirror the
+                    # normal teardown's in-memory cleanup so it does not stay
+                    # marked queued / stuck-notified / link-failed for the rest
+                    # of the process lifetime.
+                    comicarr.DDL_QUEUED.discard(item["id"])
+                    comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
+                    try:
+                        link_type_failure.pop(item["id"])
+                    except KeyError:
+                        pass
+                    continue
+                logger.error(
+                    "[DOWNLOADS-DDL] snatch atomic block failed for %s (id=%s) "
+                    "— ddl_info+journal rolled back together; re-enqueued on "
+                    "DDL_QUEUE (attempt %d/%d, idempotent retry) so it is "
+                    "genuinely recoverable; continuing: %s"
+                    % (
+                        item.get("series"),
+                        item.get("id"),
+                        item["_journal_retry"],
+                        _DDL_JOURNAL_REQUEUE_CAP,
+                        e,
+                    )
+                )
+                # Requeued for an idempotent retry: clear stale per-attempt
+                # in-memory state (stuck-notify + link-failure) so it does not
+                # drift for the process lifetime, but keep the DDL_QUEUED
+                # membership intact so the re-put item's dedup state stays
+                # consistent (line ~772 re-adds it harmlessly on reprocess).
+                comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
+                try:
+                    link_type_failure.pop(item["id"])
+                except KeyError:
+                    pass
+                comicarr.DDL_QUEUE.put(item)
+                continue
 
             if item["site"] == "DDL(GetComics)":
                 try:
@@ -813,9 +931,138 @@ def ddl_downloader(queue):
             if ddzstat["success"] is True:
                 tdnow = datetime.datetime.now()
                 nval = {"status": "Completed", "updated_date": tdnow.strftime("%Y-%m-%d %H:%M")}
-                db.upsert("ddl_info", nval, ctrlval)
+
+                # --- DDL download complete: ddl_info status='Completed' +
+                #     journal downloaded (U3) ---------------------------------
+                # The DDL "download complete" write is atomic-capable, so the
+                # journal `downloaded` transition is CO-COMMITTED with the
+                # ddl_info status='Completed' write in a single explicit
+                # begin() block via db.upsert_conn (mirrors the U2 snatch
+                # block) — no residual window between the durable Completed
+                # status and the journal; a failure rolls both back. key_dict
+                # uses the real "ID" column (UPSERT_KEYS["ddl_info"]), not the
+                # legacy lowercase "id" alias.
+                ddlc_issueid = item.get("issueid")
+                # P2-5(b): the COMPLETE replay path rebuilds a PP item via
+                # recovery._pp_item_from_row which reads nzb_folder/nzb_name
+                # FROM THIS payload. Without them a replayed DDL `downloaded`
+                # row rebuilt a PP item with None paths (un-processable). Both
+                # are available here from ddzstat; mirror the live PP_QUEUE.put
+                # shape below (no-filename ⇒ basename(path)/path).
+                if ddzstat["filename"] is None:
+                    ddlc_nzb_name = os.path.basename(ddzstat["path"])
+                else:
+                    ddlc_nzb_name = ddzstat["filename"]
+                ddlc_payload = {
+                    "issueid": ddlc_issueid,
+                    "comicid": item.get("comicid"),
+                    "provider": "DDL",
+                    "id": item["id"],
+                    "series": item.get("series"),
+                    "filename": item.get("filename"),
+                    "ddl": True,
+                    "nzb_folder": ddzstat["path"],
+                    "nzb_name": ddlc_nzb_name,
+                    "download_info": {"provider": "DDL", "id": item["id"]},
+                }
+                ddlc_rkey = journal.release_key(
+                    ddlc_issueid,
+                    "DDL",
+                    nzbname=item.get("filename"),
+                    hash=None,
+                    discriminant=item["id"],
+                )
+                try:
+                    with db.get_engine().begin() as conn:
+                        db.upsert_conn(conn, "ddl_info", nval, {"ID": item["id"]})
+                        journal.record_transition(
+                            ddlc_rkey,
+                            journal.DOWNLOADED,
+                            payload=ddlc_payload,
+                            conn=conn,
+                            issueid=ddlc_issueid,
+                            provider="DDL",
+                            downloader_type="ddl",
+                            nzbname=item.get("filename"),
+                        )
+                    logger.fdebug("[DOWNLOADS-DDL] Journaled downloaded for %s" % ddlc_rkey)
+                except Exception as e:
+                    # P1: same protection as the snatch block. begin()
+                    # auto-rolls-back, so ddl_info status='Completed' + journal
+                    # `downloaded` roll back together (consistent). With no
+                    # journal row and ddl_info reverted, replay would never
+                    # rescan this item, so re-enqueue it (idempotent upsert +
+                    # record_transition ⇒ retry-safe) instead of dropping the
+                    # PP handoff and losing it. Bounded so a persistent DB
+                    # failure surfaces loudly instead of hot-looping.
+                    item["_journal_retry"] = item.get("_journal_retry", 0) + 1
+                    if item["_journal_retry"] > _DDL_JOURNAL_REQUEUE_CAP:
+                        logger.error(
+                            "[DOWNLOADS-DDL] downloaded atomic block failed %d "
+                            "times for %s (id=%s) — exceeded requeue cap (%d); "
+                            "NOT requeuing. Persistent DB failure (system down) "
+                            "— surfacing loudly rather than spinning: %s"
+                            % (
+                                item["_journal_retry"],
+                                item.get("series"),
+                                item.get("id"),
+                                _DDL_JOURNAL_REQUEUE_CAP,
+                                e,
+                            )
+                        )
+                        # Item is abandoned (cap exceeded, not requeued):
+                        # mirror the normal teardown's in-memory cleanup so it
+                        # does not stay marked queued / stuck-notified /
+                        # link-failed for the rest of the process lifetime.
+                        comicarr.DDL_QUEUED.discard(item["id"])
+                        comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
+                        try:
+                            link_type_failure.pop(item["id"])
+                        except KeyError:
+                            pass
+                        continue
+                    logger.error(
+                        "[DOWNLOADS-DDL] downloaded atomic block failed for %s "
+                        "(id=%s) — ddl_info+journal rolled back together; "
+                        "re-enqueued on DDL_QUEUE (attempt %d/%d, idempotent "
+                        "retry) so it is genuinely recoverable; continuing: %s"
+                        % (
+                            item.get("series"),
+                            item.get("id"),
+                            item["_journal_retry"],
+                            _DDL_JOURNAL_REQUEUE_CAP,
+                            e,
+                        )
+                    )
+                    # AMPLIFICATION NOTE: re-enqueuing here restarts the loop
+                    # at the top, which re-runs the FULL DDL download (the
+                    # source fetch, not just this failed post-download journal
+                    # write) purely to retry the journal transition. This is
+                    # accepted: the requeue cap (_DDL_JOURNAL_REQUEUE_CAP=3)
+                    # bounds the re-download blast radius, downloaders support
+                    # resume, and a persistent DB failure surfaces loudly via
+                    # the cap above rather than hot-looping. No finer-grained
+                    # "journal-only retry" path exists by design (keeping a
+                    # single recoverable restart point).
+                    # Requeued for an idempotent retry: clear stale per-attempt
+                    # in-memory state (stuck-notify + link-failure) so it does
+                    # not drift for the process lifetime, but keep the
+                    # DDL_QUEUED membership intact so the re-put item's dedup
+                    # state stays consistent (line ~772 re-adds it harmlessly
+                    # on reprocess).
+                    comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
+                    try:
+                        link_type_failure.pop(item["id"])
+                    except KeyError:
+                        pass
+                    comicarr.DDL_QUEUE.put(item)
+                    continue
 
             if all([ddzstat["success"] is True, comicarr.CONFIG.POST_PROCESSING is True]):
+                # Propagate the exact `downloaded`-write key onto the PP item
+                # so the atomic claim advances THIS row, never re-derived (the
+                # no-filename DDL PP item carries issueid=None, so re-derivation
+                # could never reproduce the one-off downloader-id-keyed key).
                 try:
                     if ddzstat["filename"] is None:
                         comicarr.PP_QUEUE.put(
@@ -828,6 +1075,7 @@ def ddl_downloader(queue):
                                 "apicall": True,
                                 "ddl": True,
                                 "download_info": {"provider": "DDL", "id": item["id"]},
+                                "journal_release_key": ddlc_rkey,
                             }
                         )
                     else:
@@ -841,6 +1089,7 @@ def ddl_downloader(queue):
                                 "apicall": True,
                                 "ddl": True,
                                 "download_info": {"provider": "DDL", "id": item["id"]},
+                                "journal_release_key": ddlc_rkey,
                             }
                         )
                 except Exception as e:
@@ -936,6 +1185,27 @@ def ddl_health_check():
         if age_minutes > threshold_minutes:
             if item["ID"] in comicarr.DDL_STUCK_NOTIFIED:
                 continue
+            # U5 reconciliation: if startup recovery classification already
+            # marked this item's journal row terminally `failed` (classified
+            # GONE — status=Downloading + dead source link), do NOT also fire
+            # a "download stuck" notification for it. recovery_classify also
+            # registers the id into DDL_STUCK_NOTIFIED on its side; this is the
+            # symmetric guard so the two paths never double-report regardless
+            # of ordering. Best-effort: a journal read failure here must not
+            # break the existing health-check notify behavior.
+            try:
+                from comicarr.app.downloads import journal
+                from comicarr.tables import pipeline_journal
+
+                stmt = select(pipeline_journal).where(
+                    pipeline_journal.c.stage == journal.FAILED,
+                    pipeline_journal.c.issueid == str(item["issueid"]),
+                )
+                if db.select_one(stmt) is not None:
+                    comicarr.DDL_STUCK_NOTIFIED.add(item["ID"])
+                    continue
+            except Exception as e:
+                logger.fdebug("[DDL-HEALTH] journal reconciliation skipped (non-fatal): %s" % e)
             logger.warn(
                 "[DDL-HEALTH] Download stuck for %d minutes: %s (%s)" % (int(age_minutes), item["series"], item["ID"])
             )
@@ -960,6 +1230,71 @@ def postprocess_main(queue):
             continue
         pp = None
         logger.info("Now loading from post-processing queue: %s" % item)
+
+        # PP-consumer idempotency guard: a single atomic conditional advance
+        # `downloaded -> post_processing` (the convergence point for every
+        # duplicate-enqueue source). Exactly one concurrent caller wins; losers
+        # (already >= post_processing / terminal / concurrent winner) drop.
+        #
+        # Key contract: for a journaled download consume the propagated
+        # `journal_release_key` VERBATIM — never re-derive (a PP item carries
+        # no provider/hash, so re-derivation would diverge from the snatch /
+        # downloaded row and silently void exactly-once). Derive a key ONLY
+        # for genuinely unjournaled manual/API/ComicRN PP (no row exists; the
+        # advance is then a behavior-neutral insert-if-absent). On a journal
+        # error inside the guard we do NOT crash — fall through to PP, whose
+        # existing Status in ("Wanted","Snatched") guard is the secondary net.
+        canonical_release_key = None
+        try:
+            from comicarr.app.downloads import journal
+
+            propagated_key = item.get("journal_release_key")
+            if propagated_key:
+                # Journaled download: consume the exact key the producer
+                # stamped from its `downloaded` write. NEVER re-derive here.
+                canonical_release_key = propagated_key
+            else:
+                # Genuinely unjournaled PP (manual/API force_process:107 /
+                # ComicRN — no journal row exists). Derive from the guaranteed
+                # field intersection; the advance is insert-if-absent / no-op.
+                claim_ident = {
+                    "issueid": item.get("issueid"),
+                    "comicid": item.get("comicid"),
+                    "nzbname": item.get("nzb_name"),
+                }
+                canonical_release_key = journal.derive_release_key(claim_ident)
+            won = journal.record_transition(
+                canonical_release_key,
+                journal.POST_PROCESSING,
+                payload={
+                    "nzb_name": item.get("nzb_name"),
+                    "nzb_folder": item.get("nzb_folder"),
+                    "failed": item.get("failed"),
+                    "issueid": item.get("issueid"),
+                    "comicid": item.get("comicid"),
+                    "apicall": item.get("apicall"),
+                },
+                issueid=item.get("issueid"),
+            )
+            if won is False:
+                # Lost the claim (already >= post_processing / terminal, or a
+                # concurrent winner took it). Drop the item — no second
+                # process.Process. This is the exactly-once convergence point.
+                logger.info(
+                    "[DOWNLOADS-PP] Idempotency claim LOST for %s — already "
+                    "post-processing/processed or claimed concurrently; "
+                    "dropping duplicate." % canonical_release_key
+                )
+                continue
+            logger.fdebug("[DOWNLOADS-PP] Idempotency claim WON for %s" % canonical_release_key)
+        except Exception as e:
+            # Journal unreachable mid-claim — do NOT crash the worker. Fall
+            # through to PP; the existing Status guard is the fallback.
+            logger.error(
+                "[DOWNLOADS-PP] Journal error during idempotency claim (falling through to Status guard): %s" % e
+            )
+            canonical_release_key = None
+
         try:
             pprocess = process.Process(
                 item["nzb_name"],
@@ -970,10 +1305,17 @@ def postprocess_main(queue):
                 item["apicall"],
                 item["ddl"],
                 item["download_info"],
+                journal_release_key=canonical_release_key,
             )
         except Exception:
             pprocess = process.Process(
-                item["nzb_name"], item["nzb_folder"], item["failed"], item["issueid"], item["comicid"], item["apicall"]
+                item["nzb_name"],
+                item["nzb_folder"],
+                item["failed"],
+                item["issueid"],
+                item["comicid"],
+                item["apicall"],
+                journal_release_key=canonical_release_key,
             )
         pp = pprocess.post_process()
         if pp is not None:
@@ -1005,6 +1347,50 @@ def worker_main(queue):
             comicarr.SNATCHED_QUEUE.put(item)
         elif any([snstat["snatch_status"] == "MONITOR FAIL", snstat["snatch_status"] == "MONITOR COMPLETE"]):
             logger.info("File copied for post-processing - submitting as a direct pp.")
+
+            # downloaded marker, written before the PP_QUEUE.put. The exact
+            # rkey is propagated onto the PP item as `journal_release_key` so
+            # the atomic claim advances THIS row — it must NOT be re-derived
+            # from the PP item (no provider/hash there ⇒ a divergent orphan
+            # key voiding exactly-once). None only if the journal write failed,
+            # in which case the consumer fallback re-derivation handles it.
+            torrent_journal_release_key = None
+            try:
+                from comicarr.app.downloads import journal
+
+                journal_payload = {
+                    "issueid": item.get("issueid"),
+                    "comicid": item.get("comicid"),
+                    "hash": item.get("hash"),
+                    "nzb_name": os.path.basename(snstat["copied_filepath"]),
+                    "nzb_folder": snstat["copied_filepath"],
+                    "apicall": True,
+                    "ddl": False,
+                }
+                rkey = journal.release_key(
+                    item.get("issueid"),
+                    item.get("provider"),
+                    nzbname=item.get("nzbname"),
+                    hash=item.get("hash"),
+                    discriminant=item.get("hash") or item.get("provider") or journal_payload,
+                )
+                journal.record_transition(
+                    rkey,
+                    journal.DOWNLOADED,
+                    payload=journal_payload,
+                    issueid=item.get("issueid"),
+                    provider=item.get("provider"),
+                    downloader_type="torrent",
+                    nzbname=item.get("nzbname"),
+                    hash=item.get("hash"),
+                )
+                torrent_journal_release_key = rkey
+                logger.fdebug("[DOWNLOADS-WORKER] Journaled downloaded for %s" % rkey)
+            except Exception as e:
+                # A journal failure must NOT block the PP handoff (additive /
+                # inert). Log loudly; replay closes any residual window.
+                logger.error("[DOWNLOADS-WORKER] Journal downloaded transition failed: %s" % e)
+
             comicarr.PP_QUEUE.put(
                 {
                     "nzb_name": os.path.basename(snstat["copied_filepath"]),
@@ -1015,8 +1401,59 @@ def worker_main(queue):
                     "apicall": True,
                     "ddl": False,
                     "download_info": None,
+                    "journal_release_key": torrent_journal_release_key,
                 }
             )
+        elif snstat["snatch_status"] == "NOT FOUND":
+            # P1-4: U5 made torrentinfo() return an EXPLICIT NOT FOUND when the
+            # hash is absent from the client. Without this branch the item fell
+            # through every if/elif and was SILENTLY dropped — no log, no
+            # journal mark, the journal row stuck forever at `snatched`. The
+            # row IS journaled snatched (foundsearch snatch seam), so derive
+            # the SAME canonical release_key (P0-1 single-derivation: the item
+            # now carries provider+nzbname+hash from the SNATCHED_QUEUE put)
+            # and journal mark_failed with a distinguishable fail_reason so the
+            # item is visible/recoverable (R9) rather than silently lost.
+            logger.error(
+                "[DOWNLOADS-WORKER] torrent hash not found in client for "
+                "issueid=%s comicid=%s hash=%s — marking the journal row "
+                "failed (recoverable, not silently dropped)."
+                % (item.get("issueid"), item.get("comicid"), item.get("hash"))
+            )
+            try:
+                from comicarr.app.downloads import journal
+
+                fail_payload = {
+                    "issueid": item.get("issueid"),
+                    "comicid": item.get("comicid"),
+                    "hash": item.get("hash"),
+                    "provider": item.get("provider"),
+                    "nzbname": item.get("nzbname"),
+                    "apicall": True,
+                    "ddl": False,
+                }
+                fail_rkey = journal.release_key(
+                    item.get("issueid"),
+                    item.get("provider"),
+                    nzbname=item.get("nzbname"),
+                    hash=item.get("hash"),
+                    discriminant=item.get("hash") or item.get("provider") or fail_payload,
+                )
+                journal.mark_failed(
+                    fail_rkey,
+                    "torrent_hash_not_in_client",
+                    payload=fail_payload,
+                    issueid=item.get("issueid"),
+                    provider=item.get("provider"),
+                    downloader_type="torrent",
+                    nzbname=item.get("nzbname"),
+                    hash=item.get("hash"),
+                )
+            except Exception as e:
+                logger.error(
+                    "[DOWNLOADS-WORKER] could not journal mark_failed for "
+                    "NOT FOUND torrent (issueid=%s): %s" % (item.get("issueid"), e)
+                )
 
 
 def nzb_monitor(queue):
@@ -1103,6 +1540,55 @@ def cdh_monitor(queue, item, nzstat, readd=False):
             logger.info("File successfully downloaded - now initiating completed downloading handling.")
         else:
             logger.info("File failed - now initiating completed failed downloading handling.")
+        # downloaded marker, written before the PP_QUEUE.put. A failed
+        # download is STILL journaled `downloaded` here (it advances to the PP
+        # failure path which must NOT write post_processed; replay classifies
+        # it from there).
+        di = nzstat.get("download_info") or {}
+        # The exact rkey is propagated onto the PP item as
+        # `journal_release_key` so the atomic claim advances THIS row — never
+        # re-derived from the PP item (no provider/hash there). None only if
+        # the journal write failed (consumer fallback re-derivation handles).
+        cdh_journal_release_key = None
+        try:
+            from comicarr.app.downloads import journal
+
+            journal_payload = {
+                "issueid": nzstat.get("issueid"),
+                "comicid": nzstat.get("comicid"),
+                "provider": di.get("provider"),
+                "hash": di.get("hash"),
+                "nzb_name": nzstat["name"],
+                "nzb_folder": nzstat["location"],
+                "apicall": nzstat.get("apicall"),
+                "failed": nzstat.get("failed"),
+                "ddl": False,
+                "download_info": nzstat.get("download_info"),
+            }
+            rkey = journal.release_key(
+                nzstat.get("issueid"),
+                di.get("provider"),
+                nzbname=di.get("nzbname") or nzstat.get("name"),
+                hash=di.get("hash"),
+                discriminant=di.get("hash") or di.get("provider") or journal_payload,
+            )
+            journal.record_transition(
+                rkey,
+                journal.DOWNLOADED,
+                payload=journal_payload,
+                issueid=nzstat.get("issueid"),
+                provider=di.get("provider"),
+                downloader_type="nzb",
+                nzbname=di.get("nzbname") or nzstat.get("name"),
+                hash=di.get("hash"),
+            )
+            cdh_journal_release_key = rkey
+            logger.fdebug("[DOWNLOADS-CDH] Journaled downloaded for %s" % rkey)
+        except Exception as e:
+            # A journal failure must NOT block the PP handoff (additive /
+            # inert). Log loudly; replay closes any residual window.
+            logger.error("[DOWNLOADS-CDH] Journal downloaded transition failed: %s" % e)
+
         try:
             comicarr.PP_QUEUE.put(
                 {
@@ -1114,6 +1600,7 @@ def cdh_monitor(queue, item, nzstat, readd=False):
                     "apicall": nzstat["apicall"],
                     "ddl": False,
                     "download_info": nzstat["download_info"],
+                    "journal_release_key": cdh_journal_release_key,
                 }
             )
         except Exception as e:

@@ -488,8 +488,32 @@ def capture_logs(caplog):
     """
     import logging
 
+    import comicarr
+
     caplog.set_level(logging.DEBUG)
-    return caplog
+
+    # comicarr's custom logger gates fdebug/debug/info on comicarr.LOG_LEVEL
+    # (fdebug only emits when LOG_LEVEL > 1) and sets propagate=False once
+    # initLogger() runs. Both are process-global and order-dependent, so a
+    # capture_logs test can silently see nothing depending on what ran before
+    # it. Force LOG_LEVEL high and bind caplog's handler directly to the
+    # "comicarr" logger so capture is independent of global state / test order,
+    # then restore everything on teardown for isolation.
+    comicarr_logger = logging.getLogger("comicarr")
+    prev_propagate = comicarr_logger.propagate
+    prev_level = comicarr_logger.level
+    prev_log_level = getattr(comicarr, "LOG_LEVEL", 0)
+    comicarr.LOG_LEVEL = 2
+    comicarr_logger.propagate = True
+    comicarr_logger.setLevel(logging.DEBUG)
+    comicarr_logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        comicarr_logger.removeHandler(caplog.handler)
+        comicarr_logger.propagate = prev_propagate
+        comicarr_logger.setLevel(prev_level)
+        comicarr.LOG_LEVEL = prev_log_level
 
 
 # =============================================================================

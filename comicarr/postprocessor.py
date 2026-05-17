@@ -61,7 +61,16 @@ class PostProcessor(object):
     FILE_NAME = 3
 
     def __init__(
-        self, nzb_name, nzb_folder, issueid=None, module=None, queue=None, comicid=None, apicall=False, ddl=False
+        self,
+        nzb_name,
+        nzb_folder,
+        issueid=None,
+        module=None,
+        queue=None,
+        comicid=None,
+        apicall=False,
+        ddl=False,
+        journal_release_key=None,
     ):
         """
         Creates a new post processor with the given file path and optionally an NZB name.
@@ -117,6 +126,124 @@ class PostProcessor(object):
             self.comicid = None
 
         self.issuearcid = None
+
+        # Canonical release_key threaded from postprocess_main's atomic claim.
+        # When present it is PREFERRED over re-derivation so the
+        # `moved`/`post_processed` markers advance the SAME row the claim
+        # advanced (single-derivation invariant). None for manual/API/ComicRN
+        # PP that has no journal row — those fall back to re-derivation, which
+        # is a safe monotonic no-op worst case.
+        self.journal_release_key = journal_release_key
+
+    def _journal_release_key(self, issueid=None, issuearcid=None):
+        """Derive the journal release_key for this PP item.
+
+        A canonical release_key threaded from postprocess_main's atomic claim
+        (self.journal_release_key) is PREFERRED over re-derivation so these
+        markers advance the SAME journal row the PP-consumer claim advanced
+        (single-derivation invariant). The PostProcessor does not receive
+        provider/hash (only nzb_name, nzb_folder, issueid, comicid are threaded
+        in), so a re-derived key could diverge from the claimed row; the
+        threaded key closes that. Re-derive ONLY when no canonical key was
+        threaded (manual/API/ComicRN PP with no journal row) — a divergent key
+        in that case is a safe, behavior-neutral monotonic no-op worst case.
+
+        EXCEPTION — explicit story-arc override: the secondary COPY2ARCDIR
+        writes pass an explicit `issuearcid` and are supposed to terminalize
+        the ARC row whose own `nzblog` ("S<IssueArcID>") entry is being
+        deleted, NOT the primary claimed ISSUE row. Returning the threaded
+        primary key for those would advance the wrong row and break the
+        delete-and-terminalize-the-same-item invariant on COPY2ARCDIR
+        recovery. So when an explicit `issuearcid` override is supplied we
+        RE-DERIVE the key for the arc row. The primary path (no explicit
+        issuearcid/issueid override) still returns the single threaded key, so
+        the U4 single-derivation invariant — claim/markers/snatch all share
+        the one key — is preserved unchanged.
+        """
+        from comicarr.app.downloads import journal
+
+        # Secondary story-arc write: an explicit issuearcid override targets
+        # the ARC row (its own "S<IssueArcID>" nzblog entry is being deleted),
+        # not the primary claimed issue row — re-derive for that arc row.
+        explicit_arc_override = issuearcid is not None and issuearcid != self.issuearcid
+
+        # Prefer the canonical key threaded from the PP-consumer atomic claim
+        # (the row the claim advanced) for the PRIMARY item; re-derive for the
+        # secondary arc write and for unjournaled PP.
+        if self.journal_release_key and not explicit_arc_override:
+            return self.journal_release_key
+
+        # For an explicit story-arc override, the arc's durable `snatched`
+        # row is written with IssueID == IssueArcID (the bare arc id, NOT the
+        # "S"-prefixed nzblog form — updater.foundsearch, see recovery.py
+        # ~94-99), so the canonical arc release_key derives from the arc id.
+        # Anchor the derivation on the arc id so the re-derived key advances
+        # the ARC row, not the primary claimed issue row.
+        if explicit_arc_override:
+            ident = {
+                "issueid": issuearcid,
+                "IssueArcID": issuearcid,
+                "comicid": self.comicid,
+                "nzbname": self.nzb_name,
+                "ddl": getattr(self, "ddl", False),
+            }
+            return journal.derive_release_key(ident)
+
+        ident = {
+            "issueid": issueid if issueid is not None else self.issueid,
+            "IssueArcID": issuearcid if issuearcid is not None else self.issuearcid,
+            "comicid": self.comicid,
+            "nzbname": self.nzb_name,
+            "ddl": getattr(self, "ddl", False),
+        }
+        return journal.derive_release_key(ident)
+
+    def _journal_pp(self, stage, issueid=None, issuearcid=None, payload=None, conn=None):
+        """Record a PP-marker journal transition.
+
+        The façade is monotonic (a late/duplicate/regressing write is a logged
+        no-op). The `post_processing` (pre-move) and `moved` (post-move-pre-
+        tidyup) markers are additive — a journal failure there must never abort
+        post-processing, so it is logged and swallowed.
+
+        CONTRACT: when `conn` is supplied this write JOINS the caller's
+        explicit begin() block so the journal `post_processed` transition
+        CO-COMMITS atomically with the `nzblog`-delete in that block. In that
+        mode a failure MUST propagate so the whole block rolls back — nzblog
+        must never be deleted while the journal still says
+        post_processing/moved. The swallow-and-continue contract applies ONLY
+        to the own-transaction (conn is None) additive markers.
+        """
+        from comicarr.app.downloads import journal
+
+        rkey = None
+        try:
+            rkey = self._journal_release_key(issueid=issueid, issuearcid=issuearcid)
+            if payload is None:
+                payload = {
+                    "issueid": issueid if issueid is not None else self.issueid,
+                    "issuearcid": issuearcid if issuearcid is not None else self.issuearcid,
+                    "comicid": self.comicid,
+                    "nzb_name": self.nzb_name,
+                    "nzb_folder": self.nzb_folder,
+                    "apicall": getattr(self, "apicall", False),
+                    "ddl": getattr(self, "ddl", False),
+                }
+            journal.record_transition(
+                rkey,
+                stage,
+                payload=payload,
+                conn=conn,
+                issueid=issueid if issueid is not None else self.issueid,
+            )
+            logger.fdebug("%s [JOURNAL] %s for %s" % (self.module, stage, rkey))
+        except Exception as e:
+            # conn-mode: must roll the whole block back (a swallowed failure
+            # would delete nzblog while the journal still said
+            # post_processing/moved). Own-txn additive markers swallow.
+            if conn is not None:
+                raise
+            logger.error("%s [JOURNAL] %s transition failed (inert, continuing): %s" % (self.module, stage, e))
 
     def _log(self, message, level=logger):  # .message):  #level=logger.MESSAGE):
         """
@@ -3058,6 +3185,9 @@ class PostProcessor(object):
                         )
                         # this is also for issues that are part of a story arc, and don't belong to a watchlist series (ie. one-off's)
 
+                        # pre-move marker
+                        self._journal_pp("post_processing", issuearcid=ml["IssueArcID"])
+
                         try:
                             checkspace = helpers.get_free_space(grdst)
                             if checkspace is False:
@@ -3081,6 +3211,9 @@ class PostProcessor(object):
                             )
                             return
 
+                        # post-move, pre-tidyup marker
+                        self._journal_pp("moved", issuearcid=ml["IssueArcID"])
+
                         # tidyup old path
                         if any([comicarr.CONFIG.FILE_OPTS == "move", comicarr.CONFIG.FILE_OPTS == "copy"]):
                             if mult_count is False:
@@ -3094,6 +3227,11 @@ class PostProcessor(object):
                         # if it was downloaded via comicarr from the storyarc section, it will have an 'S' in the nzblog
                         # if it was downloaded outside of comicarr and/or not from the storyarc section, it will be a normal issueid in the nzblog
                         # IssArcID = 'S' + str(ml['IssueArcID'])
+                        #
+                        # journal post_processed co-commits with the nzblog
+                        # delete in one begin() so the row is never terminal
+                        # while nzblog is still present (conn-mode _journal_pp
+                        # re-raises ⇒ a failure rolls both back).
                         with db.get_engine().begin() as conn:
                             conn.execute(
                                 delete(nzblog).where(
@@ -3107,6 +3245,7 @@ class PostProcessor(object):
                                     and_(nzblog.c.IssueID == str(ml["IssueArcID"]), nzblog.c.SARC == ml["StoryArc"])
                                 )
                             )
+                            self._journal_pp("post_processed", issuearcid=ml["IssueArcID"], conn=conn)
 
                         logger.fdebug("%s IssueArcID: %s" % (module, ml["IssueArcID"]))
                         newVal = {"Status": "Downloaded", "Location": grab_dst}
@@ -3160,6 +3299,10 @@ class PostProcessor(object):
                         )
                     except Exception as e:
                         logger.error("[PP] Failed to send notification: %s" % e)
+
+                    # terminal marker (no-op if co-committed above; sole
+                    # marker on the no-move branch)
+                    self._journal_pp("post_processed", issuearcid=ml["IssueArcID"])
 
         if (
             all([self.nzb_name != "Manual Run", self.apicall is False])
@@ -3925,6 +4068,9 @@ class PostProcessor(object):
                         "%s[%s] %s into directory : %s" % (module, comicarr.CONFIG.FILE_OPTS, ofilename, grab_dst)
                     )
 
+                    # pre-move marker
+                    self._journal_pp("post_processing", issueid=issueid, issuearcid=issuearcid)
+
                     try:
                         checkspace = helpers.get_free_space(grdst)
                         if checkspace is False:
@@ -3940,13 +4086,20 @@ class PostProcessor(object):
                         self.valreturn.append({"self.log": self.log, "mode": "stop"})
                         return self.queue.put(self.valreturn)
 
+                    # post-move, pre-tidyup marker
+                    self._journal_pp("moved", issueid=issueid, issuearcid=issuearcid)
+
                     # tidyup old path
                     if any([comicarr.CONFIG.FILE_OPTS == "move", comicarr.CONFIG.FILE_OPTS == "copy"]):
                         self.tidyup(src_location, True, filename=os.path.basename(orig_filename))
 
-                    # delete entry from nzblog table
+                    # journal post_processed co-commits with the nzblog delete
+                    # in one begin() so the row is never terminal while nzblog
+                    # is still present (conn-mode _journal_pp re-raises ⇒ a
+                    # failure rolls both back).
                     with db.get_engine().begin() as conn:
                         conn.execute(delete(nzblog).where(nzblog.c.IssueID == issueid))
+                        self._journal_pp("post_processed", issueid=issueid, issuearcid=issuearcid, conn=conn)
 
                     if (sandwich is not None and "S" in sandwich) or "_" in issueid:
                         logger.info("%s IssueArcID is : %s" % (module, issuearcid))
@@ -4010,6 +4163,10 @@ class PostProcessor(object):
                         )
                     except Exception as e:
                         logger.error("[PP] Failed to send notification: %s" % e)
+
+                    # terminal marker (no-op if co-committed above; sole
+                    # marker on the no-move branch)
+                    self._journal_pp("post_processed", issueid=issueid, issuearcid=issuearcid)
 
                     self.valreturn.append({"self.log": self.log, "mode": "stop"})
 
@@ -4182,6 +4339,10 @@ class PostProcessor(object):
                 if any(f.lower().endswith(ext) for ext in self.extensions):
                     manga_files.append(os.path.join(root, f))
 
+        # Deterministic, name-ordered processing so chapters import in order
+        # (ch1 before ch2) regardless of filesystem walk order across platforms.
+        manga_files.sort()
+
         if not manga_files:
             self._log("No manga files found in download directory")
             logger.warn("%s No manga files in: %s" % (module, nzb_dir))
@@ -4216,9 +4377,26 @@ class PostProcessor(object):
                 self.valreturn.append({"self.log": self.log, "mode": "stop"})
                 return self.queue.put(self.valreturn)
 
+        # pre-move marker (release-level: manga matches per-chapter, so this
+        # is keyed on the PostProcessor identity; per-chapter post_processed
+        # below keys on the matched IssueID)
+        self._journal_pp("post_processing")
+
         # --- Process each manga file ---
         processed = 0
         last_matched_issueid = None
+        # P2-6: every chapter in a manga pack shares ONE release_key (the
+        # release-level propagated key from postprocess_main's atomic claim).
+        # Writing the terminal `post_processed` marker per-chapter terminalizes
+        # that shared row on chapter 1, so a mid-loop restart leaves chapters
+        # 2..N abandoned (replay skip-terminal). Fix: collect each matched
+        # chapter's IssueID and defer the nzblog-delete + the SINGLE terminal
+        # `post_processed` write to AFTER the full loop completes, all in one
+        # begin() block so the U9 atomic nzblog-delete+post_processed contract
+        # is preserved (nzblog is never deleted while the journal is
+        # non-terminal) AND the row only goes terminal once every discovered
+        # chapter has been moved.
+        matched_issueids = []
         for filepath in manga_files:
             filename = os.path.basename(filepath)
             parsed = parse_manga_filename(filename)
@@ -4238,6 +4416,19 @@ class PostProcessor(object):
                 logger.error("%s Failed to move %s: %s" % (module, filename, e))
                 self._log("Failed to move/copy manga file: %s" % filename)
                 continue
+
+            # P1: do NOT emit per-file `moved` here. Every chapter in a manga
+            # pack shares ONE release_key; advancing it to `moved` after
+            # chapter 1 makes the replay finalizer treat the release as
+            # "physical move committed, finish DB facts only, NEVER re-import"
+            # — so a crash after chapter 1 but before the post-loop block
+            # strands chapters 2..N. Keep the shared row at `post_processing`
+            # (idempotent, monotonic no-op after the first write) so a mid-loop
+            # crash makes the finalizer re-drive the manga in FULL: chapter 1's
+            # source file is already gone (won't re-match/double-import) and
+            # only the unmoved chapters 2..N get processed. The single `moved`
+            # marker is written ONCE after the loop completes (below).
+            self._journal_pp("post_processing")
 
             # --- Match to a chapter/issue in the database ---
             matching = None
@@ -4297,9 +4488,11 @@ class PostProcessor(object):
                 logger.info("%s Matched and marked downloaded: %s (IssueID: %s)" % (module, filename, issueid))
                 self._log("Matched to chapter IssueID: %s" % issueid)
 
-                # Clean up nzblog entry
-                with db.get_engine().begin() as conn:
-                    conn.execute(delete(nzblog).where(nzblog.c.IssueID == issueid))
+                # P2-6: do NOT write the shared release_key's terminal
+                # `post_processed` here (it would strand chapters 2..N on a
+                # restart). Defer the nzblog-delete to the post-loop atomic
+                # block; record this chapter as matched.
+                matched_issueids.append(issueid)
 
                 # Update snatched table
                 db.upsert(
@@ -4340,6 +4533,33 @@ class PostProcessor(object):
                 comicarr.APILOCK.release()
             except Exception:
                 pass
+
+        # P2-6 terminal marker — written ONCE, AFTER the full chapter loop
+        # completes (all discovered chapters moved), so a mid-loop restart
+        # leaves the shared release_key row at `post_processing`/`moved` (NOT
+        # terminal) and the replay finalizer re-drives the remaining chapters
+        # (idempotent move) instead of skip-terminal-stranding them. The
+        # nzblog-delete for every matched chapter co-commits with the single
+        # `post_processed` write in ONE begin() block (U9 atomic contract:
+        # nzblog is never deleted while the journal is non-terminal;
+        # conn-mode _journal_pp re-raises so a failure rolls back all the
+        # deletes AND the terminal marker together). MUST stay gated on
+        # processed > 0: if nothing matched/moved the row deliberately stays
+        # at post_processing so the replay finalizer re-drives it.
+        if processed > 0:
+            # P1: the single authoritative `moved` marker — written ONCE,
+            # after the FULL chapter loop completes (every discovered chapter
+            # physically moved), immediately before the terminal
+            # nzblog-delete + `post_processed` block. This keeps the shared
+            # release_key's lifecycle `post_processing → moved → post_processed`
+            # while ensuring a mid-loop crash leaves the row at
+            # `post_processing` (re-drive in full), never a premature `moved`
+            # that would strand chapters 2..N.
+            self._journal_pp("moved", issueid=last_matched_issueid)
+            with db.get_engine().begin() as conn:
+                for mid in matched_issueids:
+                    conn.execute(delete(nzblog).where(nzblog.c.IssueID == mid))
+                self._journal_pp("post_processed", issueid=last_matched_issueid, conn=conn)
 
         result = {"self.log": self.log, "mode": "stop", "comicid": self.comicid}
         if last_matched_issueid:
@@ -4975,6 +5195,9 @@ class PostProcessor(object):
         logger.fdebug("%s Source: %s" % (module, src))
         logger.fdebug("%s Destination: %s" % (module, dst))
 
+        # pre-move marker
+        self._journal_pp("post_processing", issueid=issueid)
+
         if ml is None:
             # downtype = for use with updater on history table to set status to 'Downloaded'
             downtype = "True"
@@ -5010,6 +5233,9 @@ class PostProcessor(object):
                 logger.error("%s Post-Processing ABORTED" % module)
                 self.valreturn.append({"self.log": self.log, "mode": "stop"})
                 return self.queue.put(self.valreturn)
+
+            # post-move, pre-tidyup marker
+            self._journal_pp("moved", issueid=issueid)
 
             # tidyup old path
             if any([comicarr.CONFIG.FILE_OPTS == "move", comicarr.CONFIG.FILE_OPTS == "copy"]):
@@ -5052,6 +5278,9 @@ class PostProcessor(object):
                 return self.queue.put(self.valreturn)
             logger.info("%s %s successful to : %s" % (module, comicarr.CONFIG.FILE_OPTS, dst))
 
+            # post-move, pre-tidyup marker
+            self._journal_pp("moved", issueid=issueid)
+
             if any([comicarr.CONFIG.FILE_OPTS == "move", comicarr.CONFIG.FILE_OPTS == "copy"]):
                 self.tidyup(odir, True, subpath, filename=os.path.basename(orig_filename))
 
@@ -5079,9 +5308,14 @@ class PostProcessor(object):
         else:
             self.fileop = shutil.move
 
-        # delete entry from nzblog table
+        # journal post_processed co-commits with the nzblog delete in one
+        # begin() so the row is never terminal while nzblog is still present
+        # (conn-mode _journal_pp re-raises ⇒ a failure rolls both back).
+        # Status=Post-Processed is delegated to updater.foundsearch below in a
+        # separate txn; the finalizer recognizes done via the marker.
         with db.get_engine().begin() as conn:
             conn.execute(delete(nzblog).where(nzblog.c.IssueID == issueid))
+            self._journal_pp("post_processed", issueid=issueid, conn=conn)
 
         updater.totals(comicid, havefiles="+1", issueid=issueid, file=dst)
 
@@ -5193,10 +5427,17 @@ class PostProcessor(object):
                         except Exception as e:
                             logger.error("%s Failed to %s %s: %s" % (module, comicarr.CONFIG.ARC_FILEOPS, grab_src, e))
                             return
+
+                        # post-move marker, secondary (COPY2ARCDIR) move —
+                        # markers must bracket EVERY destructive file_ops
+                        self._journal_pp("moved", issuearcid=arcinfo["IssueArcID"])
                     else:
                         grab_dst = dst
 
-                    # delete entry from nzblog table in case it was forced via the Story Arc Page
+                    # secondary (story-arc) op: journal post_processed keyed on
+                    # arcinfo["IssueArcID"] co-commits with this story-arc
+                    # nzblog delete in one begin() so the row is never terminal
+                    # while nzblog is still present.
                     IssArcID = "S" + str(arcinfo["IssueArcID"])
                     with db.get_engine().begin() as conn:
                         conn.execute(
@@ -5204,6 +5445,7 @@ class PostProcessor(object):
                                 and_(nzblog.c.IssueID == IssArcID, nzblog.c.SARC == arcinfo["StoryArc"])
                             )
                         )
+                        self._journal_pp("post_processed", issuearcid=arcinfo["IssueArcID"], conn=conn)
 
                     logger.fdebug("%s IssueArcID: %s" % (module, ml["IssueArcID"]))
                     ctrlVal = {"IssueArcID": arcinfo["IssueArcID"]}
@@ -5279,6 +5521,10 @@ class PostProcessor(object):
 
         logger.info("%s Post-Processing completed for: %s %s" % (module, series, dispiss))
         self._log("Post Processing SUCCESSFUL! ")
+
+        # terminal marker (no-op if co-committed above; sole marker on the
+        # no-move branch)
+        self._journal_pp("post_processed", issueid=issueid)
 
         self.valreturn.append({"self.log": self.log, "mode": "stop", "issueid": issueid, "comicid": comicid})
 
