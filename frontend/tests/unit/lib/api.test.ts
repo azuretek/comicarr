@@ -12,6 +12,8 @@ import {
   login,
   logout,
   checkSession,
+  checkSetup,
+  setupCredentials,
   ApiError,
   getErrorMessage,
   isRetryableError,
@@ -252,6 +254,116 @@ describe("API Client", () => {
 
       const result = await checkSession();
       expect(result.authenticated).toBe(false);
+    });
+  });
+
+  // ===========================================================================
+  // checkSetup function
+  // ===========================================================================
+
+  describe("checkSetup", () => {
+    it("should return needs_setup=true for 200 response with needs_setup", async () => {
+      server.use(
+        http.get("/api/auth/check-setup", () => {
+          return HttpResponse.json({ success: true, needs_setup: true });
+        }),
+      );
+
+      const result = await checkSetup();
+      expect(result.needs_setup).toBe(true);
+    });
+
+    it("should return needs_setup=true when setup gate returns 503", async () => {
+      server.use(
+        http.get("/api/auth/check-setup", () => {
+          return HttpResponse.json(
+            {
+              detail:
+                "Setup required. Please configure credentials via the setup page.",
+            },
+            { status: 503 },
+          );
+        }),
+      );
+
+      const result = await checkSetup();
+      expect(result.needs_setup).toBe(true);
+    });
+
+    it("should return needs_setup=true for any 503 from check-setup", async () => {
+      server.use(
+        http.get("/api/auth/check-setup", () => {
+          return HttpResponse.json(
+            { detail: "Service temporarily unavailable" },
+            { status: 503 },
+          );
+        }),
+      );
+
+      const result = await checkSetup();
+      expect(result.needs_setup).toBe(true);
+    });
+
+    it("should return needs_setup=true on network failure during initial load", async () => {
+      server.use(
+        http.get("/api/auth/check-setup", () => {
+          return HttpResponse.error();
+        }),
+      );
+
+      const result = await checkSetup({ initialLoad: true });
+      expect(result.needs_setup).toBe(true);
+    });
+
+    it("should return needs_setup=false on network failure after initial load", async () => {
+      server.use(
+        http.get("/api/auth/check-setup", () => {
+          return HttpResponse.error();
+        }),
+      );
+
+      const result = await checkSetup();
+      expect(result.needs_setup).toBe(false);
+    });
+
+    it("should throw on network failure during restart poll", async () => {
+      server.use(
+        http.get("/api/auth/check-setup", () => {
+          return HttpResponse.error();
+        }),
+      );
+
+      await expect(checkSetup({ restartPoll: true })).rejects.toThrow();
+    });
+  });
+
+  // ===========================================================================
+  // setupCredentials function
+  // ===========================================================================
+
+  describe("setupCredentials", () => {
+    it("should return backend error message on 400", async () => {
+      server.use(
+        http.post("/api/auth/setup", () => {
+          return HttpResponse.json(
+            {
+              success: false,
+              error: "Invalid setup token. Check the server console log.",
+            },
+            { status: 400 },
+          );
+        }),
+      );
+
+      const result = await setupCredentials(
+        "admin",
+        "password123",
+        "bad-token",
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toBe(
+        "Invalid setup token. Check the server console log.",
+      );
     });
   });
 });

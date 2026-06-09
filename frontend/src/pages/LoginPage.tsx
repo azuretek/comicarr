@@ -9,7 +9,7 @@ import {
   ArrowRight,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { checkSetup, setupCredentials } from "@/lib/api";
+import { checkHealth, checkSetup, setupCredentials } from "@/lib/api";
 import { Kbd } from "@/components/ui/kbd";
 import GridShader from "@/components/login/GridShader";
 import Logo from "@/components/Logo";
@@ -54,6 +54,7 @@ function SetupForm() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [setupToken, setSetupToken] = useState("");
   const [focus, setFocus] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -77,23 +78,35 @@ function SetupForm() {
 
     setIsSubmitting(true);
     try {
-      const result = await setupCredentials(username, password);
+      const result = await setupCredentials(
+        username,
+        password,
+        setupToken.trim() || undefined,
+      );
       if (result.success) {
         setError("");
         const pollUntilReady = async () => {
+          let sawDowntime = result.needs_restart === false;
           for (let i = 0; i < 30; i++) {
             await new Promise((r) => setTimeout(r, 2000));
             try {
-              const resp = await checkSetup();
-              if (!resp.needs_setup) {
+              if (!(await checkHealth())) {
+                sawDowntime = true;
+                continue;
+              }
+              const resp = await checkSetup({ restartPoll: true });
+              if (!resp.needs_setup && sawDowntime) {
                 window.location.href = "/";
                 return;
               }
             } catch {
-              // still restarting
+              sawDowntime = true;
             }
           }
-          window.location.href = "/";
+          setError(
+            "Server restart timed out. Refresh the page to try logging in.",
+          );
+          setIsSubmitting(false);
         };
         pollUntilReady();
       } else {
@@ -165,6 +178,28 @@ function SetupForm() {
             className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)] tracking-[0.15em]"
           />
         </FieldShell>
+      </div>
+
+      <div>
+        <MonoLabel>Setup token (optional)</MonoLabel>
+        <FieldShell icon={ShieldCheck} focused={focus === "t"}>
+          <input
+            type="text"
+            placeholder="from server logs if required"
+            value={setupToken}
+            onChange={(e) => setSetupToken(e.target.value)}
+            onFocus={() => setFocus("t")}
+            onBlur={() => setFocus(null)}
+            disabled={isSubmitting}
+            autoComplete="off"
+            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)] font-mono"
+          />
+        </FieldShell>
+        <p className="mt-1.5 font-mono text-[10px] text-muted-foreground leading-relaxed">
+          Docker installs print{" "}
+          <span className="text-foreground/80">[SETUP] Setup token:</span> in
+          container logs when a token is required.
+        </p>
       </div>
 
       {error && (
