@@ -12,6 +12,7 @@ import { NotificationsTab } from "@/components/settings/NotificationsTab";
 import { MediaManagementTab } from "@/components/settings/MediaManagementTab";
 import { SaveButton } from "@/components/settings/SaveButton";
 import PageHeader from "@/components/layout/PageHeader";
+import { prepareConfigSaveData } from "@/lib/configSave";
 
 type SectionId =
   | "general"
@@ -44,6 +45,9 @@ export default function SettingsPage() {
   const [section, setSection] = useState<SectionId>("general");
   const [formData, setFormData] = useState<Record<string, unknown>>({});
   const [originalData, setOriginalData] = useState<Record<string, unknown>>({});
+  const [regeneratedApiKey, setRegeneratedApiKey] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     if (config && Object.keys(formData).length === 0) {
@@ -105,10 +109,7 @@ export default function SettingsPage() {
       return;
     }
     try {
-      const saveData = { ...formData };
-      if (!saveData.ai_api_key && config?.ai_api_key_set) {
-        delete saveData.ai_api_key;
-      }
+      const saveData = prepareConfigSaveData(formData, config);
       await updateConfigMutation.mutateAsync(saveData);
       addToast({ type: "success", message: "Settings saved successfully" });
       setOriginalData(formData);
@@ -162,6 +163,11 @@ export default function SettingsPage() {
 
   const configData = (config ?? {}) as Record<string, unknown>;
   const tabProps = { config: configData, formData, onChange: handleChange };
+  const apiTabProps = {
+    ...tabProps,
+    regeneratedApiKey,
+    onRegeneratedApiKey: setRegeneratedApiKey,
+  };
 
   return (
     <div className="h-full flex flex-col page-transition">
@@ -228,7 +234,7 @@ export default function SettingsPage() {
           <div className="px-4 py-5 md:px-6 md:py-6 max-w-3xl pb-24">
             {section === "general" && <GeneralTab {...tabProps} />}
             {section === "interface" && <InterfaceTab {...tabProps} />}
-            {section === "api" && <ApiTab {...tabProps} />}
+            {section === "api" && <ApiTab {...apiTabProps} />}
             {section === "search" && <SearchTab {...tabProps} />}
             {section === "media" && <MediaManagementTab {...tabProps} />}
             {section === "notifications" && <NotificationsTab {...tabProps} />}

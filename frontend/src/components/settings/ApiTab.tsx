@@ -1,23 +1,43 @@
-import { useState } from "react";
 import { SettingGroup } from "./SettingGroup";
 import { SettingField } from "./SettingField";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { Copy, RefreshCw } from "lucide-react";
+import { useGenerateApiKey } from "@/hooks/useConfig";
 
 interface ApiTabProps {
   config: Record<string, unknown>;
   formData: Record<string, unknown>;
   onChange: (key: string, value: string | boolean) => void;
+  regeneratedApiKey: string | null;
+  onRegeneratedApiKey: (apiKey: string) => void;
 }
 
-export function ApiTab({ config, formData, onChange }: ApiTabProps) {
+export function ApiTab({
+  config,
+  formData,
+  onChange,
+  regeneratedApiKey,
+  onRegeneratedApiKey,
+}: ApiTabProps) {
   const { addToast } = useToast();
-  const [isRegenerating, setIsRegenerating] = useState(false);
+  const generateApiKey = useGenerateApiKey();
+  const displayedApiKey = regeneratedApiKey || "";
+  const apiKeyIsSet = (config.api_key_set as boolean) || false;
+  const comicvineApiIsSet = (config.comicvine_api_set as boolean) || false;
+  const metronPasswordIsSet = (config.metron_password_set as boolean) || false;
 
   const handleCopyApiKey = async () => {
+    if (!displayedApiKey) {
+      addToast({
+        type: "error",
+        message: "Regenerate the API key before copying it.",
+      });
+      return;
+    }
+
     try {
-      await navigator.clipboard.writeText((config.api_key as string) ?? "");
+      await navigator.clipboard.writeText(displayedApiKey);
       addToast({
         type: "success",
         message: "API key copied to clipboard",
@@ -39,21 +59,18 @@ export function ApiTab({ config, formData, onChange }: ApiTabProps) {
       return;
     }
 
-    setIsRegenerating(true);
     try {
-      const newApiKey = crypto.randomUUID().replace(/-/g, "");
-      onChange("api_key", newApiKey);
+      const newApiKey = await generateApiKey.mutateAsync();
+      onRegeneratedApiKey(newApiKey);
       addToast({
         type: "success",
-        message: "API key regenerated. Remember to save your changes!",
+        message: "API key regenerated.",
       });
     } catch {
       addToast({
         type: "error",
         message: "Failed to regenerate API key",
       });
-    } finally {
-      setIsRegenerating(false);
     }
   };
 
@@ -71,8 +88,11 @@ export function ApiTab({ config, formData, onChange }: ApiTabProps) {
           <div className="flex space-x-2">
             <input
               type="text"
-              value={
-                (formData.api_key as string) || (config.api_key as string) || ""
+              value={displayedApiKey}
+              placeholder={
+                apiKeyIsSet
+                  ? "Configured - regenerate to view a new key"
+                  : "No API key configured"
               }
               readOnly
               className="flex-1 px-3 py-2 border border-input rounded-md bg-background font-mono text-sm"
@@ -82,6 +102,7 @@ export function ApiTab({ config, formData, onChange }: ApiTabProps) {
               variant="outline"
               size="icon"
               onClick={handleCopyApiKey}
+              disabled={!displayedApiKey}
               title="Copy to clipboard"
             >
               <Copy className="h-4 w-4" />
@@ -91,11 +112,11 @@ export function ApiTab({ config, formData, onChange }: ApiTabProps) {
               variant="outline"
               size="icon"
               onClick={handleRegenerateApiKey}
-              disabled={isRegenerating}
+              disabled={generateApiKey.isPending}
               title="Regenerate API key"
             >
               <RefreshCw
-                className={`h-4 w-4 ${isRegenerating ? "animate-spin" : ""}`}
+                className={`h-4 w-4 ${generateApiKey.isPending ? "animate-spin" : ""}`}
               />
             </Button>
           </div>
@@ -112,11 +133,19 @@ export function ApiTab({ config, formData, onChange }: ApiTabProps) {
         >
           <SettingField
             label="Comic Vine API Key"
-            value={formData.comicvine_api as string | undefined}
-            type="text"
+            value={(formData.comicvine_api as string | undefined) || ""}
+            type="password"
             onChange={(value) => onChange("comicvine_api", value as string)}
-            placeholder="Enter your 40-character Comic Vine API key"
-            helpText="Get your API key from https://comicvine.gamespot.com/api/"
+            placeholder={
+              comicvineApiIsSet
+                ? "Key saved (enter new value to change)"
+                : "Enter your 40-character Comic Vine API key"
+            }
+            helpText={
+              comicvineApiIsSet && !formData.comicvine_api
+                ? "Comic Vine API key is configured. Enter a new value to change it."
+                : "Get your API key from https://comicvine.gamespot.com/api/"
+            }
           />
           <SettingField
             label="Verify SSL"
@@ -162,7 +191,16 @@ export function ApiTab({ config, formData, onChange }: ApiTabProps) {
             value={formData.metron_password as string | undefined}
             type="password"
             onChange={(value) => onChange("metron_password", value as string)}
-            placeholder="Your Metron password"
+            placeholder={
+              metronPasswordIsSet
+                ? "Password saved (enter new value to change)"
+                : "Your Metron password"
+            }
+            helpText={
+              metronPasswordIsSet && !formData.metron_password
+                ? "Metron password is configured. Enter a new value to change it."
+                : "Register at https://metron.cloud"
+            }
           />
         </SettingGroup>
       )}

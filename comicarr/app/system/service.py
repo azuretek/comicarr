@@ -21,6 +21,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import shlex
 import subprocess
 import sys
@@ -34,6 +35,11 @@ from comicarr.tables import comics, jobhistory, storyarcs
 
 # Shared rate limiter instance (same object used by CherryPy and FastAPI)
 _rate_limiter = LoginRateLimiter()
+
+
+def _secret_is_configured(value):
+    """Return True when a config secret has a meaningful stored value."""
+    return bool(value and value != "None")
 
 
 def verify_login(ctx, username, password, ip):
@@ -193,7 +199,6 @@ def get_safe_config(ctx):
         "LOWERCASE_FILENAMES",
         "FOLDER_FORMAT",
         "FILE_FORMAT",
-        "COMICVINE_API",
         "COMICVINE_ENABLED",
         "MANGADEX_ENABLED",
         "CV_VERIFY",
@@ -208,7 +213,6 @@ def get_safe_config(ctx):
         "MINSIZE",
         "USE_MAXSIZE",
         "MAXSIZE",
-        "API_KEY",
         "ENABLE_META",
         "OPDS_ENABLE",
         "OPDS_PAGESIZE",
@@ -234,7 +238,6 @@ def get_safe_config(ctx):
         "IMP_SERIESFOLDERS",
         # Notification services
         "PROWL_ENABLED",
-        "PROWL_KEYS",
         "PROWL_PRIORITY",
         "PROWL_ONSNATCH",
         "PUSHOVER_ENABLED",
@@ -253,13 +256,10 @@ def get_safe_config(ctx):
         "TELEGRAM_ONSNATCH",
         "TELEGRAM_IMAGE",
         "SLACK_ENABLED",
-        "SLACK_WEBHOOK_URL",
         "SLACK_ONSNATCH",
         "MATTERMOST_ENABLED",
-        "MATTERMOST_WEBHOOK_URL",
         "MATTERMOST_ONSNATCH",
         "DISCORD_ENABLED",
-        "DISCORD_WEBHOOK_URL",
         "DISCORD_ONSNATCH",
         "EMAIL_ENABLED",
         "EMAIL_FROM",
@@ -284,9 +284,19 @@ def get_safe_config(ctx):
         if val is not None:
             result[key] = val
 
-    # AI API key: include boolean indicator, not the actual key
-    ai_key = getattr(ctx.config, "AI_API_KEY", None)
-    result["ai_api_key_set"] = bool(ai_key and ai_key != "None")
+    secret_indicators = {
+        "api_key_set": "API_KEY",
+        "comicvine_api_set": "COMICVINE_API",
+        "ai_api_key_set": "AI_API_KEY",
+        "metron_password_set": "METRON_PASSWORD",
+        "mal_client_id_set": "MAL_CLIENT_ID",
+        "prowl_keys_set": "PROWL_KEYS",
+        "slack_webhook_url_set": "SLACK_WEBHOOK_URL",
+        "mattermost_webhook_url_set": "MATTERMOST_WEBHOOK_URL",
+        "discord_webhook_url_set": "DISCORD_WEBHOOK_URL",
+    }
+    for output_key, config_key in secret_indicators.items():
+        result[output_key] = _secret_is_configured(getattr(ctx.config, config_key, None))
 
     # Add derived download client labels (must match config.py enums)
     nzb_labels = {0: "SABnzbd", 1: "NZBGet", 2: "Blackhole", 3: "Disabled"}
@@ -297,14 +307,6 @@ def get_safe_config(ctx):
         result["nzb_downloader_label"] = nzb_labels.get(nzb_val, "None")
     if torrent_val is not None:
         result["torrent_downloader_label"] = torrent_labels.get(torrent_val, "None")
-
-    # Add boolean indicator for METRON_PASSWORD (encrypted, not sent as plaintext)
-    metron_pw = getattr(ctx.config, "METRON_PASSWORD", None)
-    result["metron_password_set"] = bool(metron_pw)
-
-    # Add boolean indicator for MAL_CLIENT_ID (not sent as plaintext)
-    mal_key = getattr(ctx.config, "MAL_CLIENT_ID", None)
-    result["MAL_CLIENT_ID_SET"] = bool(mal_key and mal_key != "None")
 
     # Lowercase all keys for frontend convention
     result = {k.lower(): v for k, v in result.items()}
@@ -486,6 +488,39 @@ def update_config(ctx, key_values):
     comicarr.CONFIG = ctx.config
 
     return {"success": True}
+
+
+def regenerate_api_key(ctx):
+    """Regenerate and persist the full API key."""
+    import comicarr
+
+    if not ctx.config:
+        return {"success": False, "error": "Config not loaded"}
+
+    new_api_key = secrets.token_hex(16)
+    old_api_key = getattr(ctx.config, "API_KEY", None)
+    wrote_to_disk = False
+    try:
+        ctx.config.process_kwargs({"api_key": new_api_key})
+        if ctx.config.writeconfig() is False:
+            raise OSError("config write failed")
+        wrote_to_disk = True
+        ctx.config.configure(update=True, startup=False)
+    except Exception as e:
+        try:
+            ctx.config.process_kwargs({"api_key": old_api_key})
+            if wrote_to_disk:
+                ctx.config.writeconfig()
+                ctx.config.configure(update=True, startup=False)
+        except Exception as rollback_error:
+            logger.error("[API-KEY] Failed to restore previous API key after regeneration failure: %s" % rollback_error)
+        logger.error("[API-KEY] Failed to persist regenerated API key: %s" % e)
+        return {"success": False, "error": "Failed to persist new API key"}
+
+    # Sync back to globals during transition
+    comicarr.CONFIG = ctx.config
+
+    return {"success": True, "api_key": new_api_key}
 
 
 def update_providers(ctx, provider_data):

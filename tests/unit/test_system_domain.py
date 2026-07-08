@@ -4,11 +4,7 @@ Tests for comicarr.app.system domain — Phase 1.
 Covers: auth login/logout, SSE streaming, config endpoints, JWT cookies.
 """
 
-import threading
-import time
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock, call, patch
 
 import comicarr
 
@@ -18,7 +14,6 @@ if comicarr.LOG_LEVEL is None:
 
 from comicarr.app.core.context import AppContext
 from comicarr.app.core.security import (
-    COOKIE_NAME,
     create_session_token,
     validate_jwt_token,
 )
@@ -31,7 +26,15 @@ def _make_test_ctx(**overrides):
     config.HTTP_USERNAME = "admin"
     config.HTTP_PASSWORD = "$2b$12$LJ3m4ys5Cq2n5o/xBp6Mj.abcdefghijklmnopqrstuv"  # bcrypt hash
     config.ENABLE_HTTPS = False
-    config.API_KEY = "test_api_key_32chars_here_pad00"
+    config.API_KEY = "configured-api-key"
+    config.COMICVINE_API = "configured-comicvine-key"
+    config.AI_API_KEY = None
+    config.METRON_PASSWORD = None
+    config.MAL_CLIENT_ID = None
+    config.PROWL_KEYS = "configured-prowl-keys"
+    config.SLACK_WEBHOOK_URL = "configured-slack-webhook"
+    config.MATTERMOST_WEBHOOK_URL = "configured-mattermost-webhook"
+    config.DISCORD_WEBHOOK_URL = "configured-discord-webhook"
     config.SECURE_DIR = "/tmp/test_secure"
     config.OPDS_USERNAME = None
     config.OPDS_PASSWORD = None
@@ -39,6 +42,12 @@ def _make_test_ctx(**overrides):
     config.COMIC_DIR = "/comics"
     config.DESTINATION_DIR = "/downloads"
     config.LOG_DIR = None
+
+    def process_kwargs(values):
+        for key, value in values.items():
+            setattr(config, key.upper(), value)
+
+    config.process_kwargs.side_effect = process_kwargs
 
     defaults = {
         "config": config,
@@ -269,11 +278,47 @@ class TestConfigService:
         assert "http_password" not in result
         assert "HTTP_PASSWORD" not in result
 
-    def test_get_safe_config_includes_api_key(self):
-        """get_safe_config includes api_key for read-only display."""
+    def test_get_safe_config_redacts_long_lived_secrets(self):
+        """get_safe_config exposes secret indicators without secret values."""
         ctx = _make_test_ctx()
         result = system_service.get_safe_config(ctx)
-        assert "api_key" in result
+
+        redacted_keys = [
+            "api_key",
+            "comicvine_api",
+            "prowl_keys",
+            "slack_webhook_url",
+            "mattermost_webhook_url",
+            "discord_webhook_url",
+        ]
+        for key in redacted_keys:
+            assert key not in result
+
+        assert result["api_key_set"] is True
+        assert result["comicvine_api_set"] is True
+        assert result["prowl_keys_set"] is True
+        assert result["slack_webhook_url_set"] is True
+        assert result["mattermost_webhook_url_set"] is True
+        assert result["discord_webhook_url_set"] is True
+
+    def test_get_safe_config_secret_indicators_false_when_empty(self):
+        """Secret indicators are False when existing config values are empty."""
+        ctx = _make_test_ctx()
+        ctx.config.API_KEY = ""
+        ctx.config.COMICVINE_API = "None"
+        ctx.config.PROWL_KEYS = None
+        ctx.config.SLACK_WEBHOOK_URL = ""
+        ctx.config.MATTERMOST_WEBHOOK_URL = "None"
+        ctx.config.DISCORD_WEBHOOK_URL = None
+
+        result = system_service.get_safe_config(ctx)
+
+        assert result["api_key_set"] is False
+        assert result["comicvine_api_set"] is False
+        assert result["prowl_keys_set"] is False
+        assert result["slack_webhook_url_set"] is False
+        assert result["mattermost_webhook_url_set"] is False
+        assert result["discord_webhook_url_set"] is False
 
     def test_get_safe_config_includes_new_keys(self):
         """get_safe_config includes all frontend-needed keys."""
@@ -320,8 +365,14 @@ class TestConfigService:
             result = system_service.get_safe_config(ctx)
             assert result["nzb_downloader_label"] == label, "NZB %d should be %s" % (val, label)
         # Torrent: 0=Watchfolder, 1=uTorrent, 2=rTorrent, 3=Transmission, 4=Deluge, 5=qBittorrent
-        for val, label in [(0, "Watchfolder"), (1, "uTorrent"), (2, "rTorrent"),
-                           (3, "Transmission"), (4, "Deluge"), (5, "qBittorrent")]:
+        for val, label in [
+            (0, "Watchfolder"),
+            (1, "uTorrent"),
+            (2, "rTorrent"),
+            (3, "Transmission"),
+            (4, "Deluge"),
+            (5, "qBittorrent"),
+        ]:
             ctx.config.TORRENT_DOWNLOADER = val
             result = system_service.get_safe_config(ctx)
             assert result["torrent_downloader_label"] == label, "Torrent %d should be %s" % (val, label)
@@ -380,24 +431,89 @@ class TestConfigService:
     def test_update_config_filters_sensitive_keys_from_mixed_payload(self):
         """update_config applies valid keys and silently filters sensitive ones."""
         ctx = _make_test_ctx()
-        result = system_service.update_config(ctx, {
-            "comic_dir": "/new/path",
-            "api_key": "hacked",
-        })
+        result = system_service.update_config(
+            ctx,
+            {
+                "comic_dir": "/new/path",
+                "api_key": "hacked",
+            },
+        )
         assert result["success"] is True
         args = ctx.config.process_kwargs.call_args[0][0]
         assert "COMIC_DIR" in args
         assert "API_KEY" not in args
 
+    @patch("comicarr.app.system.service.secrets.token_hex", return_value="a" * 32)
+    def test_regenerate_api_key_persists_new_key(self, mock_token_hex):
+        """regenerate_api_key creates, persists, and returns a server-side key."""
+        ctx = _make_test_ctx()
+        result = system_service.regenerate_api_key(ctx)
+
+        assert result == {"success": True, "api_key": "a" * 32}
+        assert ctx.config.API_KEY == "a" * 32
+        mock_token_hex.assert_called_once_with(16)
+        ctx.config.process_kwargs.assert_called_once_with({"api_key": "a" * 32})
+        ctx.config.writeconfig.assert_called_once_with()
+        ctx.config.configure.assert_called_once_with(update=True, startup=False)
+
+    def test_regenerate_api_key_rejects_missing_config(self):
+        """regenerate_api_key fails when config is not loaded."""
+        ctx = _make_test_ctx(config=None)
+        result = system_service.regenerate_api_key(ctx)
+        assert result["success"] is False
+        assert result["error"] == "Config not loaded"
+
+    @patch("comicarr.app.system.service.secrets.token_hex", return_value="a" * 32)
+    def test_regenerate_api_key_reports_persistence_failure(self, mock_token_hex):
+        """regenerate_api_key reports persistence failures through the result contract."""
+        ctx = _make_test_ctx()
+        ctx.config.configure.side_effect = RuntimeError("cannot reload")
+
+        result = system_service.regenerate_api_key(ctx)
+
+        assert result == {"success": False, "error": "Failed to persist new API key"}
+        assert ctx.config.API_KEY == "configured-api-key"
+        mock_token_hex.assert_called_once_with(16)
+        assert ctx.config.process_kwargs.call_args_list == [
+            call({"api_key": "a" * 32}),
+            call({"api_key": "configured-api-key"}),
+        ]
+        assert ctx.config.writeconfig.call_count == 2
+        assert ctx.config.configure.call_args_list == [
+            call(update=True, startup=False),
+            call(update=True, startup=False),
+        ]
+
+    @patch("comicarr.app.system.service.secrets.token_hex", return_value="a" * 32)
+    def test_regenerate_api_key_reports_silent_write_failure(self, mock_token_hex):
+        """regenerate_api_key fails when writeconfig reports an unsuccessful write."""
+        ctx = _make_test_ctx()
+        ctx.config.writeconfig.return_value = False
+
+        result = system_service.regenerate_api_key(ctx)
+
+        assert result == {"success": False, "error": "Failed to persist new API key"}
+        assert ctx.config.API_KEY == "configured-api-key"
+        mock_token_hex.assert_called_once_with(16)
+        assert ctx.config.process_kwargs.call_args_list == [
+            call({"api_key": "a" * 32}),
+            call({"api_key": "configured-api-key"}),
+        ]
+        ctx.config.writeconfig.assert_called_once_with()
+        ctx.config.configure.assert_not_called()
+
     def test_update_config_accepts_new_writable_keys(self):
         """update_config accepts newly added writable keys."""
         ctx = _make_test_ctx()
-        result = system_service.update_config(ctx, {
-            "comicvine_enabled": True,
-            "preferred_quality": "high",
-            "use_minsize": True,
-            "minsize": 50,
-        })
+        result = system_service.update_config(
+            ctx,
+            {
+                "comicvine_enabled": True,
+                "preferred_quality": "high",
+                "use_minsize": True,
+                "minsize": 50,
+            },
+        )
         assert result["success"] is True
         args = ctx.config.process_kwargs.call_args[0][0]
         assert "COMICVINE_ENABLED" in args
