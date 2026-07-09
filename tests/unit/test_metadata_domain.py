@@ -1,12 +1,15 @@
 """
 Tests for comicarr.app.metadata domain — Phase 2.
 
-Covers: search routing, comic/issue info lookup, metatag operations.
+Covers: search routing, comic/issue info lookup, metatag operations,
+artwork path validation and cover fetch allowlisting.
 """
 
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PIL import Image
 
 from comicarr.app.core.context import AppContext
 from comicarr.app.metadata import service as metadata_service
@@ -27,6 +30,13 @@ def _make_test_ctx(**overrides):
     }
     defaults.update(overrides)
     return AppContext(**defaults)
+
+
+def _jpeg_bytes(size=(2, 2), color="red"):
+    """Minimal valid JPEG bytes for cache/fetch tests."""
+    buf = BytesIO()
+    Image.new("RGB", size, color=color).save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 # =============================================================================
@@ -107,7 +117,7 @@ class TestSearchManga:
             "pagination": {"total": 1},
         }
 
-        result = metadata_service.search_manga(ctx, name="One Piece")
+        metadata_service.search_manga(ctx, name="One Piece")
         mock_mangadex.search_manga.assert_called_once()
 
 
@@ -204,3 +214,258 @@ class TestMetatag:
         result = metadata_service.manual_metatag(ctx, "issue123")
         assert result["success"] is False
         assert "tagging failed" in result["error"]
+
+
+# =============================================================================
+# Artwork path validation + cover fetch allowlist
+# =============================================================================
+
+
+class TestGetArtwork:
+    @pytest.mark.parametrize(
+        "comic_id",
+        [
+            "",
+            "../etc/passwd",
+            "/etc/passwd",
+            "foo/bar",
+            r"foo\bar",
+            "..",
+            "....//",
+            None,
+        ],
+    )
+    def test_rejects_unsafe_comic_id(self, comic_id, tmp_path):
+        """Unsafe comic_id values return None without path escape."""
+        ctx = _make_test_ctx()
+        ctx.config.CACHE_DIR = str(tmp_path)
+
+        with patch("comicarr.db") as mock_db:
+            result = metadata_service.get_artwork(ctx, comic_id)
+            assert result is None
+            mock_db.select_all.assert_not_called()
+
+    def test_accepts_numeric_and_prefixed_ids_cache_hit(self, tmp_path):
+        """Safe ComicIDs (digits, 4050-N, md-*) return cached path on hit."""
+        ctx = _make_test_ctx()
+        ctx.config.CACHE_DIR = str(tmp_path)
+        comic_id = "4050-12345"
+        cache_file = tmp_path / (comic_id + ".jpg")
+        cache_file.write_bytes(_jpeg_bytes())
+
+        result = metadata_service.get_artwork(ctx, comic_id)
+        assert result == str(cache_file)
+        assert str(result).startswith(str(tmp_path))
+
+    def test_md_comic_id_cache_hit(self, tmp_path):
+        """MangaDex-style md-* ids are accepted for cache paths."""
+        ctx = _make_test_ctx()
+        ctx.config.CACHE_DIR = str(tmp_path)
+        comic_id = "md-abc123"
+        cache_file = tmp_path / (comic_id + ".jpg")
+        cache_file.write_bytes(_jpeg_bytes())
+
+        result = metadata_service.get_artwork(ctx, comic_id)
+        assert result == str(cache_file)
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    @patch("comicarr.db")
+    def test_ssrf_url_does_not_call_network(self, mock_db, mock_get, tmp_path):
+        """Loopback / evil hosts must not trigger requests.get; returns None."""
+        ctx = _make_test_ctx()
+        ctx.config.CACHE_DIR = str(tmp_path)
+        mock_db.select_all.return_value = [
+            {
+                "ComicID": "12345",
+                "ComicImageURL": "http://127.0.0.1/secret",
+                "ComicImageALTURL": "https://evil.example/cover.jpg",
+            }
+        ]
+
+        result = metadata_service.get_artwork(ctx, "12345")
+        assert result is None
+        mock_get.assert_not_called()
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    @patch("comicarr.db")
+    def test_allowlisted_fetch_writes_cache(self, mock_db, mock_get, tmp_path):
+        """Allowlisted ComicVine host is fetched and written under CACHE_DIR."""
+        ctx = _make_test_ctx()
+        ctx.config.CACHE_DIR = str(tmp_path)
+        comic_id = "12345"
+        jpeg = _jpeg_bytes()
+        mock_db.select_all.return_value = [
+            {
+                "ComicID": comic_id,
+                "ComicImageURL": "https://comicvine.gamespot.com/a/uploads/scale_large/cover.jpg",
+                "ComicImageALTURL": None,
+            }
+        ]
+        mock_resp = _mock_image_response(jpeg)
+        mock_get.return_value = mock_resp
+
+        result = metadata_service.get_artwork(ctx, comic_id)
+        expected = str(tmp_path / (comic_id + ".jpg"))
+        assert result == expected
+        assert (tmp_path / (comic_id + ".jpg")).read_bytes() == jpeg
+        mock_get.assert_called_once()
+        call_kwargs = mock_get.call_args.kwargs
+        assert call_kwargs.get("allow_redirects") is False
+        assert call_kwargs.get("timeout") == (5, 10)
+        assert call_kwargs.get("stream") is True
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    @patch("comicarr.db")
+    def test_allowlisted_metron_host(self, mock_db, mock_get, tmp_path):
+        """static.metron.cloud is allowed for cover fetches."""
+        ctx = _make_test_ctx()
+        ctx.config.CACHE_DIR = str(tmp_path)
+        comic_id = "99"
+        jpeg = _jpeg_bytes(color="blue")
+        mock_db.select_all.return_value = [
+            {
+                "ComicID": comic_id,
+                "ComicImageURL": "https://static.metron.cloud/media/series/cover.jpg",
+                "ComicImageALTURL": None,
+            }
+        ]
+        mock_get.return_value = _mock_image_response(jpeg)
+
+        result = metadata_service.get_artwork(ctx, comic_id)
+        assert result == str(tmp_path / (comic_id + ".jpg"))
+        mock_get.assert_called_once()
+
+    def test_missing_cache_dir_returns_none(self):
+        """No CACHE_DIR configured returns None."""
+        ctx = _make_test_ctx()
+        ctx.config.CACHE_DIR = None
+        assert metadata_service.get_artwork(ctx, "12345") is None
+
+
+def _mock_image_response(body, status_code=200, content_type="image/jpeg", content_length=None):
+    """Mock requests response for streaming fetch_allowed_image."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    headers = {}
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    if content_length is not None:
+        headers["Content-Length"] = str(content_length)
+    elif body is not None:
+        headers["Content-Length"] = str(len(body))
+    mock_resp.headers = headers
+    mock_resp.iter_content = MagicMock(return_value=[body] if body else [])
+    mock_resp.close = MagicMock()
+    return mock_resp
+
+
+# =============================================================================
+# image_fetch allowlist + size/type guards
+# =============================================================================
+
+
+class TestImageFetch:
+    def test_is_allowed_image_url_rejects_bad_urls(self):
+        from comicarr.app.metadata.image_fetch import is_allowed_image_url
+
+        assert is_allowed_image_url(None) is False
+        assert is_allowed_image_url("") is False
+        assert is_allowed_image_url("ftp://comicvine.gamespot.com/x.jpg") is False
+        assert is_allowed_image_url("https://user:pass@comicvine.gamespot.com/x.jpg") is False
+        assert is_allowed_image_url("https://evil.example/cover.jpg") is False
+        assert is_allowed_image_url("https://evil.comicvine.gamespot.com/x.jpg") is False
+        assert is_allowed_image_url("http://127.0.0.1/secret") is False
+
+    def test_is_allowed_image_url_accepts_allowlisted(self):
+        from comicarr.app.metadata.image_fetch import ALLOWED_IMAGE_DOMAINS, is_allowed_image_url
+
+        for host in ALLOWED_IMAGE_DOMAINS:
+            assert is_allowed_image_url("https://%s/cover.jpg" % host) is True
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    def test_fetch_rejects_non_200(self, mock_get):
+        from comicarr.app.metadata.image_fetch import fetch_allowed_image
+
+        mock_get.return_value = _mock_image_response(b"x", status_code=302)
+        assert fetch_allowed_image("https://comicvine.gamespot.com/c.jpg") is None
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    def test_fetch_rejects_missing_content_type(self, mock_get):
+        from comicarr.app.metadata.image_fetch import fetch_allowed_image
+
+        mock_get.return_value = _mock_image_response(b"\xff\xd8", content_type=None)
+        assert fetch_allowed_image("https://comicvine.gamespot.com/c.jpg") is None
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    def test_fetch_rejects_disallowed_content_type(self, mock_get):
+        from comicarr.app.metadata.image_fetch import fetch_allowed_image
+
+        mock_get.return_value = _mock_image_response(b"{}", content_type="application/json")
+        assert fetch_allowed_image("https://comicvine.gamespot.com/c.jpg") is None
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    def test_fetch_rejects_content_length_over_cap(self, mock_get):
+        from comicarr.app.metadata import image_fetch as image_fetch_mod
+
+        mock_get.return_value = _mock_image_response(
+            b"x",
+            content_length=image_fetch_mod.MAX_IMAGE_BYTES + 1,
+        )
+        assert image_fetch_mod.fetch_allowed_image("https://comicvine.gamespot.com/c.jpg") is None
+        mock_get.return_value.iter_content.assert_not_called()
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    def test_fetch_aborts_when_stream_exceeds_cap(self, mock_get):
+        from comicarr.app.metadata import image_fetch as image_fetch_mod
+
+        oversized = b"a" * (image_fetch_mod.MAX_IMAGE_BYTES + 1)
+        mock_resp = _mock_image_response(oversized, content_length=None)
+        # omit Content-Length so only streaming budget applies
+        mock_resp.headers = {"Content-Type": "image/jpeg"}
+        mock_get.return_value = mock_resp
+        assert image_fetch_mod.fetch_allowed_image("https://comicvine.gamespot.com/c.jpg") is None
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
+    def test_fetch_success_returns_bytes_and_type(self, mock_get):
+        from comicarr.app.metadata.image_fetch import fetch_allowed_image
+
+        jpeg = _jpeg_bytes()
+        mock_get.return_value = _mock_image_response(jpeg, content_type="image/jpeg; charset=binary")
+        result = fetch_allowed_image("https://comicvine.gamespot.com/c.jpg")
+        assert result == (jpeg, "image/jpeg")
+        assert mock_get.call_args.kwargs.get("stream") is True
+
+
+# =============================================================================
+# image-proxy router (shared helper)
+# =============================================================================
+
+
+class TestImageProxy:
+    def test_non_allowlisted_returns_403(self):
+        from comicarr.app.metadata.router import image_proxy
+
+        response = image_proxy(url="https://evil.example/cover.jpg")
+        assert response.status_code == 403
+        assert response.body  # JSONResponse
+        assert b"Domain not allowed" in response.body
+
+    @patch("comicarr.app.metadata.router.fetch_allowed_image")
+    def test_allowlisted_fetch_failure_returns_502(self, mock_fetch):
+        from comicarr.app.metadata.router import image_proxy
+
+        mock_fetch.return_value = None
+        response = image_proxy(url="https://comicvine.gamespot.com/c.jpg")
+        assert response.status_code == 502
+        assert b"Failed to fetch image" in response.body
+
+    @patch("comicarr.app.metadata.router.fetch_allowed_image")
+    def test_success_returns_image_bytes(self, mock_fetch):
+        from comicarr.app.metadata.router import image_proxy
+
+        jpeg = _jpeg_bytes()
+        mock_fetch.return_value = (jpeg, "image/jpeg")
+        response = image_proxy(url="https://comicvine.gamespot.com/c.jpg")
+        assert response.status_code == 200
+        assert response.body == jpeg
+        assert response.media_type == "image/jpeg"
