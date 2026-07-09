@@ -345,13 +345,13 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
         cinfo = db.select_one(stmt)
         if cinfo is None:
             logger.warn("Unable to locate IssueID of : " + issueid)
-            snatch_status = "MONITOR ERROR"
+            return {"snatch_status": "MONITOR ERROR"}
 
         if cinfo["Status"] != "Snatched" or cinfo["Hash"] is None:
             logger.warn(
                 cinfo["ComicName"] + " #" + cinfo["Issue_Number"] + " is currently in a " + cinfo["Status"] + " Status."
             )
-            snatch_status = "MONITOR ERROR"
+            return {"snatch_status": "MONITOR ERROR"}
 
         torrent_hash = cinfo["Hash"]
 
@@ -361,30 +361,33 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
 
     if not len(torrent_hash) == 40:
         logger.error("Torrent hash is missing, or an invalid hash value has been passed")
-        snatch_status = "MONITOR ERROR"
+        return {"snatch_status": "MONITOR ERROR"}
+
+    if comicarr.USE_RTORRENT:
+        from comicarr import rtorrent_test_client
+
+        rp = rtorrent_test_client.RTorrent()
+        torrent_info = rp.main(torrent_hash, check=True)
+    elif comicarr.USE_DELUGE:
+        from comicarr.torrent.clients import deluge as delu
+
+        dp = delu.TorrentClient()
+        # connect() returns the RPC client on success, or {"status": False, "error": ...}
+        # on failure. Failure dicts are truthy — bare `if not conn` never catches them.
+        conn = dp.connect(comicarr.CONFIG.DELUGE_HOST, comicarr.CONFIG.DELUGE_USERNAME, comicarr.CONFIG.DELUGE_PASSWORD)
+        if conn is False or conn is None or (isinstance(conn, dict) and conn.get("status") is False):
+            logger.warn("Not connected to Deluge!")
+            return {"snatch_status": "MONITOR ERROR"}
+
+        torrent_info = dp.get_torrent(torrent_hash)
     else:
-        if comicarr.USE_RTORRENT:
-            from . import rtorrent_test_client
-
-            rp = rtorrent_test_client.RTorrent()
-            torrent_info = rp.main(torrent_hash, check=True)
-        elif comicarr.USE_DELUGE:
-            from comicarr.torrent.clients import deluge as delu
-
-            dp = delu.TorrentClient()
-            if not dp.connect(
-                comicarr.CONFIG.DELUGE_HOST, comicarr.CONFIG.DELUGE_USERNAME, comicarr.CONFIG.DELUGE_PASSWORD
-            ):
-                logger.warn("Not connected to Deluge!")
-
-            torrent_info = dp.get_torrent(torrent_hash)
-        else:
-            snatch_status = "MONITOR ERROR"
-            return
+        return {"snatch_status": "MONITOR ERROR"}
 
     logger.info("torrent_info: %s" % torrent_info)
 
-    if torrent_info is False or len(torrent_info) == 0:
+    # Falsy covers False (Deluge miss), None (rTorrent check-miss bare return), and {}.
+    # Use `not torrent_info` so None never hits len() and TypeErrors the worker.
+    if not torrent_info:
         # The client was queried and returned no torrent for this hash. This
         # is an EXPLICIT "hash not present in the client" signal — NOT the old
         # silent fall-through (previously this set a lost local snatch_status
@@ -394,7 +397,7 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
         # dict lets U5 recovery classification distinguish "absent from a
         # reachable client" (→ gone, after the done-signal cross-check) from a
         # transient client outage (MONITOR ERROR → unknown). Connection
-        # failures are logged/handled distinctly above and do not reach here.
+        # failures return MONITOR ERROR above and do not reach here.
         logger.warn("torrent not present in client for hash %s (explicit NOT FOUND)." % torrent_hash)
         return {"snatch_status": "NOT FOUND", "hash": torrent_hash}
     else:
@@ -466,7 +469,7 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
                 logger.fdebug("Script result: %s" % out)
             except OSError as e:
                 logger.warn("Unable to run extra_script: %s" % e)
-                snatch_status = "MONITOR ERROR"
+                torrent_info["snatch_status"] = "MONITOR ERROR"
             else:
                 if "Access failed: No such file" in str(out):
                     logger.fdebug(
@@ -481,9 +484,12 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
                 torrent_info["copied_filepath"] = os.path.join(comicarr.CONFIG.PP_SSHLOCALCD, torrent_info["name"])
                 torrent_info["snatch_status"] = snatch_status
         else:
-            if download is True:
-                snatch_status = "IN PROGRESS"
-            elif monitor is True:
+            # Present in client but not finished (or not in download/complete path).
+            # Prefer IN PROGRESS so recovery classifies present torrents as "still"
+            # rather than NOT SNATCHED → absent/gone. NOT FOUND remains the only
+            # explicit absent marker (returned above when the client has no hash).
+            snatch_status = "IN PROGRESS"
+            if monitor is True:
                 if comicarr.USE_DELUGE:
                     pauseit = dp.stop_torrent(torrent_hash)
                     if pauseit is False:
@@ -503,8 +509,7 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
                             torrent_info["copied_filepath"] = torrent_path
                         else:
                             dp.start_torrent(torrent_hash)
-            else:
-                snatch_status = "NOT SNATCHED"
+            torrent_info["snatch_status"] = snatch_status
 
     return torrent_info
 
