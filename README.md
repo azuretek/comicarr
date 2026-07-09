@@ -71,7 +71,7 @@ pip install -r requirements.txt
 3. Build the frontend:
 ```bash
 cd frontend
-npm install
+npm ci
 npm run build
 cd ..
 ```
@@ -95,13 +95,13 @@ On first run:
 ## Project Structure
 
 ```
-├── Comicarr.py          # Main entry point
+├── Comicarr.py          # Main entry point (uvicorn → comicarr.app.main)
 ├── comicarr/            # Python backend package
-│   ├── webserve.py      # Web UI and API routes
+│   ├── app/             # FastAPI domains (routers, services)
 │   ├── search.py        # Search orchestration
 │   ├── postprocessor.py # Download processing
 │   └── ...
-├── frontend/            # React frontend
+├── frontend/            # React 19 + Vite frontend
 │   ├── src/
 │   │   ├── components/  # React components
 │   │   ├── pages/       # Page components
