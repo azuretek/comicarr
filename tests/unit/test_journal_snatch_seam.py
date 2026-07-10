@@ -23,14 +23,14 @@ branch + updater.nzblog) and the DDL snatch seam (service.ddl_downloader
 
 import queue as queuelib
 import types
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import insert, select
 
 import comicarr
 from comicarr import updater
-from comicarr.app.downloads import journal, service
+from comicarr.app.downloads import handoff, journal, service
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import comics, ddl_info, issues, metadata, nzblog, pipeline_journal, snatched
 
@@ -117,6 +117,118 @@ def test_nzb_happy_path_journal_after_snatch_and_nzblog():
     assert jr["stage"] == "snatched"
     assert jr["issueid"] == "I1"
     assert jr["provider"] == "nzbprov"
+
+
+@pytest.mark.parametrize(
+    ("route", "response", "identity_key", "identity"),
+    [
+        ("sabnzbd", {"status": True, "nzo_id": "sab-top-level"}, "nzo_id", "sab-top-level"),
+        ("nzbget", {"status": True, "NZBID": 4815}, "NZBID", "4815"),
+    ],
+)
+def test_route_acceptance_persists_actual_top_level_sender_identity(route, response, identity_key, identity):
+    key = journal.release_key("route-1", "nzbprov")
+    handoff.reserve(
+        key,
+        route,
+        payload={"issueid": "route-1", "provider": "nzbprov"},
+        issueid="route-1",
+        provider="nzbprov",
+    )
+
+    accepted = handoff.record_acceptance(
+        key,
+        route,
+        response,
+        issueid="route-1",
+        provider="nzbprov",
+    )
+
+    row = _journal_row(key)
+    payload = journal.load_payload(row["payload_json"])
+    assert accepted.restart_safe is True
+    assert row["stage"] == journal.SNATCHED
+    assert row["downloader_type"] == route
+    assert payload[identity_key] == identity
+    assert "queue" not in payload
+    assert "apikey" not in str(payload).lower()
+
+
+def test_unsupported_torrent_route_is_manual_review_not_restart_replayed():
+    key = journal.release_key("route-2", "torznab")
+    handoff.reserve(key, "qbittorrent", payload={"issueid": "route-2"}, issueid="route-2", provider="torznab")
+
+    accepted = handoff.record_acceptance(
+        key,
+        "qbittorrent",
+        {"status": True, "hash": "torrent-hash"},
+        issueid="route-2",
+        provider="torznab",
+    )
+
+    assert accepted.manual_review is True
+    assert _journal_row(key)["stage"] == journal.MANUAL_REVIEW
+
+
+def test_supported_torrent_acceptance_persists_hash_in_probe_column():
+    key = journal.release_key("route-torrent", "torznab", nzbname="Torrent.cbz")
+    handoff.reserve(
+        key,
+        "rtorrent",
+        payload={"issueid": "route-torrent", "provider": "torznab", "nzbname": "Torrent.cbz"},
+        issueid="route-torrent",
+        provider="torznab",
+        nzbname="Torrent.cbz",
+    )
+
+    handoff.record_acceptance(
+        key,
+        "rtorrent",
+        {"status": True, "hash": "accepted-hash"},
+        issueid="route-torrent",
+        provider="torznab",
+        nzbname="Torrent.cbz",
+    )
+
+    row = _journal_row(key)
+    assert row["stage"] == journal.SNATCHED
+    assert row["hash"] == "accepted-hash"
+    assert row["downloader_type"] == "rtorrent"
+
+
+def test_reservation_failure_prevents_sender_call(monkeypatch):
+    called = []
+    monkeypatch.setattr(handoff, "reserve", MagicMock(side_effect=handoff.HandoffReservationError("db down")))
+
+    with pytest.raises(handoff.HandoffReservationError):
+        handoff.perform_handoff(
+            "reservation-failed",
+            "sabnzbd",
+            lambda: called.append(True),
+            issueid="reservation-failed",
+            provider="nzbprov",
+        )
+
+    assert called == []
+
+
+def test_handoff_records_route_family_outcome(monkeypatch):
+    from comicarr.app.search import health
+
+    recorded = MagicMock()
+    monkeypatch.setattr(health, "record_route_outcome", recorded)
+    key = journal.release_key("health-route", "nzbprov")
+    handoff.reserve(key, "sabnzbd", issueid="health-route", provider="nzbprov")
+
+    handoff.record_acceptance(
+        key,
+        "sabnzbd",
+        {"status": True, "nzo_id": "health-job"},
+        issueid="health-route",
+        provider="nzbprov",
+    )
+
+    recorded.assert_called_once_with("nzb", success=True, error=None)
 
 
 def test_nzb_journal_write_is_strictly_last_separate_txn():
@@ -291,12 +403,7 @@ def _run_ddl_once(item):
     return q
 
 
-def test_ddl_snatch_atomic_rollback_on_journal_failure(monkeypatch, capture_logs):
-    """P1-3: failure inside the ddl_downloader snatch begin() block rolls back
-    BOTH the status='Downloading' ddl_info row AND the journal row (no
-    half-write), AND the ddl_downloader loop SURVIVES (does not propagate the
-    raise and permanently kill the DDL worker thread). The item is recoverable
-    at startup replay."""
+def test_ddl_reservation_failure_prevents_external_side_effect(monkeypatch, capture_logs):
     monkeypatch.setattr(comicarr.DDL_LOCK, "locked", lambda: False, raising=False)
 
     boom = RuntimeError("journal down inside ddl begin()")
@@ -305,11 +412,11 @@ def test_ddl_snatch_atomic_rollback_on_journal_failure(monkeypatch, capture_logs
         # the "exit" sentinel normally (worker thread stays alive).
         _run_ddl_once(_ddl_item())
 
-    # Atomic: NEITHER row may exist (rolled back together).
-    assert _rows(ddl_info) == []
+    # The durable command is visible as failed, but no journal acceptance and
+    # no external download occurred.
+    assert _rows(ddl_info)[0]["status"] == "Failed"
     assert _rows(pipeline_journal) == []
-    # Loud log, not a silent swallow.
-    assert "snatch atomic block failed" in capture_logs.text
+    assert "external outcome" in capture_logs.text
 
 
 def test_ddl_worker_survives_journal_failure_and_processes_next_item(monkeypatch):
@@ -345,18 +452,18 @@ def test_ddl_worker_survives_journal_failure_and_processes_next_item(monkeypatch
         with pytest.raises(_StopAfterSnatch):
             service.ddl_downloader(q)
 
-    # Item 1 rolled back (journal failed); item 2's snatch block committed —
-    # proves the loop survived item 1's failure.
+    # Item 1 failed before the side effect; item 2 reached its durable
+    # reservation before the sentinel interrupted the sender.
     ddl_rows = _rows(ddl_info)
-    assert [r["ID"] for r in ddl_rows] == ["ddl-2"]
+    assert [r["ID"] for r in ddl_rows] == ["ddl-1", "ddl-2"]
+    assert ddl_rows[0]["status"] == "Failed"
+    assert ddl_rows[1]["status"] == "Downloading"
     jrows = _rows(pipeline_journal)
     assert len(jrows) == 1
     assert jrows[0]["issueid"] == "DI2"
 
 
-def test_ddl_snatch_atomic_cocommit_success(monkeypatch):
-    """On success the ddl_info status='Downloading' row and the journal
-    snatched row are committed together inside the one begin() block."""
+def test_ddl_reservation_persists_before_external_download(monkeypatch):
     monkeypatch.setattr(comicarr.DDL_LOCK, "locked", lambda: False, raising=False)
 
     # The atomic snatch block runs BEFORE the download dispatch. Make the
@@ -382,12 +489,31 @@ def test_ddl_snatch_atomic_cocommit_success(monkeypatch):
     rkey = journal.release_key("DI1", "DDL", nzbname="Saga.DDL.001.cbz", hash=None, discriminant="ddl-1")
     jr = _journal_row(rkey)
     assert jr is not None
-    assert jr["stage"] == "snatched"
+    assert jr["stage"] == "reserved"
     assert jr["provider"] == "DDL"
     assert jr["downloader_type"] == "ddl"
     payload = journal.load_payload(jr["payload_json"])
     assert payload["id"] == "ddl-1"
     assert payload["ddl"] is True
+
+
+def test_ddl_maintenance_fence_retains_durable_queued_command(monkeypatch):
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked
+
+    monkeypatch.setattr(comicarr.DDL_LOCK, "locked", lambda: False, raising=False)
+    monkeypatch.setattr(
+        handoff,
+        "perform_handoff",
+        MagicMock(side_effect=MaintenanceBlocked("maintenance")),
+    )
+
+    _run_ddl_once(_ddl_item(idv="ddl-fenced", issueid="DFENCE"))
+
+    rows = _rows(ddl_info)
+    assert len(rows) == 1
+    assert rows[0]["ID"] == "ddl-fenced"
+    assert rows[0]["status"] == "Queued"
+    assert _rows(pipeline_journal) == []
 
 
 # ---------------------------------------------------------------------------
@@ -458,10 +584,7 @@ def test_nzb_journal_retry_cap_failure_logs_and_keeps_snatch(capture_logs):
 # ---------------------------------------------------------------------------
 
 
-def test_ddl_snatch_failure_reenqueues_item_for_recovery(monkeypatch, capture_logs):
-    """A journal raise inside the DDL snatch begin()-block must re-put the item
-    onto DDL_QUEUE (genuinely recoverable — idempotent upsert + journal write),
-    log loudly, and let the loop survive."""
+def test_ddl_reservation_failure_does_not_requeue_or_redownload(monkeypatch, capture_logs):
     monkeypatch.setattr(comicarr.DDL_LOCK, "locked", lambda: False, raising=False)
 
     boom = RuntimeError("journal down inside ddl begin()")
@@ -469,25 +592,18 @@ def test_ddl_snatch_failure_reenqueues_item_for_recovery(monkeypatch, capture_lo
     with patch.object(journal, "record_transition", side_effect=boom):
         q = _run_ddl_once(item)
 
-    # Rolled back atomically.
-    assert _rows(ddl_info) == []
+    assert _rows(ddl_info)[0]["status"] == "Failed"
     assert _rows(pipeline_journal) == []
-    # The item was re-enqueued (recoverable), not silently dropped.
     requeued = []
     while not q.empty():
         x = q.get_nowait()
         if x != "exit":
             requeued.append(x)
-    assert len(requeued) == 1
-    assert requeued[0]["id"] == "ddl-rq"
-    assert requeued[0]["_journal_retry"] == 1
-    assert "re-enqueued on DDL_QUEUE" in capture_logs.text
+    assert requeued == []
+    assert "not re-downloading" in capture_logs.text
 
 
-def test_ddl_snatch_failure_stops_requeue_after_cap_no_infinite_loop(monkeypatch, capture_logs):
-    """A PERSISTENT journal failure must NOT hot-loop forever: after the
-    bounded cap is exceeded the item is dropped with a loud system-down error
-    and is NOT requeued again."""
+def test_ddl_persistent_reservation_failure_never_hot_loops(monkeypatch, capture_logs):
     monkeypatch.setattr(comicarr.DDL_LOCK, "locked", lambda: False, raising=False)
 
     # A drive-controlled queue: qsize() always reports work so the loop never
@@ -526,15 +642,10 @@ def test_ddl_snatch_failure_stops_requeue_after_cap_no_infinite_loop(monkeypatch
     finally:
         comicarr.DDL_QUEUE = saved
 
-    # cap = _DDL_JOURNAL_REQUEUE_CAP (3): attempts 1..3 requeue (retry
-    # 1,2,3 <= 3), attempt 4 has _journal_retry==4 > cap so it is dropped
-    # (NOT requeued) with a loud system-down error. That is 4 gets of the
-    # item + 1 "exit" = 5 gets total; the backstop (25) must never trigger.
     assert q.gets <= 25, "ddl_downloader hot-looped (cap did not stop requeueing)"
-    assert q.gets == 5
-    assert q.empty()  # final attempt was NOT requeued
-    assert "exceeded requeue cap" in capture_logs.text
-    assert "system down" in capture_logs.text
+    assert q.gets == 2
+    assert q.empty()
+    assert "not re-downloading" in capture_logs.text
     # Durable row is terminal Failed (not left Queued/Downloading) so operators
     # can requeue once the DB recovers; no journal obligation remains open.
     rows = _rows(ddl_info)

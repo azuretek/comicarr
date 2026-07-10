@@ -19,7 +19,6 @@
 #  along with Comicarr.  If not, see <http://www.gnu.org/licenses/>.
 
 import queue
-import threading
 
 import comicarr
 
@@ -75,19 +74,13 @@ class Process(object):
                 ddl=self.ddl,
                 journal_release_key=self.journal_release_key,
             )
-            if any(
-                [
-                    self.nzb_name == "Manual Run",
-                    self.nzb_name == "Manual+Run",
-                    self.apicall is True,
-                    self.issueid is not None,
-                ]
-            ):
-                threading.Thread(target=PostProcess.Process).start()
-            else:
-                thread_ = threading.Thread(target=PostProcess.Process, name="Post-Processing")
-                thread_.start()
-                thread_.join()
+            # This call is intentionally owned by the queue worker. The former
+            # raw detached thread made exceptions invisible to postprocess_main
+            # (and could leave APILOCK held forever). A synchronous call gives
+            # the owner a reliable success/failure boundary and still preserves
+            # PostProcessor's queue result contract.
+            PostProcess.Process()
+            if not ppqueue.empty():
                 chk = ppqueue.get()
                 while True:
                     if chk[0]["mode"] == "fail":
@@ -116,9 +109,7 @@ class Process(object):
                 FailProcess = comicarr.failed.FailedProcessor(
                     nzb_name=self.nzb_name, nzb_folder=self.nzb_folder, queue=ppqueue, prov=provider, id=nzbid
                 )
-                thread_ = threading.Thread(target=FailProcess.Process, name="FAILED Post-Processing")
-                thread_.start()
-                thread_.join()
+                FailProcess.Process()
                 failchk = ppqueue.get()
                 if failchk[0]["mode"] == "retry":
                     logger.info("Attempting to return to search module with " + str(failchk[0]["issueid"]))
@@ -144,9 +135,7 @@ class Process(object):
 
         if retry_outside:
             PostProcess = comicarr.postprocessor.PostProcessor("Manual Run", self.nzb_folder, queue=ppqueue)
-            thread_ = threading.Thread(target=PostProcess.Process, name="Post-Processing")
-            thread_.start()
-            thread_.join()
+            PostProcess.Process()
             chk = ppqueue.get()
             while True:
                 if chk[0]["mode"] == "fail":

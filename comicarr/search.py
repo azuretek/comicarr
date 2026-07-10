@@ -61,6 +61,7 @@ from comicarr.app.common.remote_artifacts import (
     safe_remote_filename,
     write_chunks_atomically,
 )
+from comicarr.app.downloads import handoff
 from comicarr.downloaders import external_server as exs
 from comicarr.tables import (
     annuals,
@@ -1668,6 +1669,8 @@ def verification(verified_matches, is_info):
                         provider=is_info["nzbprov"],
                         hash=searchresult.get("t_hash"),
                         nzbname=nzbname,
+                        journal_release_key=searchresult.get("journal_release_key"),
+                        journal_managed=searchresult.get("journal_managed", False),
                     )
                 notify_snatch(
                     sent_to,
@@ -1733,6 +1736,8 @@ def verification(verified_matches, is_info):
                 IssueArcID=is_info["IssueArcID"],
                 hash=searchresult.get("t_hash"),
                 nzbname=nzbname,
+                journal_release_key=searchresult.get("journal_release_key"),
+                journal_managed=searchresult.get("journal_managed", False),
             )
 
             # send out the notifications for the snatch.
@@ -2995,6 +3000,22 @@ def _nzb_cache_path(cache_dir, nzbname):
     return str(resolve_remote_artifact_path(cache_dir, nzbname))
 
 
+def _configured_torrent_handoff_route():
+    if comicarr.USE_UTORRENT:
+        return "utorrent"
+    if comicarr.USE_RTORRENT:
+        return "rtorrent"
+    if comicarr.USE_TRANSMISSION:
+        return "transmission"
+    if comicarr.USE_DELUGE:
+        return "deluge"
+    if comicarr.USE_QBITTORRENT:
+        return "qbittorrent"
+    if comicarr.USE_WATCHDIR:
+        return "watchdir"
+    return "unknown"
+
+
 def searcher(
     nzbprov,
     nzbname,
@@ -3026,6 +3047,25 @@ def searcher(
         IssueArcID = comicinfo[0]["IssueArcID"]
     except Exception:
         IssueArcID = None
+
+    journal_issueid = IssueID if IssueID is not None else IssueArcID
+    from comicarr.app.downloads import journal as pipeline_journal
+
+    journal_payload = {
+        "issueid": journal_issueid,
+        "comicid": ComicID,
+        "provider": tmpprov,
+        "nzbname": nzbname,
+        "comicname": ComicName,
+        "issuenumber": IssueNumber,
+    }
+    journal_release_key = pipeline_journal.release_key(
+        journal_issueid,
+        tmpprov,
+        nzbname=nzbname,
+        discriminant=nzbid or nzbname or journal_payload,
+    )
+    journal_managed = False
 
     # setup the priorities.
     if comicarr.CONFIG.SAB_PRIORITY:
@@ -3320,6 +3360,10 @@ def searcher(
     sent_to = None
     t_hash = None
     if comicarr.CONFIG.ENABLE_DDL is True and "DDL" in nzbprov:
+        # Each durable DDL command owns its own reservation in ddl_downloader;
+        # updater must not create a second generic issue/provider row.
+        journal_release_key = None
+        journal_managed = True
         if all([IssueID is None, IssueArcID is not None]):
             tmp_issueid = IssueArcID
         else:
@@ -3394,8 +3438,21 @@ def searcher(
         if os.path.exists(comicarr.CONFIG.BLACKHOLE_DIR):
             # copy the nzb from nzbpath to blackhole dir.
             try:
-                shutil.move(nzbpath, os.path.join(comicarr.CONFIG.BLACKHOLE_DIR, nzbname))
-            except (OSError, IOError):
+                def _blackhole_sender():
+                    shutil.move(nzbpath, os.path.join(comicarr.CONFIG.BLACKHOLE_DIR, nzbname))
+                    return {"status": True}
+
+                handoff.perform_handoff(
+                    journal_release_key,
+                    "blackhole",
+                    _blackhole_sender,
+                    payload=journal_payload,
+                    issueid=journal_issueid,
+                    provider=tmpprov,
+                    nzbname=nzbname,
+                )
+                journal_managed = True
+            except (OSError, IOError, handoff.HandoffError):
                 logger.warn(
                     "Failed to move nzb into blackhole directory - check blackhole directory and/or permissions."
                 )
@@ -3454,7 +3511,21 @@ def searcher(
         logger.fdebug("Torrent Provider: %s" % nzbprov)
 
         # nzbid = hash for usage with public torrents
-        rcheck = rsscheck.torsend2client(ComicName, IssueNumber, comyear, link, nzbprov, nzbid)
+        torrent_route = _configured_torrent_handoff_route()
+        try:
+            rcheck, _route_acceptance = handoff.perform_handoff(
+                journal_release_key,
+                torrent_route,
+                lambda: rsscheck.torsend2client(ComicName, IssueNumber, comyear, link, nzbprov, nzbid),
+                payload=journal_payload,
+                issueid=journal_issueid,
+                provider=tmpprov,
+                nzbname=nzbname,
+            )
+            journal_managed = True
+        except Exception as e:
+            logger.error("Torrent handoff could not be durably completed: %s" % type(e).__name__)
+            return "torrent-fail"
         if rcheck == "fail":
             if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING:
                 logger.error(
@@ -3514,6 +3585,7 @@ def searcher(
                         "hash": rcheck["hash"],
                         "provider": nzbprov,
                         "nzbname": nzbname,
+                        "journal_release_key": journal_release_key,
                     }
                 )
             elif any([comicarr.USE_RTORRENT, comicarr.USE_DELUGE]) and comicarr.CONFIG.LOCAL_TORRENT_PP:
@@ -3524,6 +3596,7 @@ def searcher(
                         "hash": rcheck["hash"],
                         "provider": nzbprov,
                         "nzbname": nzbname,
+                        "journal_release_key": journal_release_key,
                     }
                 )
             else:
@@ -3542,6 +3615,8 @@ def searcher(
                                     nzbprov,
                                     t_hash,
                                     comicinfo[0]["IssueDate"],
+                                    journal_release_key=journal_release_key,
+                                    journal_managed=True,
                                 )
                                 pnumbers = None
                                 plist = None
@@ -3601,7 +3676,20 @@ def searcher(
         # nzb.get
         if comicarr.USE_NZBGET:
             ss = nzbget.NZBGet()
-            send_to_nzbget = ss.sender(nzbpath)
+            try:
+                send_to_nzbget, _route_acceptance = handoff.perform_handoff(
+                    journal_release_key,
+                    "nzbget",
+                    lambda: ss.sender(nzbpath),
+                    payload=journal_payload,
+                    issueid=journal_issueid,
+                    provider=tmpprov,
+                    nzbname=nzbname,
+                )
+                journal_managed = True
+            except Exception as e:
+                logger.error("NZBGet handoff could not be durably completed: %s" % type(e).__name__)
+                return "nzbget-fail"
             if comicarr.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True:
                 if send_to_nzbget["status"] is True:
                     send_to_nzbget["comicid"] = ComicID
@@ -3611,6 +3699,8 @@ def searcher(
                         send_to_nzbget["issueid"] = "S" + IssueArcID
                     send_to_nzbget["apicall"] = True
                     send_to_nzbget["download_info"] = {"provider": nzbprov, "id": nzbid}
+                    send_to_nzbget["journal_release_key"] = journal_release_key
+                    send_to_nzbget["clientmode"] = "nzbget"
                     comicarr.NZB_QUEUE.put(send_to_nzbget)
                 elif send_to_nzbget["status"] == "double-pp":
                     return send_to_nzbget["status"]
@@ -3758,7 +3848,20 @@ def searcher(
 
             if sab_params is not None:
                 ss = sabnzbd.SABnzbd(sab_params)
-                sendtosab = ss.sender()
+                try:
+                    sendtosab, _route_acceptance = handoff.perform_handoff(
+                        journal_release_key,
+                        "sabnzbd",
+                        ss.sender,
+                        payload=journal_payload,
+                        issueid=journal_issueid,
+                        provider=tmpprov,
+                        nzbname=nzbname,
+                    )
+                    journal_managed = True
+                except Exception as e:
+                    logger.error("SABnzbd handoff could not be durably completed: %s" % type(e).__name__)
+                    return "sab-fail"
                 if all(
                     [
                         sendtosab["status"] is True,
@@ -3772,7 +3875,9 @@ def searcher(
                         sendtosab["issueid"] = "S" + IssueArcID
                     sendtosab["apicall"] = True
                     sendtosab["download_info"] = {"provider": nzbprov, "id": nzbid}
-                    logger.info("sendtosab: %s" % sendtosab)
+                    sendtosab["journal_release_key"] = journal_release_key
+                    sendtosab["clientmode"] = "sabnzbd"
+                    logger.info("SABnzbd accepted download id=%s" % sendtosab.get("nzo_id"))
                     comicarr.NZB_QUEUE.put(sendtosab)
                 elif sendtosab["status"] == "double-pp":
                     return sendtosab["status"]
@@ -3846,6 +3951,8 @@ def searcher(
         "SARC": SARC,
         "alt_nzbname": alt_nzbname,
         "t_hash": t_hash,
+        "journal_release_key": journal_release_key,
+        "journal_managed": journal_managed,
     }
 
     # if it's a directsend link (ie. via a retry).

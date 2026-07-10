@@ -49,27 +49,31 @@ from comicarr.tables import pipeline_journal
 # post_processed so that a post-terminal write (failed -> anything, or
 # anything -> a regressing stage) is rejected by the monotonic guard.
 
+RESERVED = "reserved"
 SNATCHED = "snatched"
 DOWNLOADED = "downloaded"
 POST_PROCESSING = "post_processing"
 MOVED = "moved"
 POST_PROCESSED = "post_processed"
+MANUAL_REVIEW = "manual_review"
 FAILED = "failed"
 
 STAGE_RANK = {
+    RESERVED: 5,
     SNATCHED: 10,
     DOWNLOADED: 20,
     POST_PROCESSING: 30,
     MOVED: 40,
     POST_PROCESSED: 50,
+    MANUAL_REVIEW: 55,
     FAILED: 60,
 }
 
 # Stages considered terminal: no further forward transition is legal.
-TERMINAL_STAGES = (POST_PROCESSED, FAILED)
+TERMINAL_STAGES = (POST_PROCESSED, MANUAL_REVIEW, FAILED)
 
 # Open stages: rows replay must consider as still-in-flight obligations.
-OPEN_STAGES = (SNATCHED, DOWNLOADED, POST_PROCESSING, MOVED)
+OPEN_STAGES = (RESERVED, SNATCHED, DOWNLOADED, POST_PROCESSING, MOVED)
 
 # Synthetic one-off IssueIDs are an unpersisted CONFIG.HIGHCOUNT counter that
 # starts at 900000 (see comicarr/updater.py:1214-1220). Such an IssueID is not
@@ -168,6 +172,12 @@ def release_key(issueid, provider, nzbname=None, hash=None, discriminant=None):
             )
         return "oneoff|%s|%s|%s" % (prov, rel, disc)
 
+    # DDL commands are independently durable obligations: two provider
+    # results for the same issue may both be queued and must never collapse
+    # onto one journal row. Their durable command id is available before the
+    # side effect, unlike downloader-generated NZB/torrent ids.
+    if "ddl" in prov and discriminant:
+        return "%s|%s|ddl:%s" % (issueid, prov, _coerce_discriminant(discriminant))
     return "%s|%s" % (issueid, prov)
 
 
@@ -205,8 +215,141 @@ def derive_release_key(item):
 
 
 # ---------------------------------------------------------------------------
-# Internal: serialize payload
+# Internal: sanitize, merge and serialize payload
 # ---------------------------------------------------------------------------
+
+# The journal is a reconstruction contract, not a request/response archive.
+# Keep this allowlist intentionally small: anything that can grant access or
+# replay a provider request belongs in the downloader's own protected config,
+# never in the operational database.
+_PAYLOAD_KEYS = frozenset(
+    {
+        "issueid",
+        "comicid",
+        "provider",
+        "downloader_type",
+        "route",
+        "client",
+        "clientmode",
+        "nzo_id",
+        "NZBID",
+        "hash",
+        "ddl_id",
+        "id",
+        "nzbname",
+        "nzb_name",
+        "nzb_folder",
+        "filename",
+        "series",
+        "site",
+        "mode",
+        "comicname",
+        "issuenumber",
+        "failed",
+        "apicall",
+        "ddl",
+        "oneoff",
+        "journal_release_key",
+        "download_info",
+    }
+)
+_DOWNLOAD_INFO_KEYS = frozenset({"provider", "id", "nzo_id", "NZBID", "hash", "nzbname", "clientmode"})
+_IMMUTABLE_PAYLOAD_KEYS = frozenset(
+    {
+        "issueid",
+        "comicid",
+        "provider",
+        "downloader_type",
+        "route",
+        "client",
+        "clientmode",
+        "nzo_id",
+        "NZBID",
+        "hash",
+        "ddl_id",
+        "id",
+    }
+)
+_MAX_PAYLOAD_STRING = 2048
+_MAX_PAYLOAD_BYTES = 16 * 1024
+
+
+def _bounded_scalar(value):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:_MAX_PAYLOAD_STRING]
+
+
+def sanitize_payload(payload):
+    """Return the bounded, secret-safe reconstruction projection.
+
+    Unknown keys are discarded rather than recursively persisted. This makes
+    API keys, cookies, authorization headers, signed URLs, provider links and
+    raw sender responses non-persistable by construction.
+    """
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            logger.warn("[JOURNAL] discarded non-object payload string")
+            return {}
+    if not isinstance(payload, dict):
+        logger.warn("[JOURNAL] discarded non-object payload of type %s" % type(payload).__name__)
+        return {}
+
+    clean = {}
+    for key, value in payload.items():
+        if key not in _PAYLOAD_KEYS:
+            continue
+        if key == "download_info":
+            if not isinstance(value, dict):
+                continue
+            nested = {
+                nested_key: _bounded_scalar(nested_value)
+                for nested_key, nested_value in value.items()
+                if nested_key in _DOWNLOAD_INFO_KEYS
+            }
+            if nested:
+                clean[key] = nested
+            continue
+        clean[key] = _bounded_scalar(value)
+    # Bound the complete encoded object as well as each scalar. Keep keys in
+    # insertion order and stop before the cap; reconstruction-critical callers
+    # put identity first and later transitions merge additional fields.
+    bounded = {}
+    for key, value in clean.items():
+        candidate = {**bounded, key: value}
+        if len(json.dumps(candidate, default=str).encode("utf-8")) > _MAX_PAYLOAD_BYTES:
+            logger.warn("[JOURNAL] payload reached the %d-byte reconstruction cap" % _MAX_PAYLOAD_BYTES)
+            break
+        bounded[key] = value
+    return bounded
+
+
+def _merge_payload(existing, incoming):
+    merged = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        old = merged.get(key)
+        if key in _IMMUTABLE_PAYLOAD_KEYS and old not in (None, "") and value not in (None, "") and old != value:
+            return merged, key
+        if key == "download_info" and isinstance(value, dict):
+            nested = dict(merged.get(key) or {})
+            for nested_key, nested_value in value.items():
+                old_nested = nested.get(nested_key)
+                if (
+                    nested_key in _IMMUTABLE_PAYLOAD_KEYS
+                    and old_nested not in (None, "")
+                    and nested_value not in (None, "")
+                    and old_nested != nested_value
+                ):
+                    return merged, "download_info.%s" % nested_key
+                nested[nested_key] = nested_value
+            merged[key] = nested
+        elif value is not None:
+            merged[key] = value
+    return merged, None
 
 
 def _dump_payload(payload):
@@ -242,7 +385,7 @@ def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _try_reset_failed_to_snatched(conn, key, stage, new_rank, upd_values):
+def _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
     """RE-SNATCH special case: a fresh `snatched` write observed against a
     terminal `failed` row is a NEW in-flight obligation that legitimately
     supersedes the closed failed attempt — reset the row to snatched.
@@ -260,25 +403,25 @@ def _try_reset_failed_to_snatched(conn, key, stage, new_rank, upd_values):
     writers racing one failed row yield exactly one True — the loser's gated
     UPDATE matches 0 rows and it falls back to the monotonic no-op.
     """
-    if stage != SNATCHED:
+    if stage != RESERVED:
         return False
 
     reset = conn.execute(
         update(pipeline_journal)
         .where(pipeline_journal.c.release_key == key)
         .where(pipeline_journal.c.stage == FAILED)
-        .values(fail_reason=None, **upd_values)
+        .values(fail_reason=None, status=None, hash=None, **upd_values)
     )
     if reset.rowcount:
         logger.warn(
-            "[JOURNAL] release_key=%s reset from terminal failed -> snatched "
-            "(new snatch supersedes closed failed attempt)" % (key,)
+            "[JOURNAL] release_key=%s reset from terminal failed -> %s "
+            "(new submission supersedes closed failed attempt)" % (key, stage)
         )
         return True
     return False
 
 
-def _apply_transition(conn, key, stage, new_rank, fields, payload_json, when):
+def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
     """Run the UPDATE-then-conditional-INSERT pair on an open connection.
 
     Returns True iff this call advanced (won) the row. Atomicity vs concurrent
@@ -287,6 +430,78 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload_json, when):
     # 1. Conditional advance: only succeeds if the existing row is strictly
     #    behind the new rank. This is the monotonic guard AND (for the
     #    downloaded -> post_processing case) the U4 atomic claim.
+    existing_row = conn.execute(select(pipeline_journal).where(pipeline_journal.c.release_key == key)).fetchone()
+    existing_payload = (
+        sanitize_payload(load_payload(existing_row._mapping.get("payload_json"))) if existing_row is not None else None
+    )
+    new_attempt = existing_row is not None and existing_row._mapping.get("stage") == FAILED and stage == RESERVED
+    if new_attempt:
+        # A new attempt must not inherit the previous client's acceptance id,
+        # route or hash. Retain only stable release identity/context; otherwise
+        # a legitimate new nzo_id/NZBID conflicts and is quarantined.
+        existing_payload = {
+            key_name: value
+            for key_name, value in (existing_payload or {}).items()
+            if key_name in {"issueid", "comicid", "provider", "nzbname", "comicname", "issuenumber", "mode"}
+        }
+    merged_payload, conflict = _merge_payload(existing_payload, payload)
+    if existing_row is not None and not conflict:
+        values = existing_row._mapping
+        conflict_fields = ("issueid", "provider") if new_attempt else (
+            "issueid",
+            "provider",
+            "downloader_type",
+            "nzbname",
+            "hash",
+        )
+        for field_name in conflict_fields:
+            incoming = fields.get(field_name)
+            current = values.get(field_name)
+            if incoming not in (None, "") and current not in (None, "") and str(incoming) != str(current):
+                conflict = field_name
+                break
+    payload_json = _dump_payload(merged_payload) if merged_payload is not None else None
+
+    # Immutable identity disagreement means we cannot prove which external
+    # obligation the row represents. Quarantine it atomically and require an
+    # operator decision; never guess and never blind-replay it.
+    if conflict and existing_row is not None:
+        reason = "immutable_payload_conflict:%s" % conflict
+        quarantined = conn.execute(
+            update(pipeline_journal)
+            .where(pipeline_journal.c.release_key == key)
+            .where(pipeline_journal.c.stage.notin_(TERMINAL_STAGES))
+            .values(
+                stage=MANUAL_REVIEW,
+                stage_rank=STAGE_RANK[MANUAL_REVIEW],
+                status=MANUAL_REVIEW,
+                fail_reason=reason,
+                updated_date=when,
+                payload_json=_dump_payload(existing_payload),
+            )
+        )
+        if quarantined.rowcount:
+            logger.error("[JOURNAL] quarantined release_key=%s: %s" % (key, reason))
+        return False
+
+    # Same-stage calls are not a new side-effect claim, but may safely fill in
+    # reconstruction fields learned after submission (notably client ids).
+    # Persist the enrichment while preserving the False/"lost claim" return
+    # contract used by postprocess_main.
+    if existing_row is not None and int(existing_row._mapping["stage_rank"]) == new_rank:
+        if existing_row._mapping.get("stage") in TERMINAL_STAGES:
+            return False
+        previous_json = _dump_payload(existing_payload) if existing_payload is not None else None
+        if payload_json != previous_json:
+            conn.execute(
+                update(pipeline_journal)
+                .where(pipeline_journal.c.release_key == key)
+                .where(pipeline_journal.c.stage_rank == new_rank)
+                .values(payload_json=payload_json, updated_date=when)
+            )
+            logger.fdebug("[JOURNAL] enriched same-stage payload for release_key=%s stage=%s" % (key, stage))
+        return False
+
     upd_values = {
         "stage": stage,
         "stage_rank": new_rank,
@@ -299,6 +514,7 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload_json, when):
     result = conn.execute(
         update(pipeline_journal)
         .where(pipeline_journal.c.release_key == key)
+        .where(pipeline_journal.c.stage.notin_(TERMINAL_STAGES))
         .where(pipeline_journal.c.stage_rank < new_rank)
         .values(**upd_values)
     )
@@ -339,6 +555,7 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload_json, when):
             retry = conn.execute(
                 update(pipeline_journal)
                 .where(pipeline_journal.c.release_key == key)
+                .where(pipeline_journal.c.stage.notin_(TERMINAL_STAGES))
                 .where(pipeline_journal.c.stage_rank < new_rank)
                 .values(**upd_values)
             )
@@ -349,7 +566,7 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload_json, when):
             # so this is the absent-of-monotonic-match branch for the
             # failed-row case — apply the same gated re-snatch reset here so
             # the P1-2 race path composes with the failed->snatched rule.
-            if _try_reset_failed_to_snatched(conn, key, stage, new_rank, upd_values):
+            if _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
                 return True
             logger.fdebug(
                 "[JOURNAL] first-writer race resolved: release_key=%s stage=%s "
@@ -361,7 +578,7 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload_json, when):
     # Row exists and is at/ahead of new_rank. The ONE legal exception to the
     # monotonic no-op: a fresh `snatched` write against a terminal `failed`
     # row is a RE-SNATCH that supersedes the closed failed attempt.
-    if existing[0] == FAILED and _try_reset_failed_to_snatched(conn, key, stage, new_rank, upd_values):
+    if existing[0] == FAILED and _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
         return True
 
     # Row exists and is at/ahead of new_rank — a regressing or post-terminal
@@ -401,12 +618,12 @@ def record_transition(release_key, stage, payload=None, conn=None, **fields):
     if new_rank is None:
         raise ValueError("[JOURNAL] unknown stage %r — not in the legal lattice" % (stage,))
 
-    payload_json = _dump_payload(payload)
+    payload = sanitize_payload(payload)
     when = _now()
 
     # Caller-supplied connection: participate in the caller's transaction.
     if conn is not None:
-        won = _apply_transition(conn, release_key, stage, new_rank, fields, payload_json, when)
+        won = _apply_transition(conn, release_key, stage, new_rank, fields, payload, when)
         if won:
             logger.fdebug("[JOURNAL] advanced release_key=%s -> stage=%s (caller txn)" % (release_key, stage))
         return won
@@ -416,7 +633,7 @@ def record_transition(release_key, stage, payload=None, conn=None, **fields):
     while attempt < 5:
         try:
             with db.get_engine().begin() as own_conn:
-                won = _apply_transition(own_conn, release_key, stage, new_rank, fields, payload_json, when)
+                won = _apply_transition(own_conn, release_key, stage, new_rank, fields, payload, when)
             if won:
                 logger.fdebug("[JOURNAL] advanced release_key=%s -> stage=%s" % (release_key, stage))
             return won
@@ -476,10 +693,23 @@ def mark_done(release_key, payload=None, conn=None, **fields):
     )
 
 
+def mark_manual_review(release_key, reason, payload=None, conn=None, **fields):
+    """Quarantine an obligation whose safe automatic continuation is unknown."""
+    return record_transition(
+        release_key,
+        MANUAL_REVIEW,
+        payload=payload,
+        conn=conn,
+        status=MANUAL_REVIEW,
+        fail_reason=str(reason)[:1000],
+        **fields,
+    )
+
+
 def read_open():
     """Return all journal rows still representing an in-flight obligation:
-    stage in {snatched, downloaded, post_processing, moved}. Excludes
-    post_processed and failed (terminal) rows.
+    stage in {reserved, snatched, downloaded, post_processing, moved}. Excludes
+    post_processed, manual_review and failed (terminal) rows.
 
     Ordered oldest-`updated_date`-first: the U6 inline-PP re-drive cap
     (_MAX_INLINE_PP_REDRIVE_PER_PASS) deterministically defers rows past the

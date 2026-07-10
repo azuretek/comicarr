@@ -263,7 +263,7 @@ def _sab_history_or_queue(row, payload=None):
     payload = payload if payload is not None else journal.load_payload(row.get("payload_json"))
     payload = payload or {}
     di = payload.get("download_info") or {}
-    nzo_id = di.get("nzo_id") or row.get("nzo_id")
+    nzo_id = payload.get("nzo_id") or di.get("nzo_id") or row.get("nzo_id")
     if not nzo_id:
         logger.warn("[RECOVERY-CLASSIFY] SAB row %s has no nzo_id to probe." % row.get("release_key"))
         return "unreachable"
@@ -275,6 +275,14 @@ def _sab_history_or_queue(row, payload=None):
             "issueid": row.get("issueid"),
             "comicid": payload.get("comicid"),
             "download_info": di,
+            # Credentials are reconstructed from current protected config and
+            # exist in memory only; the journal persists no queue/auth blob.
+            "queue": {
+                "mode": "queue",
+                "search": nzo_id,
+                "output": "json",
+                "apikey": comicarr.CONFIG.SAB_APIKEY,
+            },
         }
         s = sabnzbd.SABnzbd({"queue": {"apikey": comicarr.CONFIG.SAB_APIKEY}})
         nzstat = s.historycheck(nzbinfo)
@@ -289,7 +297,7 @@ def _nzbget_history(row, payload=None):
     payload = payload if payload is not None else journal.load_payload(row.get("payload_json"))
     payload = payload or {}
     di = payload.get("download_info") or {}
-    nzbid = di.get("NZBID") or row.get("NZBID")
+    nzbid = payload.get("NZBID") or di.get("NZBID") or row.get("NZBID")
     if not nzbid:
         logger.warn("[RECOVERY-CLASSIFY] NZBGet row %s has no NZBID to probe." % row.get("release_key"))
         return "unreachable"
@@ -346,6 +354,14 @@ def _probe_nzb(row, payload=None):
     return "unreachable"
 
 
+def _probe_sab(row, payload=None):
+    return _sab_history_or_queue(row, payload=payload)
+
+
+def _probe_nzbget(row, payload=None):
+    return _nzbget_history(row, payload=payload)
+
+
 def _ddl_link_alive(link):
     """Recheck a DDL source link. Alive ⇒ the download could still resume;
     dead ⇒ (combined with status=Downloading) the source is GONE. A network
@@ -379,7 +395,7 @@ def _probe_ddl(row, payload=None):
     payload = payload if payload is not None else journal.load_payload(row.get("payload_json"))
     payload = payload or {}
     di = payload.get("download_info") or {}
-    ddl_id = di.get("id") or row.get("ddl_id")
+    ddl_id = payload.get("ddl_id") or payload.get("id") or di.get("id") or row.get("ddl_id")
     issueid = row.get("issueid")
     try:
         stmt = select(ddl_info)
@@ -411,21 +427,27 @@ def _probe_ddl(row, payload=None):
 
 _DEFAULT_PROBES = {
     "torrent": _probe_torrent,
+    "rtorrent": _probe_torrent,
+    "deluge": _probe_torrent,
     "nzb": _probe_nzb,
-    "sab": _probe_nzb,
-    "nzbget": _probe_nzb,
+    "sab": _probe_sab,
+    "sabnzbd": _probe_sab,
+    "nzbget": _probe_nzbget,
     "ddl": _probe_ddl,
     "DDL": _probe_ddl,
 }
 
 
 def _resolve_downloader(row, payload=None):
+    payload = payload if payload is not None else journal.load_payload((row or {}).get("payload_json"))
+    payload = payload or {}
+    route = str(payload.get("route") or "").strip().lower()
+    if route in _DEFAULT_PROBES:
+        return route
     dt = (row or {}).get("downloader_type")
     if dt:
         return dt
     # Fall back to inferring from the payload's download_info provider.
-    payload = payload if payload is not None else journal.load_payload((row or {}).get("payload_json"))
-    payload = payload or {}
     if payload.get("ddl") is True:
         return "ddl"
     di = payload.get("download_info") or {}
@@ -546,6 +568,13 @@ def apply_verdict(row, verdict, conn=None):
             comicarr.DDL_STUCK_NOTIFIED.add(ddl_id)
         except Exception as e:
             logger.warn("[RECOVERY-CLASSIFY] could not reconcile DDL_STUCK_NOTIFIED for %s: %s" % (ddl_id, e))
+        try:
+            if conn is not None:
+                db.upsert_conn(conn, "ddl_info", {"status": "Failed"}, {"ID": ddl_id})
+            else:
+                db.upsert("ddl_info", {"status": "Failed"}, {"ID": ddl_id})
+        except Exception as e:
+            logger.error("[RECOVERY-CLASSIFY] could not reconcile ddl_info terminal state for %s: %s" % (ddl_id, e))
 
     journal.mark_failed(
         rkey,

@@ -30,7 +30,7 @@ from sqlalchemy import select
 import comicarr
 from comicarr.app.downloads import journal, recovery, recovery_classify
 from comicarr.db import get_engine, shutdown_engine
-from comicarr.tables import issues, metadata, nzblog, pipeline_journal, snatched, storyarcs
+from comicarr.tables import ddl_info, issues, metadata, nzblog, pipeline_journal, snatched, storyarcs
 
 
 @pytest.fixture(autouse=True)
@@ -43,10 +43,17 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(
         comicarr,
         "CONFIG",
-        types.SimpleNamespace(HIGHCOUNT=0, SAB_APIKEY="k", SAB_HOST="http://sab.local"),
+        types.SimpleNamespace(
+            HIGHCOUNT=0,
+            SAB_APIKEY="k",
+            SAB_HOST="http://sab.local",
+            MANUAL_PP_FOLDER=str(tmp_path),
+        ),
         raising=False,
     )
     monkeypatch.setattr(comicarr, "DDL_STUCK_NOTIFIED", set(), raising=False)
+    monkeypatch.setattr(comicarr, "ACQUISITION_WORKERS_BLOCKED", False, raising=False)
+    monkeypatch.setattr(comicarr, "ACQUISITION_BLOCK_REASON", None, raising=False)
     monkeypatch.setattr(comicarr, "USE_SABNZBD", True, raising=False)
     monkeypatch.setattr(comicarr, "USE_NZBGET", False, raising=False)
     engine = get_engine()
@@ -95,7 +102,16 @@ def _journal_row(key):
 
 
 def _probe(value):
-    return {dt: (lambda row, v=value: v) for dt in ("torrent", "nzb", "sab", "nzbget", "ddl", "DDL")}
+    return {
+        dt: (lambda row, v=value: v)
+        for dt in ("torrent", "nzb", "sab", "sabnzbd", "nzbget", "ddl", "DDL")
+    }
+
+
+def _artifact_folder(tmp_path, name):
+    folder = tmp_path / name
+    folder.mkdir(exist_ok=True)
+    return str(folder)
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +123,16 @@ def test_empty_journal_is_noop(queues):
     summary = recovery.replay_pipeline(probes=_probe("complete"))
     assert summary["open"] == 0
     assert summary["reconstructed"] == 0
+    assert _drain(queues["pp"]) == []
+
+
+def test_startup_replay_is_a_noop_while_acquisition_workers_are_fenced(queues, monkeypatch):
+    monkeypatch.setattr(comicarr, "ACQUISITION_WORKERS_BLOCKED", True)
+    monkeypatch.setattr(comicarr, "ACQUISITION_BLOCK_REASON", "persistent_maintenance")
+
+    summary = recovery.replay_pipeline(probes=_probe("complete"))
+
+    assert summary["actions"] == {"blocked": 1}
     assert _drain(queues["pp"]) == []
 
 
@@ -128,7 +154,7 @@ def test_replay_does_not_acquire_init_lock(queues):
 # ---------------------------------------------------------------------------
 
 
-def test_complete_enqueues_pp_with_stamped_key(queues):
+def test_complete_enqueues_pp_with_stamped_key(queues, tmp_path):
     rkey = journal.release_key("10", "nzb.su", nzbname="A.cbz")
     with get_engine().begin() as conn:
         conn.execute(nzblog.insert().values(IssueID="10", PROVIDER="nzb.su"))
@@ -136,7 +162,12 @@ def test_complete_enqueues_pp_with_stamped_key(queues):
     _insert_journal(
         rkey,
         journal.DOWNLOADED,
-        payload={"issueid": "10", "comicid": "C1", "nzb_name": "A.cbz", "nzb_folder": "/dl/A"},
+        payload={
+            "issueid": "10",
+            "comicid": "C1",
+            "nzb_name": "A.cbz",
+            "nzb_folder": _artifact_folder(tmp_path, "A"),
+        },
         issueid="10",
         provider="nzb.su",
         downloader_type="nzb",
@@ -146,6 +177,32 @@ def test_complete_enqueues_pp_with_stamped_key(queues):
     assert len(items) == 1
     assert items[0]["journal_release_key"] == rkey
     assert items[0]["issueid"] == "10"
+
+
+def test_downloaded_with_valid_artifact_command_skips_downloader_probe(queues, tmp_path):
+    rkey = journal.release_key("direct-pp", "nzb.su")
+    _insert_journal(
+        rkey,
+        journal.DOWNLOADED,
+        payload={
+            "issueid": "direct-pp",
+            "comicid": "comic-1",
+            "nzb_name": "Direct.cbz",
+            "nzb_folder": _artifact_folder(tmp_path, "Direct"),
+        },
+        issueid="direct-pp",
+        provider="nzb.su",
+        downloader_type="nzb",
+    )
+
+    def must_not_probe(*args, **kwargs):
+        raise AssertionError("downloaded artifacts are already accepted for PP")
+
+    recovery.replay_pipeline(probes={"nzb": must_not_probe})
+
+    items = _drain(queues["pp"])
+    assert len(items) == 1
+    assert items[0]["journal_release_key"] == rkey
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +249,60 @@ def test_still_nzb_reenqueued_on_nzb_queue(queues):
     assert nz[0]["issueid"] == "21"
 
 
+def test_still_sab_rebuilds_monitor_shape_with_current_secret_in_memory_only(queues):
+    rkey = journal.release_key("sab-restart", "nzb.su")
+    with get_engine().begin() as conn:
+        conn.execute(nzblog.insert().values(IssueID="sab-restart", PROVIDER="nzb.su"))
+    _insert_journal(
+        rkey,
+        journal.SNATCHED,
+        payload={
+            "issueid": "sab-restart",
+            "comicid": "comic-1",
+            "provider": "nzb.su",
+            "route": "sabnzbd",
+            "nzo_id": "sab-job-restart",
+            "download_info": {"provider": "nzb.su", "id": "provider-result"},
+        },
+        issueid="sab-restart",
+        provider="nzb.su",
+        downloader_type="sabnzbd",
+    )
+
+    recovery.replay_pipeline(probes=_probe("still"))
+
+    item = _drain(queues["nzb"])[0]
+    assert item["nzo_id"] == "sab-job-restart"
+    assert item["journal_release_key"] == rkey
+    assert item["clientmode"] == "sabnzbd"
+    assert item["queue"]["apikey"] == "k"
+    persisted = journal.load_payload(journal.read_one(rkey)["payload_json"])
+    assert "queue" not in persisted
+    assert "apikey" not in str(persisted).lower()
+
+
+def test_legacy_ddl_downloading_without_exact_anchor_becomes_manual_review(queues):
+    with get_engine().begin() as conn:
+        conn.execute(
+            ddl_info.insert().values(
+                ID="legacy-ddl",
+                issueid="legacy-issue",
+                comicid="legacy-comic",
+                filename="Legacy.cbz",
+                status="Downloading",
+            )
+        )
+
+    summary = recovery.replay_pipeline(probes=_probe("still"))
+
+    assert summary["legacy_ddl_review"] == 1
+    row = journal.read_one(journal.release_key("legacy-issue", "DDL", discriminant="legacy-ddl"))
+    assert row["stage"] == journal.MANUAL_REVIEW
+    with get_engine().connect() as conn:
+        durable = conn.execute(select(ddl_info).where(ddl_info.c.ID == "legacy-ddl")).mappings().one()
+    assert durable["status"] == "Manual Review"
+
+
 # ---------------------------------------------------------------------------
 # P2-5(a) — DDL `still` re-enqueues onto DDL_QUEUE (NOT NZB_QUEUE)
 # ---------------------------------------------------------------------------
@@ -233,12 +344,13 @@ def test_still_ddl_reenqueued_on_ddl_queue(queues):
 # ---------------------------------------------------------------------------
 
 
-def test_complete_ddl_rebuilds_pp_item_with_paths(queues):
+def test_complete_ddl_rebuilds_pp_item_with_paths(queues, tmp_path):
     rkey = journal.release_key("41", "DDL", nzbname="Saga.DDL.041.cbz", discriminant="ddl-11")
     with get_engine().begin() as conn:
         conn.execute(nzblog.insert().values(IssueID="41", PROVIDER="DDL"))
         conn.execute(issues.insert().values(IssueID="41", Status="Snatched"))
     # The enriched ddlc_payload (P2-5b) carries nzb_folder/nzb_name.
+    artifact_folder = _artifact_folder(tmp_path, "Saga.DDL.041")
     _insert_journal(
         rkey,
         journal.DOWNLOADED,
@@ -248,7 +360,7 @@ def test_complete_ddl_rebuilds_pp_item_with_paths(queues):
             "provider": "DDL",
             "id": "ddl-11",
             "ddl": True,
-            "nzb_folder": "/downloads/Saga.DDL.041",
+            "nzb_folder": artifact_folder,
             "nzb_name": "Saga.DDL.041.cbz",
             "download_info": {"provider": "DDL", "id": "ddl-11"},
         },
@@ -259,7 +371,7 @@ def test_complete_ddl_rebuilds_pp_item_with_paths(queues):
     recovery.replay_pipeline(probes=_probe("complete"))
     items = _drain(queues["pp"])
     assert len(items) == 1
-    assert items[0]["nzb_folder"] == "/downloads/Saga.DDL.041"
+    assert items[0]["nzb_folder"] == artifact_folder
     assert items[0]["nzb_name"] == "Saga.DDL.041.cbz"
     assert items[0]["nzb_folder"] is not None and items[0]["nzb_name"] is not None
     assert items[0]["journal_release_key"] == rkey
@@ -347,12 +459,17 @@ def test_finalizer_moved_finishes_dbfacts_only_no_reimport(queues, monkeypatch):
     assert _drain(queues["pp"]) == []
 
 
-def test_finalizer_post_processing_redrives_in_full(queues, monkeypatch):
+def test_finalizer_post_processing_redrives_in_full(queues, monkeypatch, tmp_path):
     rkey = journal.release_key("51", "nzb.su", nzbname="F.cbz")
     _insert_journal(
         rkey,
         journal.POST_PROCESSING,
-        payload={"issueid": "51", "comicid": "C5", "nzb_name": "F.cbz", "nzb_folder": "/dl/F"},
+        payload={
+            "issueid": "51",
+            "comicid": "C5",
+            "nzb_name": "F.cbz",
+            "nzb_folder": _artifact_folder(tmp_path, "F"),
+        },
         issueid="51",
         provider="nzb.su",
         downloader_type="nzb",
@@ -501,7 +618,7 @@ def test_oneoff_inflight_not_stranded_as_false_done(queues):
 # ---------------------------------------------------------------------------
 
 
-def test_one_bad_row_skipped_loop_continues_and_is_rerunnable(queues, monkeypatch, capture_logs):
+def test_one_bad_row_skipped_loop_continues_and_is_rerunnable(queues, monkeypatch, capture_logs, tmp_path):
     bad = journal.release_key("90", "nzb.su", nzbname="BAD.cbz")
     good = journal.release_key("91", "nzb.su", nzbname="GOOD.cbz")
     with get_engine().begin() as conn:
@@ -511,8 +628,8 @@ def test_one_bad_row_skipped_loop_continues_and_is_rerunnable(queues, monkeypatc
         conn.execute(issues.insert().values(IssueID="91", Status="Snatched"))
     _insert_journal(
         bad,
-        journal.DOWNLOADED,
-        payload={"issueid": "90", "nzb_name": "BAD.cbz", "nzb_folder": "/dl/BAD"},
+        journal.SNATCHED,
+        payload={"issueid": "90", "provider": "nzb.su", "nzo_id": "bad-90", "route": "sabnzbd"},
         issueid="90",
         provider="nzb.su",
         downloader_type="nzb",
@@ -520,7 +637,11 @@ def test_one_bad_row_skipped_loop_continues_and_is_rerunnable(queues, monkeypatc
     _insert_journal(
         good,
         journal.DOWNLOADED,
-        payload={"issueid": "91", "nzb_name": "GOOD.cbz", "nzb_folder": "/dl/GOOD"},
+        payload={
+            "issueid": "91",
+            "nzb_name": "GOOD.cbz",
+            "nzb_folder": _artifact_folder(tmp_path, "GOOD"),
+        },
         issueid="91",
         provider="nzb.su",
         downloader_type="nzb",
@@ -555,7 +676,7 @@ def test_one_bad_row_skipped_loop_continues_and_is_rerunnable(queues, monkeypatc
 # ---------------------------------------------------------------------------
 
 
-def test_ae3_two_replays_complete_exactly_once(queues):
+def test_ae3_two_replays_complete_exactly_once(queues, tmp_path):
     rkey = journal.release_key("100", "nzb.su", nzbname="L.cbz")
     with get_engine().begin() as conn:
         conn.execute(nzblog.insert().values(IssueID="100", PROVIDER="nzb.su"))
@@ -563,7 +684,11 @@ def test_ae3_two_replays_complete_exactly_once(queues):
     _insert_journal(
         rkey,
         journal.DOWNLOADED,
-        payload={"issueid": "100", "nzb_name": "L.cbz", "nzb_folder": "/dl/L"},
+        payload={
+            "issueid": "100",
+            "nzb_name": "L.cbz",
+            "nzb_folder": _artifact_folder(tmp_path, "L"),
+        },
         issueid="100",
         provider="nzb.su",
         downloader_type="nzb",
@@ -688,7 +813,7 @@ def test_anchor_already_journaled_not_duplicated(queues):
 # ---------------------------------------------------------------------------
 
 
-def test_post_processing_redrive_capped_per_pass_and_rerun_processes_rest(queues, monkeypatch):
+def test_post_processing_redrive_capped_per_pass_and_rerun_processes_rest(queues, monkeypatch, tmp_path):
     """A backlog of `post_processing` rows must not run unbounded full inline
     PP before the web server binds: replay caps inline re-drives per pass,
     defers the excess (loud log), and a re-run processes the remainder
@@ -702,7 +827,12 @@ def test_post_processing_redrive_capped_per_pass_and_rerun_processes_rest(queues
         _insert_journal(
             rkey,
             journal.POST_PROCESSING,
-            payload={"issueid": "PPC%d" % i, "comicid": "C1", "nzb_name": "C%d.cbz" % i, "nzb_folder": "/dl/C%d" % i},
+            payload={
+                "issueid": "PPC%d" % i,
+                "comicid": "C1",
+                "nzb_name": "C%d.cbz" % i,
+                "nzb_folder": _artifact_folder(tmp_path, "C%d" % i),
+            },
             issueid="PPC%d" % i,
             provider="nzb.su",
             downloader_type="nzb",

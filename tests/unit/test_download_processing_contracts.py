@@ -17,10 +17,15 @@ from sqlalchemy import insert, select
 
 import comicarr
 from comicarr import db, getcomics
-from comicarr.app.downloads import recovery, router, service
+from comicarr.app.downloads import pp_commands, recovery, router, service
 from comicarr.app.downloads.ddl_commands import DDLCommand
 from comicarr.downloaders import mediafire
 from comicarr.tables import ddl_info, metadata
+
+
+@pytest.fixture(autouse=True)
+def _reset_ddl_process_ownership(monkeypatch):
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set(), raising=False)
 
 
 def _complete_ddl_payload(**overrides):
@@ -83,6 +88,204 @@ def test_process_issue_passes_issueid_by_keyword(monkeypatch):
         nzb_folder="/downloads/Saga",
         issueid="issue-1",
     )
+
+
+def test_postprocess_command_rejects_traversal_prefix_collision_and_symlink_escape(tmp_path):
+    root = tmp_path / "downloads"
+    root.mkdir()
+    valid = root / "job"
+    valid.mkdir()
+    outside = tmp_path / "downloads-evil"
+    outside.mkdir()
+    symlink = root / "escaped"
+    symlink.symlink_to(outside, target_is_directory=True)
+
+    command = pp_commands.validate_postprocess_item(
+        {"nzb_name": "Saga.001.cbz", "nzb_folder": str(valid)},
+        roots=[root],
+    )
+    assert command["nzb_folder"] == str(valid.resolve())
+
+    for name, folder in (
+        ("../Saga.001.cbz", valid),
+        ("subdir/Saga.001.cbz", valid),
+        (r"subdir\Saga.001.cbz", valid),
+        ("Saga.001.cbz", outside),
+        ("Saga.001.cbz", symlink),
+    ):
+        with pytest.raises(pp_commands.PostProcessCommandError):
+            pp_commands.validate_postprocess_item(
+                {"nzb_name": name, "nzb_folder": str(folder)},
+                roots=[root],
+            )
+
+
+def test_postprocess_worker_quarantines_owned_failure_and_continues(sqlite_ddl_db, monkeypatch, tmp_path):
+    first = {
+        "nzb_name": "First.cbz",
+        "nzb_folder": str(tmp_path),
+        "issueid": "issue-first",
+        "comicid": "comic-1",
+        "failed": False,
+        "apicall": True,
+        "ddl": False,
+        "download_info": None,
+    }
+    second = {**first, "nzb_name": "Second.cbz", "issueid": "issue-second"}
+    q = queue.Queue()
+    q.put(first)
+    q.put(second)
+    q.put("exit")
+    calls = []
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            calls.append(args[0])
+
+        def post_process(self):
+            if calls[-1] == "First.cbz":
+                raise RuntimeError("secret=/very/private/path")
+
+    monkeypatch.setattr(service.process, "Process", FakeProcess)
+    monkeypatch.setattr(service, "_configured_postprocess_roots", lambda: [tmp_path])
+
+    service.postprocess_main(q)
+
+    assert calls == ["First.cbz", "Second.cbz"]
+
+
+def test_postprocess_maintenance_block_happens_before_claim(sqlite_ddl_db, monkeypatch, tmp_path):
+    from comicarr.app.acquisition import maintenance
+    from comicarr.app.downloads import journal
+
+    folder = tmp_path / "downloads" / "fenced"
+    folder.mkdir(parents=True)
+    key = journal.release_key("fenced-issue", "nzb.su")
+    journal.record_transition(
+        key,
+        journal.DOWNLOADED,
+        payload={"issueid": "fenced-issue", "nzb_name": "Fenced.cbz", "nzb_folder": str(folder)},
+        issueid="fenced-issue",
+        provider="nzb.su",
+    )
+    item = {
+        "nzb_name": "Fenced.cbz",
+        "nzb_folder": str(folder),
+        "issueid": "fenced-issue",
+        "comicid": "comic-1",
+        "failed": False,
+        "apicall": True,
+        "ddl": False,
+        "download_info": None,
+        "journal_release_key": key,
+    }
+    q = queue.Queue()
+    q.put(item)
+    q.put("exit")
+    process_class = MagicMock()
+    monkeypatch.setattr(service.process, "Process", process_class)
+    monkeypatch.setattr(
+        maintenance.MaintenanceController,
+        "acquire_lease",
+        MagicMock(side_effect=maintenance.MaintenanceBlocked("fenced")),
+    )
+
+    service.postprocess_main(q)
+
+    assert journal.read_one(key)["stage"] == journal.DOWNLOADED
+    process_class.assert_not_called()
+    assert q.get_nowait()["journal_release_key"] == key
+
+
+def test_torrent_downloaded_persistence_failure_never_hands_unowned_pp(sqlite_ddl_db, monkeypatch, tmp_path):
+    from comicarr.app.downloads import journal
+
+    artifact = tmp_path / "downloads" / "Torrent.cbz"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"comic")
+    key = journal.release_key("torrent-issue", "torznab", nzbname="Torrent.cbz")
+    journal.record_transition(
+        key,
+        journal.SNATCHED,
+        payload={"issueid": "torrent-issue", "provider": "torznab", "route": "rtorrent", "hash": "hash"},
+        issueid="torrent-issue",
+        provider="torznab",
+        downloader_type="rtorrent",
+        hash="hash",
+    )
+    real_transition = journal.record_transition
+
+    def fail_downloaded(*args, **kwargs):
+        if args[1] == journal.DOWNLOADED:
+            raise RuntimeError("journal unavailable")
+        return real_transition(*args, **kwargs)
+
+    monkeypatch.setattr(journal, "record_transition", fail_downloaded)
+    pp_queue = queue.Queue()
+    monkeypatch.setattr(comicarr, "PP_QUEUE", pp_queue)
+
+    service._handle_torrent_monitor_result(
+        {
+            "issueid": "torrent-issue",
+            "comicid": "comic-1",
+            "provider": "torznab",
+            "hash": "hash",
+            "nzbname": "Torrent.cbz",
+            "journal_release_key": key,
+        },
+        {"snatch_status": "MONITOR COMPLETE", "copied_filepath": str(artifact)},
+    )
+
+    assert pp_queue.empty()
+    assert journal.read_one(key)["stage"] == journal.MANUAL_REVIEW
+
+
+def test_nzb_downloaded_persistence_failure_never_hands_unowned_pp(sqlite_ddl_db, monkeypatch, tmp_path):
+    from comicarr.app.downloads import journal
+
+    folder = tmp_path / "downloads" / "sab-job"
+    folder.mkdir(parents=True)
+    (folder / "Saga.cbz").write_bytes(b"comic")
+    key = journal.release_key("nzb-issue", "nzb.su")
+    journal.record_transition(
+        key,
+        journal.SNATCHED,
+        payload={"issueid": "nzb-issue", "provider": "nzb.su", "route": "sabnzbd", "nzo_id": "sab-id"},
+        issueid="nzb-issue",
+        provider="nzb.su",
+        downloader_type="sabnzbd",
+    )
+    real_transition = journal.record_transition
+
+    def fail_downloaded(*args, **kwargs):
+        if args[1] == journal.DOWNLOADED:
+            raise RuntimeError("journal unavailable")
+        return real_transition(*args, **kwargs)
+
+    monkeypatch.setattr(journal, "record_transition", fail_downloaded)
+    monkeypatch.setattr("comicarr.helpers.check_file_condition", lambda path: {"status": True})
+    pp_queue = queue.Queue()
+    monkeypatch.setattr(comicarr, "PP_QUEUE", pp_queue)
+    item = {
+        "nzo_id": "sab-id",
+        "journal_release_key": key,
+        "clientmode": "sabnzbd",
+    }
+    nzstat = {
+        "status": True,
+        "failed": False,
+        "name": "Saga.cbz",
+        "location": str(folder),
+        "issueid": "nzb-issue",
+        "comicid": "comic-1",
+        "apicall": True,
+        "download_info": {"provider": "nzb.su", "id": "provider-result"},
+    }
+
+    service.cdh_monitor(queue.Queue(), item, nzstat)
+
+    assert pp_queue.empty()
+    assert journal.read_one(key)["stage"] == journal.MANUAL_REVIEW
 
 
 def test_queue_ddl_persists_reconstructable_command_before_enqueue(monkeypatch):

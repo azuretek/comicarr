@@ -788,7 +788,13 @@ def main():
     try:
         from comicarr.app.downloads import recovery
 
-        recovery.replay_pipeline()
+        if comicarr.ACQUISITION_WORKERS_BLOCKED:
+            logger.warn(
+                "[RECOVERY] Startup replay skipped because acquisition workers are blocked: %s"
+                % comicarr.ACQUISITION_BLOCK_REASON
+            )
+        else:
+            recovery.replay_pipeline()
     except Exception as e:
         logger.error("[RECOVERY] Startup replay raised — continuing startup (resumable next start): %s" % e)
 

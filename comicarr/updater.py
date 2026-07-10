@@ -1343,6 +1343,8 @@ def foundsearch(
     issuenumber=None,
     pullinfo=None,
     nzbname=None,
+    journal_release_key=None,
+    journal_managed=False,
 ):
     # When doing a Force Search (Wanted tab), the resulting search calls this to update.
 
@@ -1521,6 +1523,12 @@ def foundsearch(
         try:
             from comicarr.app.downloads import journal
 
+            if journal_managed:
+                logger.fdebug(
+                    "%s Pipeline journal is already owned by the accepted handoff; skipping generic snatched row."
+                    % module
+                )
+                return
             journal_issueid = snatchedupdate.get("IssueID")
             payload = {
                 "issueid": journal_issueid,
@@ -1532,12 +1540,12 @@ def foundsearch(
                 "comicname": ComicName,
                 "issuenumber": IssueNum,
             }
-            rkey = journal.release_key(
+            rkey = journal_release_key or journal.release_key(
                 journal_issueid,
                 provider,
                 nzbname=nzbname,
                 hash=hash,
-                discriminant=hash or nzbname or payload,
+                discriminant=nzbname or payload,
             )
             journal.record_transition(
                 rkey,
