@@ -342,6 +342,17 @@ class TestCommonFilesystem:
         traversal = str(tmp_path) + "/../../../etc/passwd"
         assert not is_path_within_allowed_dirs(traversal, allowed)
 
+    def test_strict_rejects_root_itself_and_filesystem_root(self, tmp_path):
+        import os
+
+        from comicarr.app.common.filesystem import is_path_within_allowed_dirs
+
+        child = tmp_path / "series"
+        child.mkdir()
+        assert is_path_within_allowed_dirs(str(child), [str(tmp_path)], strict=True)
+        assert not is_path_within_allowed_dirs(str(tmp_path), [str(tmp_path)], strict=True)
+        assert not is_path_within_allowed_dirs(str(child), [os.sep], strict=True)
+
     def test_windows_hardlink_uses_os_link(self):
         from comicarr.app.common.filesystem import file_ops
 

@@ -9,6 +9,7 @@
 
 """Tests for the series domain service."""
 
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -75,6 +76,39 @@ class TestDeleteComicDirectory:
         assert outside_series.is_dir()
         delete_from_db.assert_not_called()
 
+    def test_rejects_path_prefix_sibling_of_library_root(self, tmp_path):
+        """A path that shares a string prefix with the root must not authorize deletion."""
+        library_root = tmp_path / "library"
+        evil_series = tmp_path / "library-evil" / "series"
+        library_root.mkdir()
+        evil_series.mkdir(parents=True)
+
+        result, delete_from_db = _delete(
+            _make_ctx(DESTINATION_DIR=str(library_root)),
+            evil_series,
+        )
+
+        assert result["success"] is False
+        assert evil_series.is_dir()
+        delete_from_db.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "root_value",
+        ["None", "none", "  ", 42],
+    )
+    def test_rejects_when_configured_roots_are_empty_or_invalid(self, tmp_path, root_value):
+        series_directory = tmp_path / "series"
+        series_directory.mkdir()
+
+        result, delete_from_db = _delete(
+            _make_ctx(DESTINATION_DIR=root_value),
+            series_directory,
+        )
+
+        assert result["success"] is False
+        assert series_directory.is_dir()
+        delete_from_db.assert_not_called()
+
     def test_rejects_configured_library_root_itself(self, tmp_path):
         library_root = tmp_path / "library"
         library_root.mkdir()
@@ -104,6 +138,53 @@ class TestDeleteComicDirectory:
         assert result["success"] is False
         assert linked_series.is_symlink()
         assert outside_series.is_dir()
+        delete_from_db.assert_not_called()
+
+    def test_unlinks_in_library_symlink_without_removing_target(self, tmp_path):
+        library_root = tmp_path / "library"
+        real_series = library_root / "real-series"
+        real_series.mkdir(parents=True)
+        (real_series / "issue.cbz").write_text("x")
+        linked_series = library_root / "linked-series"
+        linked_series.symlink_to(real_series, target_is_directory=True)
+
+        result, delete_from_db = _delete(
+            _make_ctx(DESTINATION_DIR=str(library_root)),
+            linked_series,
+        )
+
+        assert result["success"] is True
+        assert not linked_series.exists()
+        assert real_series.is_dir()
+        assert (real_series / "issue.cbz").is_file()
+        delete_from_db.assert_called_once_with("123")
+
+    def test_unlinks_regular_file_comic_location(self, tmp_path):
+        library_root = tmp_path / "library"
+        library_root.mkdir()
+        series_file = library_root / "series.cbz"
+        series_file.write_text("comic-data")
+
+        result, delete_from_db = _delete(
+            _make_ctx(DESTINATION_DIR=str(library_root)),
+            series_file,
+        )
+
+        assert result["success"] is True
+        assert not series_file.exists()
+        delete_from_db.assert_called_once_with("123")
+
+    def test_rejects_filesystem_root_as_configured_library_root(self, tmp_path):
+        series_directory = tmp_path / "series"
+        series_directory.mkdir()
+
+        result, delete_from_db = _delete(
+            _make_ctx(DESTINATION_DIR=os.sep),
+            series_directory,
+        )
+
+        assert result["success"] is False
+        assert series_directory.is_dir()
         delete_from_db.assert_not_called()
 
     def test_filesystem_failure_does_not_delete_database_rows(self, tmp_path):

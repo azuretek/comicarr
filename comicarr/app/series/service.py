@@ -70,14 +70,24 @@ def _is_strict_library_descendant(path, config):
         return False
 
     try:
-        real_path = os.path.realpath(path)
-        real_roots = [os.path.realpath(root) for root in roots]
+        return is_path_within_allowed_dirs(path, roots, strict=True)
     except (OSError, TypeError, ValueError):
         return False
 
-    if real_path in real_roots:
-        return False
-    return is_path_within_allowed_dirs(path, roots)
+
+def _remove_comic_location(comic_location):
+    """Remove a validated ComicLocation without following directory symlinks.
+
+    Symlinks and regular files are unlinked in place. Real directories use
+    rmtree. Other special nodes are skipped so DB cleanup can still proceed.
+    """
+    if os.path.islink(comic_location) or os.path.isfile(comic_location):
+        os.unlink(comic_location)
+        return "unlinked"
+    if os.path.isdir(comic_location):
+        shutil.rmtree(comic_location)
+        return "removed"
+    return "skipped"
 
 
 def list_comics(ctx, limit=None, offset=None):
@@ -150,12 +160,20 @@ def delete_comic(ctx, comic_id, delete_directory=False):
                     "error": "Unable to safely delete the directory for ComicID: %s" % comic_id,
                 }
 
-            # Remove the requested directory before its database rows. This
+            # Remove the requested path before its database rows. This
             # preserves a recoverable watchlist entry when filesystem removal
             # fails; the database helper owns a separate atomic transaction.
             if os.path.lexists(comic_location):
-                shutil.rmtree(comic_location)
-                logger.fdebug("[SERIES-DELETE] Comic Location (%s) successfully deleted" % comic_location)
+                action = _remove_comic_location(comic_location)
+                if action == "skipped":
+                    logger.fdebug(
+                        "[SERIES-DELETE] Comic Location (%s) is not a regular file, "
+                        "symlink, or directory; skipping filesystem removal" % comic_location
+                    )
+                else:
+                    logger.fdebug(
+                        "[SERIES-DELETE] Comic Location (%s) successfully %s" % (comic_location, action)
+                    )
             else:
                 logger.fdebug("[SERIES-DELETE] Comic Location (%s) does not exist" % comic_location)
 
