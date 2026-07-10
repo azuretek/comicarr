@@ -48,30 +48,35 @@ class Weekly:
         pass
 
     def run(self):
-        logger.info("[WEEKLY] Checking Weekly Pull-list for new releases/updates")
-        helpers.job_management(write=True, job="Weekly Pullist", current_run=helpers.utctimestamp(), status="Running")
-        comicarr.WEEKLY_STATUS = "Running"
-        try:
-            pull_result = weeklypull.pullit()
-            if isinstance(pull_result, dict) and pull_result.get("status") == "failure":
-                raise RuntimeError("Weekly pull source reported a failure")
-            weeklypull.future_check()
-        except Exception as e:
-            logger.error("[WEEKLY] Pull-list refresh failed: %s" % e)
+        from comicarr.app.system.service import get_weekly_refresh_lock
+
+        with get_weekly_refresh_lock():
+            logger.info("[WEEKLY] Checking Weekly Pull-list for new releases/updates")
+            helpers.job_management(
+                write=True, job="Weekly Pullist", current_run=helpers.utctimestamp(), status="Running"
+            )
+            comicarr.WEEKLY_STATUS = "Running"
+            try:
+                pull_result = weeklypull.pullit()
+                if isinstance(pull_result, dict) and pull_result.get("status") == "failure":
+                    raise RuntimeError("Weekly pull source reported a failure")
+                weeklypull.future_check()
+            except Exception as e:
+                logger.error("[WEEKLY] Pull-list refresh failed: %s" % e)
+                _restore_manual_next_run()
+                helpers.job_management(
+                    write=True,
+                    job="Weekly Pullist",
+                    last_run_completed=helpers.utctimestamp(),
+                    status="Error",
+                    failure=True,
+                    failure_message=e,
+                )
+                comicarr.WEEKLY_STATUS = "Error"
+                return
+
             _restore_manual_next_run()
             helpers.job_management(
-                write=True,
-                job="Weekly Pullist",
-                last_run_completed=helpers.utctimestamp(),
-                status="Error",
-                failure=True,
-                failure_message=e,
+                write=True, job="Weekly Pullist", last_run_completed=helpers.utctimestamp(), status="Waiting"
             )
-            comicarr.WEEKLY_STATUS = "Error"
-            return
-
-        _restore_manual_next_run()
-        helpers.job_management(
-            write=True, job="Weekly Pullist", last_run_completed=helpers.utctimestamp(), status="Waiting"
-        )
-        comicarr.WEEKLY_STATUS = "Waiting"
+            comicarr.WEEKLY_STATUS = "Waiting"

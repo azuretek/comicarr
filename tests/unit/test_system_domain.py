@@ -811,6 +811,29 @@ class TestConfigService:
             {"JobName": "Weekly Pullist"},
         )
 
+    def test_startup_normalizes_queued_weekly_refresh(self, monkeypatch):
+        """A queued weekly state becomes waiting after a restart."""
+        monkeypatch.setattr(comicarr, "SCHED_WEEKLY_LAST", None)
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
+        monkeypatch.setattr(
+            system_service.db,
+            "select_all",
+            lambda statement: [
+                {
+                    "JobName": "Weekly Pullist",
+                    "status": "Queued",
+                    "prev_run_timestamp": 200.0,
+                    "last_success_timestamp": 100.0,
+                }
+            ],
+        )
+
+        with patch.object(system_service.db, "upsert") as upsert:
+            result = system_service.job_management(startup=True)
+
+        assert result["weekly"] == {"last": 100.0, "status": "Waiting"}
+        upsert.assert_called_once_with("jobhistory", {"status": "Waiting"}, {"JobName": "Weekly Pullist"})
+
     def test_sanitize_job_error_redacts_credentials(self):
         message = system_service.sanitize_job_error("token=secret https://user:pass@example.test failed")
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Search, RefreshCw } from "lucide-react";
 import {
@@ -107,10 +107,10 @@ export default function ReleasesPage() {
   const currentView: ReleasesView = viewParam === "all" ? "all" : "mine";
   const weeklyRefresh = useWeeklyRefresh();
   const queryClient = useQueryClient();
-  const [refreshRequestedAt, setRefreshRequestedAt] = useState<number | null>(
-    null,
-  );
-  const refreshRequested = refreshRequestedAt !== null;
+  const [refreshRequested, setRefreshRequested] = useState(false);
+  const [refreshObservedActive, setRefreshObservedActive] = useState(false);
+  const refreshAccepted = useRef(false);
+  const refreshInvalidated = useRef(false);
   const { data: jobs } = useScheduledJobs(refreshRequested);
   const { addToast } = useToast();
   const weeklyJob = jobs?.jobs.find((job) => job.id === "weekly");
@@ -124,36 +124,31 @@ export default function ReleasesPage() {
         : weeklyStatus === "error"
           ? weeklyJob?.last_error ||
             "Refresh failed. Check the pull source, then retry."
-          : weeklyJob?.last_success_timestamp &&
-              weeklyJob.last_success_timestamp >= refreshRequestedAt
+          : weeklyStatus === "waiting" && refreshObservedActive
             ? "Releases refreshed."
             : "Refresh queued — it will start shortly.";
 
   useEffect(() => {
     if (
-      !refreshRequestedAt ||
+      !refreshRequested ||
+      !refreshAccepted.current ||
+      !refreshObservedActive ||
       weeklyStatus !== "waiting" ||
-      !weeklyJob?.last_success_timestamp ||
-      weeklyJob.last_success_timestamp < refreshRequestedAt
+      refreshInvalidated.current
     ) {
       return;
     }
+    refreshInvalidated.current = true;
     queryClient.invalidateQueries({ queryKey: ["weekly"] });
     queryClient.invalidateQueries({ queryKey: ["upcoming"] });
     queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-  }, [
-    queryClient,
-    refreshRequestedAt,
-    weeklyJob?.last_success_timestamp,
-    weeklyStatus,
-  ]);
+  }, [queryClient, refreshObservedActive, refreshRequested, weeklyStatus]);
 
   const setView = (view: ReleasesView) => {
     setSearchParams({ view });
   };
 
   const handleWeeklyRefresh = async () => {
-    const requestStartedAt = Date.now() / 1_000;
     try {
       const result = await weeklyRefresh.mutateAsync();
       if (result.state === "paused" || (!result.accepted && result.error)) {
@@ -165,7 +160,12 @@ export default function ReleasesPage() {
         });
         return;
       }
-      setRefreshRequestedAt(requestStartedAt);
+      refreshAccepted.current = result.accepted;
+      refreshInvalidated.current = false;
+      setRefreshObservedActive(
+        result.state === "queued" || result.state === "running",
+      );
+      setRefreshRequested(true);
       addToast({
         type: "info",
         message:

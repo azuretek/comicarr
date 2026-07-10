@@ -38,12 +38,17 @@ from comicarr.tables import comics, jobhistory, storyarcs
 
 # Shared rate limiter instance (same object used by CherryPy and FastAPI)
 _rate_limiter = LoginRateLimiter()
-_weekly_refresh_lock = threading.Lock()
+_fallback_weekly_refresh_lock = threading.Lock()
 
 WEEKLY_JOB_NAME = "Weekly Pullist"
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
 CONFIG_PERSISTENCE_ERROR = "Failed to persist configuration"
+
+
+def get_weekly_refresh_lock():
+    """Return the process-wide weekly lock after package initialization."""
+    return getattr(comicarr, "WEEKLY_REFRESH_LOCK", _fallback_weekly_refresh_lock)
 
 
 def _secret_is_configured(value):
@@ -651,7 +656,7 @@ def _get_weekly_job_history():
 
 def request_weekly_refresh(ctx):
     """Queue the existing weekly APScheduler job for an immediate, coalesced run."""
-    with _weekly_refresh_lock:
+    with get_weekly_refresh_lock():
         scheduler = getattr(ctx, "scheduler", None)
         if scheduler is None:
             return {"accepted": False, "state": "unavailable", "error": "Weekly scheduler is unavailable"}
@@ -1082,16 +1087,18 @@ def job_management(
             jstatus = ji["status"]
             if jstatus is None:
                 jstatus = "Waiting"
-            elif jstatus == "Running":
+            elif jstatus == "Running" or (jstatus == "Queued" and "weekly" in ji["JobName"].lower()):
+                was_running = jstatus == "Running"
                 jstatus = "Waiting"
                 recovery_values = {"status": jstatus}
                 if "weekly" in ji["JobName"].lower():
-                    recovery_values.update(
-                        {
-                            "last_failure_timestamp": ji["prev_run_timestamp"],
-                            "last_error": "Previous weekly refresh was interrupted by restart.",
-                        }
-                    )
+                    if was_running:
+                        recovery_values.update(
+                            {
+                                "last_failure_timestamp": ji["prev_run_timestamp"],
+                                "last_error": "Previous weekly refresh was interrupted by restart.",
+                            }
+                        )
                 db.upsert("jobhistory", recovery_values, {"JobName": ji["JobName"]})
             if "update" in ji["JobName"].lower():
                 if comicarr.SCHED_DBUPDATE_LAST is None:

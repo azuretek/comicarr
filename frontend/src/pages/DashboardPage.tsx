@@ -34,12 +34,12 @@ function Kpi({
 }
 
 function QueueStatus({ status }: { status: DashboardQueueItem["status"] }) {
-  const normalized = (status || "queued").toLowerCase();
-  const color = normalized.includes("fail")
-    ? "var(--status-error)"
-    : normalized.includes("download")
-      ? "var(--status-active)"
-      : "var(--status-paused)";
+  const color =
+    status === "Failed"
+      ? "var(--status-error)"
+      : status === "Downloading"
+        ? "var(--status-active)"
+        : "var(--status-paused)";
 
   return (
     <span className="uppercase truncate" style={{ color }}>

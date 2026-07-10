@@ -9,7 +9,7 @@
 
 """Tests for comicarr.app.dashboard.service."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +19,7 @@ import pytest
 def _default_queue_count(monkeypatch):
     monkeypatch.setattr("comicarr.app.dashboard.service.dl_queries.count_active_ddl_items", lambda: 0)
     monkeypatch.setattr("comicarr.app.dashboard.service.dl_queries.get_active_ddl_preview", lambda limit: [])
+    monkeypatch.setattr("comicarr.app.dashboard.service.storyarcs_service.get_upcoming", lambda include_downloaded: [])
 
 
 class _FakeDBConnection:
@@ -53,7 +54,7 @@ class TestGetDashboardData:
             {
                 "ComicName": "Spider-Man",
                 "Issue_Number": "1",
-                "DateAdded": "2026-04-01",
+                "DateAdded": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
                 "Status": "Snatched",
                 "Provider": "nzb",
                 "ComicID": "100",

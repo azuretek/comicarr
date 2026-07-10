@@ -205,9 +205,9 @@ export const handlers = [
         {
           id: "weekly",
           name: "Weekly Pullist",
-          next_run_time: null,
-          trigger: "cron",
-          status: "Waiting",
+          next_run_time: "2026-07-10T16:00:00Z",
+          trigger: "interval[0:04:00]",
+          status: "Queued",
           last_success_timestamp: null,
           last_failure_timestamp: null,
           last_error: null,
