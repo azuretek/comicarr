@@ -28,7 +28,15 @@ QUERY_PATTERNS = {
     },
     "completion_filter": {
         "description": "Filter series by completion percentage",
-        "sql": "SELECT ComicID, ComicName, ComicYear, Have, Total, ComicImage, CASE WHEN Total > 0 THEN CAST(Have AS FLOAT) / Total * 100 ELSE 0 END as pct FROM comics WHERE Status != 'Paused' HAVING pct >= ? AND pct <= ? ORDER BY pct DESC LIMIT ?",
+        "sql": (
+            "SELECT ComicID, ComicName, ComicYear, Have, Total, ComicImage, pct "
+            "FROM ("
+            "SELECT ComicID, ComicName, ComicYear, Have, Total, ComicImage, "
+            "CASE WHEN Total > 0 THEN CAST(Have AS FLOAT) / Total * 100 ELSE 0 END AS pct "
+            "FROM comics WHERE Status != 'Paused'"
+            ") AS completion "
+            "WHERE pct >= ? AND pct <= ? ORDER BY pct DESC LIMIT ?"
+        ),
         "params": ["min_pct", "max_pct", "limit"],
         "defaults": {"limit": 20},
     },
