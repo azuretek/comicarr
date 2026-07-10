@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.18.6
+
+### Patch Changes
+
+- 0450b4a: Keep server-sent event streams responsive under burst traffic by replacing stale queued updates without emitting event-loop errors.
+- 2de9e62: Deduplicate legacy database rows across migration batches and report target constraint conflicts as failed migrations.
+- a9df84e: Fix AI library completion filters so percentage queries work on SQLite and preserve inclusive bounds, ordering, and limits.
+- 8f8fd4e: Validate and persist reconstructable direct-download jobs, keep malformed jobs from stopping the worker, and hold the GetComics download lock through archive publication.
+- cd53fb6: Keep provider downloads inside Comicarr's configured directories, publish completed files atomically, and reject remote ZIP archives that would expand beyond safe resource limits.
+- d8a05f1: Validate series directories against configured library roots and preserve database records when directory removal fails.
+- e1cbccf: Repair atomic upserts on legacy SQLite databases with an isolated safety snapshot and transactional unique indexes that preserve historical null or empty-key rows.
+- ee651ca: Persist config changes through a shared transaction boundary, encrypt secrets before disk writes, preserve private file permissions, and report storage failures without committing runtime config state.
+- 7298807: Stop logging 32P runtime credentials and scrub previously written credential lines from support carepackages.
+
 ## 0.18.5
 
 ### Patch Changes
