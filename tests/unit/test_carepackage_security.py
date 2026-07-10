@@ -49,10 +49,20 @@ def test_carepackage_clean_config_and_logs_redact_newer_secrets(tmp_path, monkey
     with open(config_path, "w") as config_file:
         parser.write(config_file)
 
+    runtime_32p_credentials = {
+        "user": "24680",
+        "auth": "runtime-auth-token",
+        "authkey": "runtime-auth-key",
+        "passkey": "runtime-pass-key",
+    }
+    monkeypatch.setattr(comicarr, "KEYS_32P", runtime_32p_credentials)
+
     log_path = log_dir / "comicarr.log"
     log_path.write_text(
         "slack-secret mattermost-secret matrix-secret ai-secret "
         "github-secret postgres://user:database-secret@example/db\n"
+        "uid:24680 / authkey:runtime-auth-key / passkey:runtime-pass-key\n"
+        "32P feed auth=runtime-auth-token\n"
     )
     (data_dir / "comicarr.db").write_text("")
 
@@ -73,6 +83,7 @@ def test_carepackage_clean_config_and_logs_redact_newer_secrets(tmp_path, monkey
         "ai-secret",
         "database-secret",
         "github-secret",
+        *runtime_32p_credentials.values(),
     )
     expected_redacted_options = (
         ("Git", "git_token"),
