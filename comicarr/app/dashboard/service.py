@@ -17,6 +17,14 @@ from datetime import datetime, timedelta
 import comicarr
 from comicarr import db, logger
 from comicarr.app.downloads import queries as dl_queries
+from comicarr.app.storyarcs import service as storyarcs_service
+
+RECENT_ACTIVITY_DAYS = 30
+
+
+def recent_activity_cutoff(now=None):
+    """Return the inclusive cutoff for the dashboard's bounded activity preview."""
+    return (now or datetime.now()) - timedelta(days=RECENT_ACTIVITY_DAYS)
 
 
 def get_dashboard_data(ctx):
@@ -27,8 +35,9 @@ def get_dashboard_data(ctx):
     """
     result = {
         "recently_downloaded": [],
+        "active_queue": [],
         "upcoming_releases": [],
-        "stats": {},
+        "stats": {"queue_count": 0},
         "ai_activity": [],
         "ai_configured": False,
         "scan_targets": {
@@ -37,29 +46,23 @@ def get_dashboard_data(ctx):
         },
     }
 
-    # Recently downloaded: last 10 from snatched, sorted by DateAdded DESC
+    # Recent activity is a bounded preview. Full history retains all rows.
     try:
+        cutoff = recent_activity_cutoff().strftime("%Y-%m-%d %H:%M:%S")
         recent = db.DBConnection().select(
             "SELECT s.ComicName, s.Issue_Number, s.DateAdded, s.Status, s.Provider, "
             "s.ComicID, s.IssueID, c.ComicImage "
             "FROM snatched s LEFT JOIN comics c ON s.ComicID = c.ComicID "
-            "ORDER BY s.DateAdded DESC LIMIT 10"
+            "WHERE s.DateAdded >= ? ORDER BY s.DateAdded DESC LIMIT 10",
+            [cutoff],
         )
         result["recently_downloaded"] = recent or []
     except Exception as e:
         logger.error("[DASHBOARD] Error fetching recent downloads: %s" % e)
 
-    # Upcoming: next 7 days from futureupcoming
+    # Library releases: matching titles from this application current week.
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        week_ahead = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-        upcoming = db.DBConnection().select(
-            "SELECT ComicName, IssueNumber, IssueDate, Publisher, ComicID, Status "
-            "FROM futureupcoming WHERE IssueDate >= ? AND IssueDate <= ? "
-            "ORDER BY IssueDate ASC LIMIT 20",
-            [today, week_ahead],
-        )
-        result["upcoming_releases"] = upcoming or []
+        result["upcoming_releases"] = storyarcs_service.get_upcoming(include_downloaded=True) or []
     except Exception as e:
         logger.error("[DASHBOARD] Error fetching upcoming: %s" % e)
 
@@ -80,11 +83,6 @@ def get_dashboard_data(ctx):
                 "total_expected": total_expected,
                 "completion_pct": round(total_issues / total_expected * 100, 1) if total_expected > 0 else 0,
             }
-
-        try:
-            result["stats"].setdefault("queue_count", dl_queries.count_active_ddl_items())
-        except Exception as e:
-            logger.error("[DASHBOARD] Error fetching active queue count: %s" % e)
             result["stats"].setdefault("queue_count", 0)
 
         # Manga-specific stats
@@ -115,6 +113,18 @@ def get_dashboard_data(ctx):
             result["stats"]["comic_total"] = comic_stats.get("comic_total", 0) or 0
     except Exception as e:
         logger.error("[DASHBOARD] Error fetching stats: %s" % e)
+
+    # Queue KPI and preview deliberately share the active DDL predicate.
+    try:
+        result["stats"]["queue_count"] = dl_queries.count_active_ddl_items()
+    except Exception as e:
+        logger.error("[DASHBOARD] Error fetching active queue count: %s" % e)
+        result["stats"].setdefault("queue_count", 0)
+
+    try:
+        result["active_queue"] = dl_queries.get_active_ddl_preview(limit=5)
+    except Exception as e:
+        logger.error("[DASHBOARD] Error fetching active queue preview: %s" % e)
 
     # AI activity: last 5 entries (only if AI configured)
     # Check both runtime client and saved config (client requires restart)

@@ -670,17 +670,20 @@ def clear_read_issues():
 # ---------------------------------------------------------------------------
 
 
-def get_upcoming(include_downloaded=False):
-    """Get upcoming issues for the current week."""
-    today = datetime.date.today()
+def get_current_week(today=None):
+    """Return the application current Sunday-based week and year."""
+    today = today or datetime.date.today()
     if today.strftime("%U") == "00":
         weekday = 0 if today.isoweekday() == 7 else today.isoweekday()
         sunday = today - datetime.timedelta(days=weekday)
-        week = sunday.strftime("%U")
-        year = sunday.strftime("%Y")
-    else:
-        week = today.strftime("%U")
-        year = today.strftime("%Y")
+        return sunday.strftime("%U"), sunday.strftime("%Y")
+
+    return today.strftime("%U"), today.strftime("%Y")
+
+
+def get_upcoming(include_downloaded=False):
+    """Get upcoming issues for the current week."""
+    week, year = get_current_week()
 
     return arc_queries.get_upcoming(week, year, include_downloaded=include_downloaded)
 

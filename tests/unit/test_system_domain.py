@@ -5,6 +5,7 @@ Covers: auth login/logout, SSE streaming, config endpoints, JWT cookies.
 """
 
 import configparser
+import datetime
 import json
 import os
 import stat
@@ -176,9 +177,7 @@ class TestVerifyLogin:
         assert result["success"] is True
         assert result["username"] == "admin"
         assert ctx.config.HTTP_PASSWORD == "legacy-password"
-        ctx.config.apply_transaction.assert_called_once_with(
-            {"http_password": "$2b$12$migrated"}, configure=False
-        )
+        ctx.config.apply_transaction.assert_called_once_with({"http_password": "$2b$12$migrated"}, configure=False)
 
 
 # =============================================================================
@@ -666,6 +665,181 @@ class TestConfigService:
         result = system_service.get_job_info(ctx)
         assert len(result["jobs"]) == 1
         assert result["jobs"][0]["id"] == "search_job"
+
+    def test_get_job_info_includes_durable_weekly_outcomes(self):
+        """The weekly scheduler reports its durable outcome fields for refresh polling."""
+        ctx = _make_test_ctx()
+        mock_job = MagicMock()
+        mock_job.id = "weekly"
+        mock_job.name = "Weekly Pullist"
+        mock_job.next_run_time = "2026-07-12T00:00:00Z"
+        mock_job.trigger = "interval"
+        ctx.scheduler.get_jobs.return_value = [mock_job]
+
+        with patch.object(
+            system_service,
+            "_get_weekly_job_history",
+            return_value={
+                "status": "Error",
+                "last_success_timestamp": 100.0,
+                "last_failure_timestamp": 200.0,
+                "last_error": "upstream unavailable",
+            },
+        ):
+            result = system_service.get_job_info(ctx)
+
+        weekly = result["jobs"][0]
+        assert weekly["state"] == "error"
+        assert weekly["last_success_timestamp"] == 100.0
+        assert weekly["last_failure_timestamp"] == 200.0
+        assert weekly["last_error"] == "upstream unavailable"
+
+    def test_weekly_refresh_queues_the_existing_scheduler_job(self, monkeypatch):
+        """Manual refresh modifies the existing weekly job instead of creating work."""
+        ctx = _make_test_ctx()
+        job = MagicMock()
+        job.next_run_time = datetime.datetime(2026, 7, 12, 0, 0, 0)
+        ctx.scheduler.get_job.return_value = job
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
+        monkeypatch.setattr(comicarr, "WEEKLY_MANUAL_NEXT_RUN", None)
+
+        with patch.object(system_service.db, "upsert") as upsert:
+            result = system_service.request_weekly_refresh(ctx)
+
+        assert result["accepted"] is True
+        assert result["state"] == "queued"
+        job.modify.assert_called_once()
+        upsert.assert_called_once_with("jobhistory", {"status": "Queued"}, {"JobName": "Weekly Pullist"})
+        assert comicarr.WEEKLY_MANUAL_NEXT_RUN == job.next_run_time
+
+    def test_weekly_refresh_coalesces_an_already_queued_request(self, monkeypatch):
+        """Repeated clicks leave one scheduled run in place."""
+        ctx = _make_test_ctx()
+        job = MagicMock()
+        job.next_run_time = "2026-07-12T00:00:00Z"
+        ctx.scheduler.get_job.return_value = job
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Queued")
+
+        result = system_service.request_weekly_refresh(ctx)
+
+        assert result == {
+            "accepted": False,
+            "state": "queued",
+            "next_run_time": "2026-07-12T00:00:00Z",
+        }
+        job.modify.assert_not_called()
+
+    def test_weekly_refresh_rejects_while_the_job_is_running(self, monkeypatch):
+        """A running weekly pull cannot be scheduled a second time."""
+        ctx = _make_test_ctx()
+        job = MagicMock()
+        job.next_run_time = "2026-07-12T00:00:00Z"
+        ctx.scheduler.get_job.return_value = job
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Running")
+
+        result = system_service.request_weekly_refresh(ctx)
+
+        assert result["accepted"] is False
+        assert result["state"] == "running"
+        job.modify.assert_not_called()
+
+    def test_weekly_completion_preserves_the_scheduler_next_run(self, monkeypatch):
+        """A manual pull does not replace APScheduler's interval cadence."""
+        next_run = datetime.datetime(2026, 7, 10, 16, 0, 0)
+
+        class WeeklyJob:
+            next_run_time = next_run
+
+            def __init__(self):
+                self.modify_calls = 0
+
+            def __str__(self):
+                return "Weekly Pullist (trigger: interval], next run at: 2026-07-10 16:00:00 UTC)"
+
+            def modify(self, **_kwargs):
+                self.modify_calls += 1
+
+        job = WeeklyJob()
+        scheduler = MagicMock()
+        scheduler.get_jobs.return_value = [job]
+        monkeypatch.setattr(comicarr, "SCHED", scheduler)
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
+        monkeypatch.setattr(comicarr, "SCHED_WEEKLY_LAST", None)
+        monkeypatch.setattr(comicarr, "FORCE_STATUS", {})
+
+        with patch.object(system_service.db, "upsert") as upsert:
+            system_service.job_management(
+                write=True,
+                job="Weekly Pullist",
+                last_run_completed=1_783_692_000.0,
+                status="Waiting",
+            )
+
+        assert job.modify_calls == 0
+        values = upsert.call_args.args[1]
+        assert values["next_run_datetime"] == next_run
+        assert values["next_run_timestamp"] == next_run.timestamp()
+
+    def test_startup_recovers_an_interrupted_weekly_refresh(self, monkeypatch):
+        """A persisted Running state becomes safe-to-schedule after a restart."""
+        monkeypatch.setattr(comicarr, "SCHED_WEEKLY_LAST", None)
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
+        monkeypatch.setattr(
+            system_service.db,
+            "select_all",
+            lambda statement: [
+                {
+                    "JobName": "Weekly Pullist",
+                    "status": "Running",
+                    "prev_run_timestamp": 200.0,
+                    "last_success_timestamp": 100.0,
+                }
+            ],
+        )
+
+        with patch.object(system_service.db, "upsert") as upsert:
+            result = system_service.job_management(startup=True)
+
+        assert result["weekly"] == {"last": 100.0, "status": "Waiting"}
+        upsert.assert_called_once_with(
+            "jobhistory",
+            {
+                "status": "Waiting",
+                "last_failure_timestamp": 200.0,
+                "last_error": "Previous weekly refresh was interrupted by restart.",
+            },
+            {"JobName": "Weekly Pullist"},
+        )
+
+    def test_startup_normalizes_queued_weekly_refresh(self, monkeypatch):
+        """A queued weekly state becomes waiting after a restart."""
+        monkeypatch.setattr(comicarr, "SCHED_WEEKLY_LAST", None)
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
+        monkeypatch.setattr(
+            system_service.db,
+            "select_all",
+            lambda statement: [
+                {
+                    "JobName": "Weekly Pullist",
+                    "status": "Queued",
+                    "prev_run_timestamp": 200.0,
+                    "last_success_timestamp": 100.0,
+                }
+            ],
+        )
+
+        with patch.object(system_service.db, "upsert") as upsert:
+            result = system_service.job_management(startup=True)
+
+        assert result["weekly"] == {"last": 100.0, "status": "Waiting"}
+        upsert.assert_called_once_with("jobhistory", {"status": "Waiting"}, {"JobName": "Weekly Pullist"})
+
+    def test_sanitize_job_error_redacts_credentials(self):
+        message = system_service.sanitize_job_error("token=secret https://user:pass@example.test failed")
+
+        assert "secret" not in message
+        assert "user:pass" not in message
+        assert "[redacted]" in message
 
     def test_get_version_info(self):
         """get_version_info returns version data from context."""

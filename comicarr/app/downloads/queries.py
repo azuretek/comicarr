@@ -106,6 +106,17 @@ def count_active_ddl_items():
     return (row or {}).get("queue_count", 0) or 0
 
 
+def get_active_ddl_preview(limit=5):
+    """Return the newest active queue rows for compact operational summaries."""
+    stmt = (
+        select(t_ddl_info)
+        .where(active_ddl_condition())
+        .order_by(t_ddl_info.c.updated_date.desc(), t_ddl_info.c.ID.desc())
+        .limit(limit)
+    )
+    return db.select_all(stmt)
+
+
 def get_ddl_queue(limit=None, offset=None, search=None, status=None, sort=None, order="desc"):
     """Get active DDL queue items with search, sorting, and pagination."""
     stmt = select(t_ddl_info).where(active_ddl_condition())

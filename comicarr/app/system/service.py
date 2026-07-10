@@ -25,8 +25,11 @@ import secrets
 import shlex
 import subprocess
 import sys
+import threading
 from collections import namedtuple
 from pathlib import Path
+
+from sqlalchemy import select
 
 import comicarr
 from comicarr import db, logger
@@ -35,9 +38,17 @@ from comicarr.tables import comics, jobhistory, storyarcs
 
 # Shared rate limiter instance (same object used by CherryPy and FastAPI)
 _rate_limiter = LoginRateLimiter()
+_fallback_weekly_refresh_lock = threading.Lock()
+
+WEEKLY_JOB_NAME = "Weekly Pullist"
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
 CONFIG_PERSISTENCE_ERROR = "Failed to persist configuration"
+
+
+def get_weekly_refresh_lock():
+    """Return the process-wide weekly lock after package initialization."""
+    return getattr(comicarr, "WEEKLY_REFRESH_LOCK", _fallback_weekly_refresh_lock)
 
 
 def _secret_is_configured(value):
@@ -593,17 +604,110 @@ def get_job_info(ctx):
     if not ctx.scheduler:
         return {"jobs": []}
 
+    weekly_history = _get_weekly_job_history()
     jobs = []
     for job in ctx.scheduler.get_jobs():
-        jobs.append(
-            {
-                "id": job.id,
-                "name": job.name,
-                "next_run_time": str(job.next_run_time) if job.next_run_time else None,
-                "trigger": str(job.trigger),
-            }
-        )
+        job_info = {
+            "id": job.id,
+            "name": job.name,
+            "next_run_time": str(job.next_run_time) if job.next_run_time else None,
+            "trigger": str(job.trigger),
+        }
+        if job.id == "weekly":
+            status = weekly_history.get("status") or getattr(comicarr, "WEEKLY_STATUS", "Waiting")
+            if job.next_run_time is None:
+                status = "Paused"
+            job_info.update(
+                {
+                    "status": status,
+                    "state": _weekly_state(status),
+                    "last_success_timestamp": weekly_history.get("last_success_timestamp"),
+                    "last_failure_timestamp": weekly_history.get("last_failure_timestamp"),
+                    "last_error": weekly_history.get("last_error"),
+                }
+            )
+        jobs.append(job_info)
     return {"jobs": jobs}
+
+
+def _weekly_state(status):
+    """Normalize persisted scheduler status for API consumers."""
+    return (status or "Waiting").strip().lower()
+
+
+def _get_weekly_job_history():
+    """Read durable weekly-job outcome data without making job status unavailable on DB errors."""
+    try:
+        return (
+            db.select_one(
+                select(
+                    jobhistory.c.status,
+                    jobhistory.c.last_success_timestamp,
+                    jobhistory.c.last_failure_timestamp,
+                    jobhistory.c.last_error,
+                ).where(jobhistory.c.JobName == WEEKLY_JOB_NAME)
+            )
+            or {}
+        )
+    except Exception as e:
+        logger.warn("[WEEKLY] Could not read durable refresh status: %s" % e)
+        return {}
+
+
+def request_weekly_refresh(ctx):
+    """Queue the existing weekly APScheduler job for an immediate, coalesced run."""
+    with get_weekly_refresh_lock():
+        scheduler = getattr(ctx, "scheduler", None)
+        if scheduler is None:
+            return {"accepted": False, "state": "unavailable", "error": "Weekly scheduler is unavailable"}
+
+        job = scheduler.get_job("weekly")
+        if job is None:
+            return {"accepted": False, "state": "unavailable", "error": "Weekly scheduler job is unavailable"}
+
+        state = _weekly_state(getattr(comicarr, "WEEKLY_STATUS", "Waiting"))
+        if state == "running":
+            return {
+                "accepted": False,
+                "state": "running",
+                "next_run_time": str(job.next_run_time) if job.next_run_time else None,
+            }
+        if job.next_run_time is None:
+            return {"accepted": False, "state": "paused", "error": "Weekly refresh is paused"}
+        if state == "queued":
+            return {
+                "accepted": False,
+                "state": "queued",
+                "next_run_time": str(job.next_run_time),
+            }
+
+        next_run_time = datetime.datetime.utcnow()
+        comicarr.WEEKLY_MANUAL_NEXT_RUN = job.next_run_time
+        job.modify(next_run_time=next_run_time)
+        comicarr.WEEKLY_STATUS = "Queued"
+        ctx.weekly_status = "Queued"
+        try:
+            db.upsert("jobhistory", {"status": "Queued"}, {"JobName": WEEKLY_JOB_NAME})
+        except Exception as e:
+            logger.warn("[WEEKLY] Could not persist refresh request state: %s" % e)
+
+        return {
+            "accepted": True,
+            "state": "queued",
+            "next_run_time": str(next_run_time),
+        }
+
+
+def sanitize_job_error(error):
+    """Keep operational errors useful without persisting credentials or large tracebacks."""
+    message = re.sub(r"\s+", " ", str(error or "")).strip()
+    message = re.sub(
+        r"(?i)(api[ _-]?key|authorization|password|token)\s*[=:]\s*[^\s,;]+",
+        r"\1=[redacted]",
+        message,
+    )
+    message = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[redacted]@", message)
+    return message[:500] or "Weekly refresh failed; check server logs for details."
 
 
 def get_startup_diagnostics(ctx):
@@ -954,7 +1058,14 @@ def script_env(mode, vars):
 
 
 def job_management(
-    write=False, job=None, last_run_completed=None, current_run=None, status=None, failure=False, startup=False
+    write=False,
+    job=None,
+    last_run_completed=None,
+    current_run=None,
+    status=None,
+    failure=False,
+    failure_message=None,
+    startup=False,
 ):
     from comicarr.helpers import utctimestamp
 
@@ -965,12 +1076,30 @@ def job_management(
         from sqlalchemy import select
 
         job_info = db.select_all(
-            select(jobhistory.c.JobName, jobhistory.c.status, jobhistory.c.prev_run_timestamp).distinct()
+            select(
+                jobhistory.c.JobName,
+                jobhistory.c.status,
+                jobhistory.c.prev_run_timestamp,
+                jobhistory.c.last_success_timestamp,
+            ).distinct()
         )
         for ji in job_info:
             jstatus = ji["status"]
-            if any([jstatus is None, jstatus == "Running"]):
+            if jstatus is None:
                 jstatus = "Waiting"
+            elif jstatus == "Running" or (jstatus == "Queued" and "weekly" in ji["JobName"].lower()):
+                was_running = jstatus == "Running"
+                jstatus = "Waiting"
+                recovery_values = {"status": jstatus}
+                if "weekly" in ji["JobName"].lower():
+                    if was_running:
+                        recovery_values.update(
+                            {
+                                "last_failure_timestamp": ji["prev_run_timestamp"],
+                                "last_error": "Previous weekly refresh was interrupted by restart.",
+                            }
+                        )
+                db.upsert("jobhistory", recovery_values, {"JobName": ji["JobName"]})
             if "update" in ji["JobName"].lower():
                 if comicarr.SCHED_DBUPDATE_LAST is None:
                     comicarr.SCHED_DBUPDATE_LAST = ji["prev_run_timestamp"]
@@ -995,7 +1124,7 @@ def job_management(
                 comicarr.RSS_STATUS = jstatus
             elif "weekly" in ji["JobName"].lower():
                 if comicarr.SCHED_WEEKLY_LAST is None:
-                    comicarr.SCHED_WEEKLY_LAST = ji["prev_run_timestamp"]
+                    comicarr.SCHED_WEEKLY_LAST = ji["last_success_timestamp"] or ji["prev_run_timestamp"]
                 if jstatus is None:
                     jstatus = "Waiting"
                 comicarr.WEEKLY_STATUS = jstatus
@@ -1070,7 +1199,8 @@ def job_management(
         elif jobname == "Weekly Pullist":
             prev_run_timestamp = comicarr.SCHED_WEEKLY_LAST
             if "next run" in jobstatus:
-                comicarr.WEEKLY_STATUS = "Waiting"
+                if comicarr.WEEKLY_STATUS not in {"Error", "Running", "Queued"}:
+                    comicarr.WEEKLY_STATUS = "Waiting"
                 if any(ky == "weekly" for ky, vl in comicarr.FORCE_STATUS.items()):
                     comicarr.WEEKLY_STATUS = comicarr.FORCE_STATUS["weekly"]
                     next_the_run = True
@@ -1226,11 +1356,13 @@ def job_management(
                                 comicarr.FORCE_STATUS.pop("weekly")
 
                             if comicarr.WEEKLY_STATUS != "Paused":
-                                if comicarr.CONFIG.ALT_PULL == 2:
-                                    wkt = 4
-                                else:
-                                    wkt = 24
-                                nextrun_stamp = utctimestamp() + (wkt * 60 * 60)
+                                # APScheduler has already advanced the interval trigger
+                                # before the job body runs. Preserve that cadence after a
+                                # manual refresh instead of replacing it with a one-off
+                                # delay that drifts from the configured schedule.
+                                nextrun_date = getattr(jbst, "next_run_time", None)
+                                if nextrun_date is not None:
+                                    nextrun_stamp = nextrun_date.timestamp()
                             else:
                                 comicarr.SCHED.pause_job("weekly")
                             comicarr.SCHED_WEEKLY_LAST = last_run_completed
@@ -1261,9 +1393,13 @@ def job_management(
 
                     if jobstore is not None:
                         if nextrun_stamp is not None:
-                            nextrun_date = datetime.datetime.utcfromtimestamp(nextrun_stamp)
-                            jobstore.modify(next_run_time=nextrun_date)
-                            nextrun_date = nextrun_date.replace(microsecond=0)
+                            if job == "Weekly Pullist":
+                                nextrun_date = getattr(jobstore, "next_run_time", None)
+                            else:
+                                nextrun_date = datetime.datetime.utcfromtimestamp(nextrun_stamp)
+                                jobstore.modify(next_run_time=nextrun_date)
+                            if nextrun_date is not None:
+                                nextrun_date = nextrun_date.replace(microsecond=0)
                     else:
                         # if the rss is enabled after startup, we have to re-set it up...
                         nextrun_stamp = utctimestamp() + (int(comicarr.CONFIG.RSS_CHECKINTERVAL) * 60)
@@ -1283,6 +1419,20 @@ def job_management(
                     "next_run_datetime": nextrun_date,
                     "status": status,
                 }
+                if failure:
+                    updateVals.update(
+                        {
+                            "last_failure_timestamp": last_run_completed,
+                            "last_error": sanitize_job_error(failure_message),
+                        }
+                    )
+                else:
+                    updateVals.update(
+                        {
+                            "last_success_timestamp": last_run_completed,
+                            "last_error": None,
+                        }
+                    )
 
             logger.fdebug("Job update for %s: %s" % (updateCtrl, updateVals))
             db.upsert("jobhistory", updateVals, updateCtrl)

@@ -9,6 +9,7 @@
 
 """Tests for comicarr.app.dashboard.service."""
 
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +18,8 @@ import pytest
 @pytest.fixture(autouse=True)
 def _default_queue_count(monkeypatch):
     monkeypatch.setattr("comicarr.app.dashboard.service.dl_queries.count_active_ddl_items", lambda: 0)
+    monkeypatch.setattr("comicarr.app.dashboard.service.dl_queries.get_active_ddl_preview", lambda limit: [])
+    monkeypatch.setattr("comicarr.app.dashboard.service.storyarcs_service.get_upcoming", lambda include_downloaded: [])
 
 
 class _FakeDBConnection:
@@ -51,7 +54,7 @@ class TestGetDashboardData:
             {
                 "ComicName": "Spider-Man",
                 "Issue_Number": "1",
-                "DateAdded": "2026-04-01",
+                "DateAdded": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
                 "Status": "Snatched",
                 "Provider": "nzb",
                 "ComicID": "100",
@@ -59,7 +62,7 @@ class TestGetDashboardData:
                 "ComicImage": "http://img/1.jpg",
             },
         ]
-        fake_db = _FakeDBConnection(select_results={"snatched": recent, "futureupcoming": []})
+        fake_db = _FakeDBConnection(select_results={"snatched": recent})
         mock_db.DBConnection.return_value = fake_db
 
         from comicarr.app.dashboard.service import get_dashboard_data
@@ -71,27 +74,67 @@ class TestGetDashboardData:
 
     @patch("comicarr.app.dashboard.service.db")
     @patch("comicarr.app.dashboard.service.comicarr")
-    def test_returns_upcoming_releases(self, mock_comicarr, mock_db):
+    def test_recent_activity_uses_an_inclusive_30_day_cutoff(self, mock_comicarr, mock_db, monkeypatch):
+        mock_comicarr.AI_CLIENT = None
+        cutoff = datetime(2026, 6, 10, 12, 0, 0)
+        monkeypatch.setattr("comicarr.app.dashboard.service.recent_activity_cutoff", lambda: cutoff)
+        fake_db = _FakeDBConnection(select_results={"snatched": []})
+        mock_db.DBConnection.return_value = fake_db
+
+        from comicarr.app.dashboard.service import get_dashboard_data
+
+        get_dashboard_data(None)
+
+        recent_query, args = next((query, args) for query, args in fake_db._select_calls if "FROM snatched" in query)
+        assert "WHERE s.DateAdded >= ?" in recent_query
+        assert args == ["2026-06-10 12:00:00"]
+
+    @patch("comicarr.app.dashboard.service.db")
+    @patch("comicarr.app.dashboard.service.comicarr")
+    def test_returns_current_week_library_releases(self, mock_comicarr, mock_db, monkeypatch):
         mock_comicarr.AI_CLIENT = None
         upcoming = [
             {
                 "ComicName": "Batman",
                 "IssueNumber": "5",
                 "IssueDate": "2026-04-06",
-                "Publisher": "DC Comics",
                 "ComicID": "300",
                 "Status": "Wanted",
             },
         ]
-        fake_db = _FakeDBConnection(select_results={"futureupcoming": upcoming, "snatched": []})
+        fake_db = _FakeDBConnection(select_results={"snatched": []})
+        mock_db.DBConnection.return_value = fake_db
+        get_upcoming = MagicMock(return_value=upcoming)
+        monkeypatch.setattr("comicarr.app.dashboard.service.storyarcs_service.get_upcoming", get_upcoming)
+
+        from comicarr.app.dashboard.service import get_dashboard_data
+
+        result = get_dashboard_data(None)
+
+        get_upcoming.assert_called_once_with(include_downloaded=True)
+        assert len(result["upcoming_releases"]) == 1
+        assert result["upcoming_releases"][0]["ComicName"] == "Batman"
+        assert all("futureupcoming" not in query for query, _args in fake_db._select_calls)
+
+    @patch("comicarr.app.dashboard.service.db")
+    @patch("comicarr.app.dashboard.service.comicarr")
+    def test_returns_active_queue_preview_with_shared_queue_query(self, mock_comicarr, mock_db, monkeypatch):
+        mock_comicarr.AI_CLIENT = None
+        queue_items = [{"ID": "queued-1", "series": "Batman", "status": "Queued"}]
+        get_active_preview = MagicMock(return_value=queue_items)
+        monkeypatch.setattr("comicarr.app.dashboard.service.dl_queries.get_active_ddl_preview", get_active_preview)
+        fake_db = _FakeDBConnection(
+            select_results={"snatched": []},
+            selectone_result={"total_series": 1, "total_issues": 1, "total_expected": 1},
+        )
         mock_db.DBConnection.return_value = fake_db
 
         from comicarr.app.dashboard.service import get_dashboard_data
 
         result = get_dashboard_data(None)
 
-        assert len(result["upcoming_releases"]) == 1
-        assert result["upcoming_releases"][0]["ComicName"] == "Batman"
+        get_active_preview.assert_called_once_with(limit=5)
+        assert result["active_queue"] == queue_items
 
     @patch("comicarr.app.dashboard.service.db")
     @patch("comicarr.app.dashboard.service.comicarr")
@@ -99,7 +142,7 @@ class TestGetDashboardData:
         mock_comicarr.AI_CLIENT = None
         stats_row = {"total_series": 10, "total_issues": 250, "total_expected": 500}
         fake_db = _FakeDBConnection(
-            select_results={"snatched": [], "futureupcoming": []},
+            select_results={"snatched": []},
             selectone_result=stats_row,
         )
         mock_db.DBConnection.return_value = fake_db
@@ -124,7 +167,7 @@ class TestGetDashboardData:
             lambda: 3,
         )
         fake_db = _FakeDBConnection(
-            select_results={"snatched": [], "futureupcoming": []},
+            select_results={"snatched": []},
             selectone_result={"total_series": 1, "total_issues": 1, "total_expected": 1},
         )
         mock_db.DBConnection.return_value = fake_db
@@ -145,7 +188,7 @@ class TestGetDashboardData:
             MagicMock(side_effect=RuntimeError("count failed")),
         )
         fake_db = _FakeDBConnection(
-            select_results={"snatched": [], "futureupcoming": []},
+            select_results={"snatched": []},
             selectone_result={"total_series": 1, "total_issues": 1, "total_expected": 1},
         )
         mock_db.DBConnection.return_value = fake_db
@@ -173,7 +216,7 @@ class TestGetDashboardData:
             },
         ]
         fake_db = _FakeDBConnection(
-            select_results={"snatched": [], "futureupcoming": [], "ai_activity_log": activity},
+            select_results={"snatched": [], "ai_activity_log": activity},
         )
         mock_db.DBConnection.return_value = fake_db
 
@@ -190,7 +233,7 @@ class TestGetDashboardData:
     def test_ai_not_configured(self, mock_comicarr, mock_db):
         mock_comicarr.AI_CLIENT = None
         mock_comicarr.CONFIG.AI_BASE_URL = None
-        fake_db = _FakeDBConnection(select_results={"snatched": [], "futureupcoming": []})
+        fake_db = _FakeDBConnection(select_results={"snatched": []})
         mock_db.DBConnection.return_value = fake_db
 
         from comicarr.app.dashboard.service import get_dashboard_data
@@ -206,7 +249,7 @@ class TestGetDashboardData:
         mock_comicarr.AI_CLIENT = None
         mock_comicarr.CONFIG.AI_BASE_URL = None
         fake_db = _FakeDBConnection(
-            select_results={"snatched": [], "futureupcoming": []},
+            select_results={"snatched": []},
             selectone_result=[],
         )
         mock_db.DBConnection.return_value = fake_db
@@ -234,7 +277,7 @@ class TestGetDashboardData:
         # Should return empty defaults, not raise
         assert result["recently_downloaded"] == []
         assert result["upcoming_releases"] == []
-        assert result["stats"] == {}
+        assert result["stats"] == {"queue_count": 0}
 
     @patch("comicarr.app.dashboard.service.db")
     @patch("comicarr.app.dashboard.service.comicarr")
@@ -242,7 +285,7 @@ class TestGetDashboardData:
         mock_comicarr.AI_CLIENT = None
         stats_row = {"total_series": 0, "total_issues": 0, "total_expected": 0}
         fake_db = _FakeDBConnection(
-            select_results={"snatched": [], "futureupcoming": []},
+            select_results={"snatched": []},
             selectone_result=stats_row,
         )
         mock_db.DBConnection.return_value = fake_db

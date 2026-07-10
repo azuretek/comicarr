@@ -4,7 +4,7 @@ import { RefreshCw } from "lucide-react";
 import ErrorDisplay from "@/components/ui/ErrorDisplay";
 import RelativeTime from "@/components/ui/RelativeTime";
 import { useToast } from "@/components/ui/toast";
-import { useDashboard } from "@/hooks/useDashboard";
+import { useDashboard, type DashboardQueueItem } from "@/hooks/useDashboard";
 import {
   useComicScan,
   useComicScanProgress,
@@ -30,6 +30,21 @@ function Kpi({
         </div>
       </div>
     </div>
+  );
+}
+
+function QueueStatus({ status }: { status: DashboardQueueItem["status"] }) {
+  const color =
+    status === "Failed"
+      ? "var(--status-error)"
+      : status === "Downloading"
+        ? "var(--status-active)"
+        : "var(--status-paused)";
+
+  return (
+    <span className="uppercase truncate" style={{ color }}>
+      {status || "Queued"}
+    </span>
   );
 }
 
@@ -105,6 +120,7 @@ export default function DashboardPage() {
 
   const stats = data?.stats;
   const downloads = data?.recently_downloaded || [];
+  const activeQueue = data?.active_queue || [];
   const upcoming = data?.upcoming_releases || [];
 
   const activeSeries = stats?.total_series ?? 0;
@@ -214,99 +230,177 @@ export default function DashboardPage() {
         <Kpi label="Queue" value={String(queueCount)} borderLeft />
       </div>
 
-      {/* Two-column body */}
+      {/* Operational summaries */}
       <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]">
-        {/* Queue & recent activity */}
+        {/* Active queue and recent history */}
         <section className="px-5 py-4 lg:border-r lg:border-border">
           <div className="flex items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2.5">
-              <div className="text-[13px] font-semibold">
-                Queue & recent activity
-              </div>
+              <div className="text-[13px] font-semibold">Active queue</div>
               <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
-                {downloads.length} events
+                {queueCount} item{queueCount === 1 ? "" : "s"}
               </div>
             </div>
             <Link
-              to="/activity?view=history"
+              to="/activity"
               className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
             >
-              view all →
+              open queue →
             </Link>
           </div>
 
           {isLoading && (
-            <div className="font-mono text-[11px] text-muted-foreground py-4">
-              loading activity…
+            <div className="font-mono text-[11px] text-muted-foreground py-3">
+              loading queue…
             </div>
           )}
 
-          {!isLoading && downloads.length === 0 && (
-            <div className="font-mono text-[11px] text-muted-foreground py-4">
-              no recent activity
+          {!isLoading && activeQueue.length === 0 && (
+            <div className="font-mono text-[11px] text-muted-foreground py-3">
+              queue is clear
             </div>
           )}
 
           <div className="font-mono text-[11px]">
-            {downloads.slice(0, 8).map((d, i) => {
-              const action = d.Status?.toLowerCase() || "—";
-              const color = action.includes("down")
-                ? "var(--chart-4)"
-                : action.includes("post") || action.includes("import")
-                  ? "var(--status-active)"
-                  : action.includes("snatch") || action.includes("queue")
-                    ? "var(--status-paused)"
-                    : "var(--muted-foreground)";
-              return (
-                <div
-                  key={`${d.ComicID}-${d.IssueID}-${i}`}
-                  className="grid items-center gap-2 py-1.5"
-                  style={{
-                    gridTemplateColumns: "120px 90px minmax(180px, 1fr) 140px",
-                    borderTop:
-                      i > 0
-                        ? "1px solid var(--border-soft, var(--border))"
-                        : "none",
-                  }}
-                >
-                  <RelativeTime value={d.DateAdded} />
-                  <span className="uppercase truncate" style={{ color }}>
-                    {action}
-                  </span>
-                  <div className="flex items-center gap-2 min-w-0">
-                    {d.ComicID && (
-                      <img
-                        src={`/api/metadata/art/${d.ComicID}`}
-                        alt=""
-                        className="w-4 h-6 object-cover rounded-[1px] shrink-0"
-                        onError={(e) => {
-                          e.currentTarget.style.visibility = "hidden";
-                        }}
-                      />
-                    )}
-                    <Link
-                      to={`/library/${d.ComicID}`}
-                      className="font-sans text-foreground truncate hover:text-[var(--primary)]"
-                    >
-                      {d.ComicName} #{d.Issue_Number}
-                    </Link>
+            {activeQueue.map((item, index) => (
+              <div
+                key={item.ID}
+                className="grid items-center gap-2 py-1.5"
+                style={{
+                  gridTemplateColumns: "minmax(140px, 1fr) 100px 120px",
+                  borderTop:
+                    index > 0
+                      ? "1px solid var(--border-soft, var(--border))"
+                      : "none",
+                }}
+              >
+                <div className="min-w-0">
+                  <div className="font-sans text-foreground truncate">
+                    {item.series || item.filename || "Unnamed download"}
                   </div>
-                  <span className="text-muted-foreground truncate">
-                    {d.Provider || "—"}
-                  </span>
+                  {item.filename && item.filename !== item.series && (
+                    <div className="text-muted-foreground truncate">
+                      {item.filename}
+                    </div>
+                  )}
                 </div>
-              );
-            })}
+                <QueueStatus status={item.status} />
+                <span className="text-muted-foreground truncate text-right">
+                  {item.updated_date ? (
+                    <RelativeTime value={item.updated_date} />
+                  ) : (
+                    "—"
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-border">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="text-[13px] font-semibold">Recent activity</div>
+                <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                  {downloads.length} event{downloads.length === 1 ? "" : "s"} ·
+                  30 days
+                </div>
+              </div>
+              <Link
+                to="/activity?view=history"
+                className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                open history →
+              </Link>
+            </div>
+
+            {isLoading && (
+              <div className="font-mono text-[11px] text-muted-foreground py-4">
+                loading recent activity…
+              </div>
+            )}
+
+            {!isLoading && downloads.length === 0 && (
+              <div className="font-mono text-[11px] text-muted-foreground py-4">
+                no activity in the last 30 days —{" "}
+                <Link
+                  to="/activity?view=history"
+                  className="hover:text-foreground"
+                >
+                  open full history
+                </Link>
+              </div>
+            )}
+
+            <div className="font-mono text-[11px]">
+              {downloads.slice(0, 5).map((d, i) => {
+                const action = d.Status?.toLowerCase() || "—";
+                const color = action.includes("down")
+                  ? "var(--chart-4)"
+                  : action.includes("post") || action.includes("import")
+                    ? "var(--status-active)"
+                    : action.includes("snatch") || action.includes("queue")
+                      ? "var(--status-paused)"
+                      : "var(--muted-foreground)";
+                return (
+                  <div
+                    key={`${d.ComicID}-${d.IssueID}-${i}`}
+                    className="grid items-center gap-2 py-1.5"
+                    style={{
+                      gridTemplateColumns:
+                        "120px 90px minmax(180px, 1fr) 140px",
+                      borderTop:
+                        i > 0
+                          ? "1px solid var(--border-soft, var(--border))"
+                          : "none",
+                    }}
+                  >
+                    <RelativeTime value={d.DateAdded} />
+                    <span className="uppercase truncate" style={{ color }}>
+                      {action}
+                    </span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      {d.ComicID && (
+                        <img
+                          src={`/api/metadata/art/${d.ComicID}`}
+                          alt=""
+                          className="w-4 h-6 object-cover rounded-[1px] shrink-0"
+                          onError={(e) => {
+                            e.currentTarget.style.visibility = "hidden";
+                          }}
+                        />
+                      )}
+                      <Link
+                        to={`/library/${d.ComicID}`}
+                        className="font-sans text-foreground truncate hover:text-[var(--primary)]"
+                      >
+                        {d.ComicName} #{d.Issue_Number}
+                      </Link>
+                    </div>
+                    <span className="text-muted-foreground truncate">
+                      {d.Provider || "—"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </section>
 
         {/* This week */}
         <section className="px-5 py-4">
-          <div className="flex items-center gap-2.5 mb-3">
-            <div className="text-[13px] font-semibold">This week</div>
-            <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
-              {upcoming.length} releases
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="text-[13px] font-semibold">This week</div>
+              <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                {upcoming.length} releases
+              </div>
             </div>
+            <Link
+              to="/releases?view=mine"
+              className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+            >
+              view mine →
+            </Link>
           </div>
 
           {isLoading && (
