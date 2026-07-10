@@ -1690,9 +1690,7 @@ def _build_upsert_unique_constraints():
     for table_name, constraint_name in _UPSERT_UNIQUE_CONSTRAINT_NAMES.items():
         key_cols = UPSERT_KEYS.get(table_name)
         if not key_cols:
-            raise RuntimeError(
-                "[UNIQUE-MIGRATION] UPSERT_KEYS has no entry for allowlisted table %s" % table_name
-            )
+            raise RuntimeError("[UNIQUE-MIGRATION] UPSERT_KEYS has no entry for allowlisted table %s" % table_name)
         constraints[table_name] = (list(key_cols), constraint_name)
     return constraints
 
@@ -1926,10 +1924,7 @@ def _mysql_dedup_valid_keys(conn, table_name, key_cols):
 
 
 def _add_unique_constraint_sql(quoted_table, quoted_constraint, quoted_keys):
-    return (
-        f"ALTER TABLE {quoted_table} ADD CONSTRAINT {quoted_constraint} "
-        f"UNIQUE ({', '.join(quoted_keys)})"
-    )
+    return f"ALTER TABLE {quoted_table} ADD CONSTRAINT {quoted_constraint} UNIQUE ({', '.join(quoted_keys)})"
 
 
 def _backup_sqlite_unique_migration(engine, backup_func=None):
