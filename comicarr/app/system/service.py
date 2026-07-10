@@ -36,6 +36,9 @@ from comicarr.tables import comics, jobhistory, storyarcs
 # Shared rate limiter instance (same object used by CherryPy and FastAPI)
 _rate_limiter = LoginRateLimiter()
 
+SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
+CONFIG_PERSISTENCE_ERROR = "Failed to persist configuration"
+
 
 def _secret_is_configured(value):
     """Return True when a config secret has a meaningful stored value."""
@@ -102,10 +105,10 @@ def _migrate_password(ctx, plaintext_password):
     from comicarr import encrypted
 
     new_hash = encrypted.hash_password(plaintext_password)
-    if ctx.config:
-        ctx.config.process_kwargs({"http_password": new_hash})
-        ctx.config.writeconfig()
-    logger.info("[AUTH] Password migrated to bcrypt")
+    if ctx.config and ctx.config.apply_transaction({"http_password": new_hash}, configure=False):
+        logger.info("[AUTH] Password migrated to bcrypt")
+    else:
+        logger.error("[AUTH] Failed to persist bcrypt password migration")
 
 
 def announce_setup_token(setup_token):
@@ -142,16 +145,21 @@ def initial_setup(ctx, username, password, setup_token):
     if len(password) < 8:
         return {"success": False, "error": "Password must be at least 8 characters"}
 
-    hashed_password = encrypted.hash_password(password)
-    ctx.config.process_kwargs(
-        {
-            "http_username": username,
-            "http_password": hashed_password,
-            "authentication": 2,
-        }
-    )
-    ctx.config.writeconfig()
-    ctx.config.configure(update=True, startup=False)
+    try:
+        hashed_password = encrypted.hash_password(password)
+        persisted = ctx.config.apply_transaction(
+            {
+                "http_username": username,
+                "http_password": hashed_password,
+                "authentication": 2,
+            }
+        )
+    except Exception as e:
+        logger.error("[AUTH-SETUP] Failed to persist initial credentials: %s" % e)
+        persisted = False
+
+    if not persisted:
+        return {"success": False, "error": SETUP_PERSISTENCE_ERROR}
 
     logger.info("[AUTH-SETUP] Initial credentials configured for user: %s" % username)
 
@@ -473,13 +481,17 @@ def update_config(ctx, key_values):
     if not filtered:
         return {"success": False, "error": "No valid config keys provided"}
 
-    # Apply scheduler change first (idempotent), then write config
     interval_keys = {"SEARCH_INTERVAL", "RSS_CHECK_INTERVAL", "DOWNLOAD_SCAN_INTERVAL", "DBUPDATE_INTERVAL"}
     interval_changed = any(k in interval_keys for k in filtered)
 
-    ctx.config.process_kwargs(filtered)
-    ctx.config.writeconfig()
-    ctx.config.configure(update=True, startup=False)
+    try:
+        persisted = ctx.config.apply_transaction(filtered)
+    except Exception as e:
+        logger.error("[CONFIG] Failed to persist configuration update: %s" % e)
+        persisted = False
+
+    if not persisted:
+        return {"success": False, "error": CONFIG_PERSISTENCE_ERROR}
 
     if interval_changed:
         _reconfigure_schedulers(ctx)
@@ -498,22 +510,10 @@ def regenerate_api_key(ctx):
         return {"success": False, "error": "Config not loaded"}
 
     new_api_key = secrets.token_hex(16)
-    old_api_key = getattr(ctx.config, "API_KEY", None)
-    wrote_to_disk = False
     try:
-        ctx.config.process_kwargs({"api_key": new_api_key})
-        if ctx.config.writeconfig() is False:
+        if ctx.config.apply_transaction({"api_key": new_api_key}) is False:
             raise OSError("config write failed")
-        wrote_to_disk = True
-        ctx.config.configure(update=True, startup=False)
     except Exception as e:
-        try:
-            ctx.config.process_kwargs({"api_key": old_api_key})
-            if wrote_to_disk:
-                ctx.config.writeconfig()
-                ctx.config.configure(update=True, startup=False)
-        except Exception as rollback_error:
-            logger.error("[API-KEY] Failed to restore previous API key after regeneration failure: %s" % rollback_error)
         logger.error("[API-KEY] Failed to persist regenerated API key: %s" % e)
         return {"success": False, "error": "Failed to persist new API key"}
 
@@ -534,9 +534,7 @@ def update_providers(ctx, provider_data):
     if provider_type not in ("newznab", "torznab"):
         return {"success": False, "error": "Invalid provider type"}
 
-    # Delegate to config's provider handling
-    ctx.config.process_kwargs({provider_type: providers})
-    ctx.config.writeconfig()
+    ctx.config.writeconfig_values({provider_type: providers})
     ctx.config.configure(update=True, startup=False)
 
     return {"success": True}
@@ -735,8 +733,7 @@ def upgrade_dynamic():
         + str(len(dynamic_storylist))
         + " entries within the db."
     )
-    comicarr.CONFIG.DYNAMIC_UPDATE = 4
-    comicarr.CONFIG.writeconfig()
+    comicarr.CONFIG.writeconfig(values={"dynamic_update": 4})
     return
 
 

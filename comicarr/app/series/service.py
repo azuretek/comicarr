@@ -933,7 +933,6 @@ def updateComicLocation():
             logger.info(
                 "There are no series in your watchlist to Update the locations. Not updating anything at this time."
             )
-        comicarr.CONFIG.LOCMOVE = False
         comicarr.CONFIG.writeconfig(values={"locmove": False})
     else:
         logger.info("No new ComicLocation path specified - not updating. Set NEWCOMD_DIR in config.ini")
