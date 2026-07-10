@@ -28,9 +28,9 @@ import logging
 import os
 import re
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
 from comicarr.tables import UPSERT_KEYS, metadata
 
@@ -158,6 +158,23 @@ def _clean_row(row_dict, table_name, int_columns, text_columns):
     return cleaned, conversions
 
 
+def _quote_identifier(identifier):
+    """Quote a SQLite identifier used in migration-only source queries."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _stable_source_order(source_inspector, table_name):
+    """Return a deterministic order for paginating a legacy SQLite table."""
+    primary_key = source_inspector.get_pk_constraint(table_name) or {}
+    primary_key_columns = primary_key.get("constrained_columns") or []
+    if primary_key_columns:
+        return ", ".join(_quote_identifier(column) for column in primary_key_columns)
+
+    # Ordinary legacy SQLite tables always expose a unique rowid. WITHOUT ROWID
+    # tables require a primary key, so they take the branch above.
+    return "rowid"
+
+
 def validate(source_url, target_url):
     """Dry-run validation: report type mismatches, duplicates, and row counts."""
     print("\n=== Validation Mode ===")
@@ -281,10 +298,14 @@ def migrate(source_url, target_url, batch_size=5000):
 
         # Get target column names to filter source data
         target_cols = {c.name for c in table_obj.columns}
+        table_identifier = _quote_identifier(table_name)
+        table_migrated = 0
+        table_cleaned = 0
+        table_deduped = 0
 
         try:
             with source_engine.connect() as source_conn:
-                count_result = source_conn.execute(text(f"SELECT COUNT(*) FROM {table_name}"))
+                count_result = source_conn.execute(text(f"SELECT COUNT(*) FROM {table_identifier}"))
                 row_count = count_result.scalar()
 
                 if row_count == 0:
@@ -293,31 +314,31 @@ def migrate(source_url, target_url, batch_size=5000):
 
                 # Read and insert in batches
                 offset = 0
-                table_migrated = 0
-                table_cleaned = 0
-                table_deduped = 0
+                seen_keys = set()
+                upsert_keys = UPSERT_KEYS.get(table_name)
+                source_order = _stable_source_order(source_inspector, table_name)
 
                 while offset < row_count:
                     rows = source_conn.execute(
-                        text(f"SELECT * FROM {table_name} LIMIT :limit OFFSET :offset"),
+                        text(f"SELECT * FROM {table_identifier} ORDER BY {source_order} LIMIT :limit OFFSET :offset"),
                         {"limit": batch_size, "offset": offset},
                     )
 
                     batch = []
-                    seen_keys = set()
+                    batch_cleaned = 0
                     for row in rows:
                         row_dict = dict(row._mapping)
                         # Filter to only columns that exist in the target schema
                         row_dict = {k: v for k, v in row_dict.items() if k in target_cols}
                         cleaned, conversions = _clean_row(row_dict, table_name, int_cols, text_cols)
                         table_cleaned += len(conversions)
+                        batch_cleaned += len(conversions)
 
                         # Deduplicate rows that would violate UNIQUE constraints
-                        upsert_keys = UPSERT_KEYS.get(table_name)
                         if upsert_keys:
                             key_vals = tuple(cleaned.get(k) for k in upsert_keys)
-                            if any(v is None or v == "" for v in key_vals):
-                                batch.append(cleaned)  # Allow NULL keys
+                            if any(v is None for v in key_vals):
+                                batch.append(cleaned)  # UNIQUE constraints allow NULL keys
                             elif key_vals in seen_keys:
                                 table_deduped += 1
                                 continue  # Skip duplicate
@@ -331,11 +352,12 @@ def migrate(source_url, target_url, batch_size=5000):
                         with target_engine.begin() as target_conn:
                             target_conn.execute(table_obj.insert(), batch)
                         table_migrated += len(batch)
+                        total_migrated += len(batch)
+
+                    total_cleaned += batch_cleaned
 
                     offset += batch_size
 
-                total_migrated += table_migrated
-                total_cleaned += table_cleaned
                 total_deduped[table_name] = table_deduped
                 parts = []
                 if table_cleaned:
@@ -345,13 +367,14 @@ def migrate(source_url, target_url, batch_size=5000):
                 status = f"({', '.join(parts)})" if parts else ""
                 print(f"  {table_name:25s}  {table_migrated:>8,d} rows migrated  {status}")
 
-        except (OperationalError, ProgrammingError) as e:
+        except (IntegrityError, OperationalError, ProgrammingError) as e:
             failed_tables.append((table_name, str(e)))
             print(f"  FAIL  {table_name}: {e}")
 
     # --- Post-migration verification ---
     print("\n=== Verification ===")
     verify_ok = True
+    failed_table_names = {name for name, _ in failed_tables}
     for table_name in ALL_TABLES:
         if table_name not in source_tables:
             continue
@@ -359,13 +382,17 @@ def migrate(source_url, target_url, batch_size=5000):
         if table_obj is None:
             continue
 
+        table_identifier = _quote_identifier(table_name)
         with source_engine.connect() as conn:
-            src_count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+            src_count = conn.execute(text(f"SELECT COUNT(*) FROM {table_identifier}")).scalar()
         with target_engine.connect() as conn:
-            tgt_count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+            tgt_count = conn.execute(select(func.count()).select_from(table_obj)).scalar()
 
         deduped = total_deduped.get(table_name, 0)
-        if src_count == tgt_count:
+        if table_name in failed_table_names:
+            match = "FAILED"
+            verify_ok = False
+        elif src_count == tgt_count:
             match = "OK"
         elif deduped and src_count == tgt_count + deduped:
             match = f"OK ({deduped} deduped)"

@@ -1656,11 +1656,11 @@ def mass_publishers(publishers, weeknumber, year):
     if publishers is None:
         stmt = select(weekly).where((weekly.c.weeknumber == weeknumber) & (weekly.c.year == year))
         watchlist = db.select_all(stmt)
-        comicarr.CONFIG.MASS_PUBLISHERS = []
+        mass_publishers = []
     else:
         for pb in publishers:
             pub_listing.append(pb)
-        comicarr.CONFIG.MASS_PUBLISHERS = json.loads(json.dumps(pub_listing))
+        mass_publishers = json.loads(json.dumps(pub_listing))
         stmt = select(weekly).where(
             (weekly.c.weeknumber == weeknumber) & (weekly.c.year == year) & (weekly.c.PUBLISHER.in_(publishers))
         )
@@ -1668,7 +1668,7 @@ def mass_publishers(publishers, weeknumber, year):
 
     comicarr.CONFIG.writeconfig(
         values={
-            "mass_publishers": json.dumps(comicarr.CONFIG.MASS_PUBLISHERS),
+            "mass_publishers": json.dumps(mass_publishers),
             "auto_mass_add": comicarr.CONFIG.AUTO_MASS_ADD,
         }
     )

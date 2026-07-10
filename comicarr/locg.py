@@ -185,8 +185,8 @@ def locg(pulldate=None, weeknumber=None, year=None):
 
         logger.info("[PULL-LIST] Successfully populated pull-list into Comicarr for week %s of %s" % (weeknumber, year))
         # set the last poll date/time here so that we don't start overwriting stuff too much...
-        comicarr.CONFIG.PULL_REFRESH = todaydate.strftime("%Y-%m-%d %H:%M:%S")
-        comicarr.CONFIG.writeconfig(values={"pull_refresh": comicarr.CONFIG.PULL_REFRESH})
+        pull_refresh = todaydate.strftime("%Y-%m-%d %H:%M:%S")
+        comicarr.CONFIG.writeconfig(values={"pull_refresh": pull_refresh})
 
         return {"status": "success", "count": len(data), "weeknumber": weeknumber, "year": year}
 

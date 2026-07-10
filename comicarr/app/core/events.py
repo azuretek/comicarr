@@ -17,7 +17,15 @@ to safely enqueue events from non-async threads.
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass
+
+from comicarr import logger
+
+# Rate-limit overflow diagnostics so bursts do not flood logs.
+_OVERFLOW_LOG_INTERVAL_SEC = 5.0
+_last_overflow_log = 0.0
+_overflow_log_lock = threading.Lock()
 
 
 @dataclass
@@ -51,6 +59,39 @@ class EventBus:
         with self._lock:
             self._subscribers.pop(sub_id, None)
 
+    @staticmethod
+    def _log_overflow_drop(event):
+        """Emit a rate-limited debug line when oldest events are dropped."""
+        global _last_overflow_log
+        now = time.monotonic()
+        with _overflow_log_lock:
+            if now - _last_overflow_log < _OVERFLOW_LOG_INTERVAL_SEC:
+                return
+            _last_overflow_log = now
+        event_type = getattr(event, "event_type", "?")
+        logger.fdebug("[EventBus] Dropped oldest subscriber event to retain newest type=%s" % event_type)
+
+    @staticmethod
+    def _enqueue_latest(q, event):
+        """Enqueue on the event-loop thread, retaining the newest event."""
+        try:
+            q.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            return
+
+        EventBus._log_overflow_drop(event)
+
     def publish_sync(self, event_type, payload):
         """Thread-safe publish from background threads into async queues.
 
@@ -66,9 +107,7 @@ class EventBus:
 
         for q in snapshot:
             try:
-                self._loop.call_soon_threadsafe(q.put_nowait, event)
-            except asyncio.QueueFull:
-                pass  # Slow consumer — drop oldest would be better but skip for now
+                self._loop.call_soon_threadsafe(self._enqueue_latest, q, event)
             except RuntimeError:
                 pass  # Event loop closed during shutdown
 
