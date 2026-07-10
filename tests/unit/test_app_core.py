@@ -205,8 +205,37 @@ class TestEventBus:
         queued_events = [q.get_nowait() for _ in range(q.qsize())]
         assert loop_errors == []
         assert len(queued_events) == q.maxsize
-        assert queued_events[0] == seed_events[1]
-        assert queued_events[-1] == AppEvent("latest", {"index": q.maxsize})
+        assert queued_events == seed_events[1:] + [AppEvent("latest", {"index": q.maxsize})]
+        bus.unsubscribe(sub_id)
+
+    @pytest.mark.asyncio
+    async def test_publish_burst_retains_newest_window_when_queue_full(self):
+        bus = EventBus()
+        loop = asyncio.get_running_loop()
+        bus.set_loop(loop)
+
+        sub_id, q = bus.subscribe()
+        seed_events = [AppEvent("seed", {"index": index}) for index in range(q.maxsize)]
+        for event in seed_events:
+            q.put_nowait(event)
+
+        burst_count = 3
+        newest_events = [AppEvent("burst", {"index": q.maxsize + offset}) for offset in range(burst_count)]
+
+        loop_errors = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            for event in newest_events:
+                bus.publish_sync(event.event_type, event.payload)
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+        queued_events = [q.get_nowait() for _ in range(q.qsize())]
+        assert loop_errors == []
+        assert len(queued_events) == q.maxsize
+        assert queued_events == seed_events[burst_count:] + newest_events
         bus.unsubscribe(sub_id)
 
 
