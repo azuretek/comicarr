@@ -156,7 +156,7 @@ def _add_intent_column(engine, table_name):
     quoted_table = engine.dialect.identifier_preparer.quote(table_name)
     quoted_column = engine.dialect.identifier_preparer.quote("AcquisitionIntent")
     with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE %s ADD COLUMN %s TEXT" % (quoted_table, quoted_column)))
+        conn.execute(text("ALTER TABLE %s ADD COLUMN %s VARCHAR(16)" % (quoted_table, quoted_column)))
 
 
 def _ensure_control_row(engine):

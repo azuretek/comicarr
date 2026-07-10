@@ -12,7 +12,7 @@
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import String, create_engine, inspect, text
 
 import comicarr
 from comicarr.app.acquisition.maintenance import (
@@ -22,7 +22,16 @@ from comicarr.app.acquisition.maintenance import (
     refresh_runtime_state,
 )
 from comicarr.db import get_engine, shutdown_engine
-from comicarr.tables import metadata
+from comicarr.tables import (
+    acquisition_maintenance,
+    acquisition_maintenance_leases,
+    acquisition_run_items,
+    acquisition_runs,
+    acquisition_schema_versions,
+    annuals,
+    issues,
+    metadata,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -104,6 +113,26 @@ def test_schema_migration_upgrades_a_v0189_shaped_legacy_schema(tmp_path):
     assert "AcquisitionIntent" in {column["name"] for column in inspect(legacy_engine).get_columns("issues")}
     assert "AcquisitionIntent" in {column["name"] for column in inspect(legacy_engine).get_columns("annuals")}
     legacy_engine.dispose()
+
+
+def test_schema_uses_bounded_types_for_every_indexed_text_column():
+    indexed_columns = {
+        issues.c.AcquisitionIntent,
+        annuals.c.AcquisitionIntent,
+        acquisition_schema_versions.c.component,
+        acquisition_runs.c.run_id,
+        acquisition_runs.c.completion_state,
+        acquisition_run_items.c.run_id,
+        acquisition_run_items.c.command_kind,
+        acquisition_run_items.c.entity_type,
+        acquisition_run_items.c.entity_id,
+        acquisition_run_items.c.state,
+        acquisition_maintenance.c.control_id,
+        acquisition_maintenance_leases.c.lease_id,
+        acquisition_maintenance_leases.c.released_at,
+    }
+
+    assert all(isinstance(column.type, String) and column.type.length for column in indexed_columns)
 
 
 def test_schema_or_operator_gate_fails_closed_without_preventing_runtime_status(monkeypatch):
