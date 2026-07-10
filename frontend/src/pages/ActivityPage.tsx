@@ -254,22 +254,28 @@ function ActivityTableView<TData>({
             }
             title={search ? filteredTitle : emptyTitle}
             description={search ? "Try a different filter." : emptyDescription}
+            action={
+              pagination && pagination.offset > 0
+                ? {
+                    label: "Previous",
+                    onClick: onPrevPage,
+                    variant: "outline",
+                  }
+                : undefined
+            }
           />
         </div>
       )}
-      {!isLoading &&
-        !error &&
-        pagination &&
-        (rows.length > 0 || pagination.offset > 0) && (
-          <div className="overflow-hidden border-b border-border">
-            {rows.length > 0 && <DataTable table={table} />}
-            <DataTableServerPagination
-              pagination={pagination}
-              onNextPage={onNextPage}
-              onPrevPage={onPrevPage}
-            />
-          </div>
-        )}
+      {!isLoading && !error && pagination && rows.length > 0 && (
+        <div className="overflow-hidden border-b border-border">
+          <DataTable table={table} />
+          <DataTableServerPagination
+            pagination={pagination}
+            onNextPage={onNextPage}
+            onPrevPage={onPrevPage}
+          />
+        </div>
+      )}
     </>
   );
 }

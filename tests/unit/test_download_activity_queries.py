@@ -7,12 +7,11 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-from inspect import getsource
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import create_engine, event, insert, text
 from sqlalchemy import inspect as sa_inspect
 
 import comicarr
@@ -209,9 +208,46 @@ def test_unpaginated_service_preserves_filters_and_array_shape(monkeypatch):
     queue.assert_called_once_with(search="flash", status="failed", sort=None, order="desc")
 
 
-def test_activity_index_is_created_after_legacy_ddl_columns():
-    source = getsource(comicarr.dbcheck)
-
-    assert source.index('_ensure_columns(engine, "ddl_info", ddl_cols)') < source.index(
-        "ddl_info_status_updated.create(engine, checkfirst=True)"
+def test_legacy_ddl_schema_migration_adds_column_before_activity_index(tmp_path, monkeypatch):
+    """A pre-activity database gets the indexed column before the index is built."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-activity.db'}")
+    monkeypatch.setattr(comicarr.db, "_engine", engine)
+    monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        comicarr,
+        "CONFIG",
+        SimpleNamespace(DYNAMIC_UPDATE=4, OLDCONFIG_VERSION=None),
     )
+    monkeypatch.setattr(comicarr, "_migrate_unique_constraints", lambda _engine: None)
+
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE ddl_info (ID TEXT, status TEXT)"))
+
+    statements = []
+
+    def capture_sql(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement.lower())
+
+    event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        comicarr.dbcheck()
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_sql)
+
+    ddl_columns = {column["name"] for column in sa_inspect(engine).get_columns("ddl_info")}
+    ddl_indexes = {index["name"] for index in sa_inspect(engine).get_indexes("ddl_info")}
+    assert "updated_date" in ddl_columns
+    assert "ddl_info_status_updated" in ddl_indexes
+
+    column_add = next(
+        index
+        for index, statement in enumerate(statements)
+        if "alter table ddl_info add column updated_date" in statement
+    )
+    index_create = next(
+        index for index, statement in enumerate(statements) if "create index ddl_info_status_updated" in statement
+    )
+    assert column_add < index_create
+
+    engine.dispose()
+    monkeypatch.setattr(comicarr.db, "_engine", None)

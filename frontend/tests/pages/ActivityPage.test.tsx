@@ -72,6 +72,11 @@ describe("ActivityPage", () => {
         requests.some((url) => url.searchParams.get("offset") === "25"),
       ).toBe(true);
     });
+    expect(await screen.findByText("No matching queue items")).toBeTruthy();
+    expect(screen.queryByText(/Showing \d+ to \d+ of/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Previous" }).hasAttribute("disabled"),
+    ).toBe(false);
     await user.click(screen.getByRole("button", { name: "Previous" }));
     await waitFor(() => {
       expect(requests.at(-1)?.searchParams.get("offset")).toBe("0");
