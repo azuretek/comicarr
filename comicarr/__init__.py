@@ -20,6 +20,7 @@
 
 import csv
 import datetime
+import glob
 import hashlib
 import itertools
 import json
@@ -482,6 +483,11 @@ def initialize(config_file):
         logger.info("Checking to see if the database has all tables....")
         try:
             dbcheck()
+        except RuntimeError as e:
+            # Unique-constraint backup/migration aborts must fail closed — do not
+            # soft-catch them as a generic "Cannot connect to the database".
+            logger.error("[UNIQUE-MIGRATION] Refusing startup after migration abort: %s" % e)
+            raise
         except Exception as e:
             logger.error("Cannot connect to the database: %s" % e)
         else:
@@ -1652,20 +1658,46 @@ def dbcheck():
         helpers.upgrade_dynamic()
 
 
-_UPSERT_UNIQUE_CONSTRAINTS = {
-    "issues": (["IssueID"], "uq_issues_issueid"),
-    "annuals": (["IssueID"], "uq_annuals_issueid"),
-    "storyarcs": (["IssueArcID"], "uq_storyarcs_issuearcid"),
-    "readlist": (["IssueID"], "uq_readlist_issueid"),
-    "failed": (["ID", "Provider", "NZBName"], "uq_failed_id_provider_nzbname"),
-    "upcoming": (["ComicID", "IssueNumber"], "uq_upcoming_comicid_issuenum"),
-    "nzblog": (["IssueID", "PROVIDER"], "uq_nzblog_issueid_provider"),
-    "importresults": (["impID"], "uq_importresults_impid"),
-    "jobhistory": (["JobName"], "uq_jobhistory_jobname"),
-    "snatched": (["IssueID", "Status", "Provider"], "uq_snatched_issue_status_provider"),
-    "oneoffhistory": (["ComicID", "IssueID"], "uq_oneoffhistory_comicid_issueid"),
-    "weekly": (["ComicID", "IssueID"], "uq_weekly_comicid_issueid"),
+# Explicit allowlist of legacy tables that need migration-time UNIQUE enforcement.
+# Key columns are derived from tables.UPSERT_KEYS so constraint targets stay aligned
+# with atomic upserts. Tables that already ship with enforcement (comics, rssdb,
+# ref32p, ddl_info, exceptions_log, tmp_searches, notifs, provider_searches,
+# mylar_info, ...) are intentionally excluded.
+_UPSERT_UNIQUE_CONSTRAINT_NAMES = {
+    "issues": "uq_issues_issueid",
+    "annuals": "uq_annuals_issueid",
+    "storyarcs": "uq_storyarcs_issuearcid",
+    "readlist": "uq_readlist_issueid",
+    "failed": "uq_failed_id_provider_nzbname",
+    "upcoming": "uq_upcoming_comicid_issuenum",
+    "nzblog": "uq_nzblog_issueid_provider",
+    "importresults": "uq_importresults_impid",
+    "jobhistory": "uq_jobhistory_jobname",
+    "snatched": "uq_snatched_issue_status_provider",
+    "oneoffhistory": "uq_oneoffhistory_comicid_issueid",
+    "weekly": "uq_weekly_comicid_issueid",
 }
+
+# Fixed-name pre-dedup snapshot; excluded from auto_backup_db timestamp rotation.
+_PRE_UNIQUE_MIGRATION_BACKUP = "comicarr.db.pre-unique-migration.bak"
+
+
+def _build_upsert_unique_constraints():
+    """Map allowlisted tables to (key_cols from UPSERT_KEYS, constraint name)."""
+    from comicarr.tables import UPSERT_KEYS
+
+    constraints = {}
+    for table_name, constraint_name in _UPSERT_UNIQUE_CONSTRAINT_NAMES.items():
+        key_cols = UPSERT_KEYS.get(table_name)
+        if not key_cols:
+            raise RuntimeError(
+                "[UNIQUE-MIGRATION] UPSERT_KEYS has no entry for allowlisted table %s" % table_name
+            )
+        constraints[table_name] = (list(key_cols), constraint_name)
+    return constraints
+
+
+_UPSERT_UNIQUE_CONSTRAINTS = _build_upsert_unique_constraints()
 
 
 def _index_has_partial_predicate(index):
@@ -1761,14 +1793,178 @@ def _sqlite_database_path(engine):
     return os.path.abspath(os.path.expanduser(str(database)))
 
 
+def _row_identity_column(dialect):
+    """Return the dialect-native physical row identity used for deduplication."""
+    if dialect == "sqlite":
+        return "rowid"
+    if dialect == "postgresql":
+        return "ctid"
+    return None
+
+
+# Library tables where MAX(rowid) can discard an older complete copy in favor of
+# a newer refresh stub. Prefer Location / completion Status over pure LWW.
+_LIBRARY_QUALITY_DEDUP_TABLES = frozenset({"issues", "annuals", "readlist", "storyarcs"})
+
+
+def _status_rank_sql(quoted_status_column):
+    """Higher is better — prefer completed/on-disk states over Wanted stubs."""
+    return (
+        f"CASE {quoted_status_column} "
+        f"WHEN 'Downloaded' THEN 50 "
+        f"WHEN 'Archived' THEN 50 "
+        f"WHEN 'Snatched' THEN 40 "
+        f"WHEN 'Failed' THEN 20 "
+        f"WHEN 'Wanted' THEN 10 "
+        f"WHEN 'Skipped' THEN 10 "
+        f"ELSE 15 END"
+    )
+
+
+def _library_quality_order_sql(quote, column_names, row_identity):
+    """ORDER BY clause for library-quality survivor selection (DESC ranks first)."""
+    columns = {name.casefold() for name in column_names}
+    order_parts = []
+    if "location" in columns:
+        loc = quote("Location")
+        order_parts.append(f"CASE WHEN {loc} IS NOT NULL AND {loc} != '' THEN 1 ELSE 0 END DESC")
+    if "status" in columns:
+        order_parts.append(f"{_status_rank_sql(quote('Status'))} DESC")
+    # Final tie-breaker: highest physical row id (legacy LWW).
+    order_parts.append(f"{row_identity} DESC")
+    return ", ".join(order_parts)
+
+
+def _dedup_delete_sql(
+    dialect,
+    quoted_table,
+    quoted_keys,
+    valid_key_predicate,
+    table_name=None,
+    column_names=None,
+    quote=None,
+):
+    """Build DELETE that keeps one row per valid key group.
+
+    Default is MAX(rowid/ctid). For library tables with Status/Location columns,
+    prefer non-empty Location and stronger Status, then row identity.
+    """
+    row_identity = _row_identity_column(dialect)
+    if row_identity is None:
+        return None
+
+    use_quality = (
+        table_name in _LIBRARY_QUALITY_DEDUP_TABLES
+        and column_names is not None
+        and quote is not None
+        and ({name.casefold() for name in column_names} & {"location", "status"})
+    )
+    if not use_quality:
+        group_by = ", ".join(quoted_keys)
+        return (
+            f"DELETE FROM {quoted_table} WHERE {row_identity} NOT IN ("
+            f"SELECT MAX({row_identity}) FROM {quoted_table} WHERE {valid_key_predicate} "
+            f"GROUP BY {group_by}"
+            f") AND {valid_key_predicate}"
+        )
+
+    partition = ", ".join(quoted_keys)
+    order_by = _library_quality_order_sql(quote, column_names, row_identity)
+    # Delete every non-winner (rn > 1) among valid-key rows.
+    return (
+        f"DELETE FROM {quoted_table} WHERE {row_identity} IN ("
+        f"SELECT {row_identity} FROM ("
+        f"SELECT {row_identity}, ROW_NUMBER() OVER ("
+        f"PARTITION BY {partition} ORDER BY {order_by}"
+        f") AS _comicarr_rn FROM {quoted_table} WHERE {valid_key_predicate}"
+        f") AS _comicarr_ranked WHERE _comicarr_rn > 1"
+        f")"
+    )
+
+
+def _mysql_dedup_valid_keys(conn, table_name, key_cols):
+    """Remove duplicate valid-key rows on MySQL/MariaDB primary-less tables.
+
+    Legacy Comicarr tables often lack a primary key, so MySQL has no rowid/ctid.
+    For each valid key group with count C > 1, DELETE ... LIMIT C-1 keeps one
+    arbitrary survivor. Must run in the same connection/transaction as ADD CONSTRAINT
+    where the engine allows (MySQL DDL may still implicitly commit).
+    """
+    quote = conn.dialect.identifier_preparer.quote_identifier
+    quoted_table = quote(table_name)
+    quoted_keys = [quote(column) for column in key_cols]
+    valid_key_predicate = _valid_key_predicate(quoted_keys)
+    group_by = ", ".join(quoted_keys)
+
+    dup_rows = (
+        conn.execute(
+            text(
+                f"SELECT {group_by}, COUNT(*) AS _comicarr_cnt FROM {quoted_table} "
+                f"WHERE {valid_key_predicate} "
+                f"GROUP BY {group_by} HAVING COUNT(*) > 1"
+            )
+        )
+        .mappings()
+        .all()
+    )
+
+    for row in dup_rows:
+        cnt = int(row["_comicarr_cnt"])
+        if cnt < 2:
+            continue
+        predicates = []
+        params = {}
+        for index, column in enumerate(key_cols):
+            param = f"k{index}"
+            predicates.append(f"{quote(column)} = :{param}")
+            params[param] = row[column]
+        where_clause = " AND ".join(predicates) + " AND " + valid_key_predicate
+        conn.execute(
+            text(f"DELETE FROM {quoted_table} WHERE {where_clause} LIMIT {cnt - 1}"),
+            params,
+        )
+
+
+def _add_unique_constraint_sql(quoted_table, quoted_constraint, quoted_keys):
+    return (
+        f"ALTER TABLE {quoted_table} ADD CONSTRAINT {quoted_constraint} "
+        f"UNIQUE ({', '.join(quoted_keys)})"
+    )
+
+
 def _backup_sqlite_unique_migration(engine, backup_func=None):
-    """Create the mandatory WAL-safe backup for a destructive SQLite migration."""
+    """Create the mandatory WAL-safe backup for a destructive SQLite migration.
+
+    Backups are co-located with the live database file under
+    ``<db-dir>/backups/migrations/``. A fixed-name pin
+    (``comicarr.db.pre-unique-migration.bak``) is written once and preserved
+    across retention rotation of timestamped backups.
+    """
     source_path = _sqlite_database_path(engine)
     if source_path is None:
         return
 
-    data_dir = getattr(comicarr, "DATA_DIR", None) or os.path.dirname(source_path)
-    backup_dir = os.path.join(data_dir, "backups", "migrations")
+    # Prefer the live DB directory over DATA_DIR when they differ (e.g. custom DB path).
+    backup_dir = os.path.join(os.path.dirname(source_path), "backups", "migrations")
+    pin_path = os.path.join(backup_dir, _PRE_UNIQUE_MIGRATION_BACKUP)
+    abs_source = os.path.abspath(source_path)
+    abs_backup_dir = os.path.abspath(backup_dir)
+    abs_pin = os.path.abspath(pin_path)
+
+    logger.info(
+        "[UNIQUE-MIGRATION] Pre-migration backup source=%s dest_dir=%s pin=%s",
+        abs_source,
+        abs_backup_dir,
+        abs_pin,
+    )
+
+    if os.path.isfile(pin_path):
+        logger.info(
+            "[UNIQUE-MIGRATION] Reusing existing pre-unique-migration pin backup at %s",
+            abs_pin,
+        )
+        return
+
     config = getattr(comicarr, "CONFIG", None)
     retention = getattr(config, "BACKUP_RETENTION", 4) if config is not None else 4
     retention = retention or 4
@@ -1778,13 +1974,30 @@ def _backup_sqlite_unique_migration(engine, backup_func=None):
         backup_succeeded = backup(source_path, backup_dir, retention)
     except Exception as e:
         message = "SQLite unique-constraint backup failed before migration"
-        logger.error("%s: %s", message, e)
+        logger.error("[UNIQUE-MIGRATION] %s: %s", message, e)
         raise RuntimeError(message) from e
 
     if not backup_succeeded:
         message = "SQLite unique-constraint backup failed; migration was not started"
-        logger.error(message)
+        logger.error("[UNIQUE-MIGRATION] %s", message)
         raise RuntimeError(message)
+
+    # Pin the first successful pre-dedup snapshot under a fixed name so later
+    # timestamped rotation cannot remove the migration restore point.
+    if not os.path.isfile(pin_path):
+        timestamped = sorted(
+            path
+            for path in glob.glob(os.path.join(backup_dir, "comicarr.db.*.bak"))
+            if re.match(r"^comicarr\.db\.\d{8}_\d{6}\.bak$", os.path.basename(path))
+        )
+        if timestamped:
+            try:
+                shutil.copy2(timestamped[-1], pin_path)
+                logger.info("[UNIQUE-MIGRATION] Wrote pre-unique-migration pin backup to %s", abs_pin)
+            except OSError as e:
+                message = "SQLite unique-constraint pin backup failed before migration"
+                logger.error("[UNIQUE-MIGRATION] %s: %s", message, e)
+                raise RuntimeError(message) from e
 
 
 def _pending_unique_constraints(engine):
@@ -1797,8 +2010,27 @@ def _pending_unique_constraints(engine):
             if not _has_unique_enforcement(engine, table_name, key_cols):
                 pending.append((table_name, key_cols, constraint_name))
         except SQLAlchemyError as e:
-            logger.warn("Could not inspect UNIQUE enforcement for %s: %s", table_name, e)
+            logger.warn("[UNIQUE-MIGRATION] Could not inspect UNIQUE enforcement for %s: %s", table_name, e)
     return pending
+
+
+def _remaining_unenforced_tables(engine, pending_constraints):
+    """Return allowlisted table names from ``pending_constraints`` still lacking enforcement."""
+    remaining = []
+    for table_name, key_cols, _constraint_name in pending_constraints:
+        try:
+            if not inspect(engine).has_table(table_name):
+                continue
+            if not _has_unique_enforcement(engine, table_name, key_cols):
+                remaining.append(table_name)
+        except SQLAlchemyError as e:
+            logger.warn(
+                "[UNIQUE-MIGRATION] Could not verify UNIQUE enforcement for %s after migration: %s",
+                table_name,
+                e,
+            )
+            remaining.append(table_name)
+    return remaining
 
 
 def _bounded_alternate_index_name(engine, constraint_name, table_name, key_cols, attempt):
@@ -1839,6 +2071,9 @@ def _migrate_unique_constraints(engine, backup_func=None):
     preflight and before the first deduplication. Each table's deterministic
     deduplication and index creation share one transaction, ensuring a failed
     DDL statement restores the rows deleted by that attempt.
+
+    After the per-table loop, any still-pending tables cause a RuntimeError so
+    startup fails closed rather than soft-succeeding without enforcement.
     """
     dialect = engine.dialect.name
 
@@ -1857,19 +2092,32 @@ def _migrate_unique_constraints(engine, backup_func=None):
             if _has_unique_enforcement(engine, table_name, key_cols):
                 continue
         except SQLAlchemyError as e:
-            logger.warn("Could not recheck UNIQUE enforcement for %s: %s", table_name, e)
-            continue
+            # Recheck failure must not skip the table — only confirmed enforcement skips work.
+            logger.warn(
+                "[UNIQUE-MIGRATION] Could not recheck UNIQUE enforcement for %s; proceeding with migration: %s",
+                table_name,
+                e,
+            )
 
         quote = engine.dialect.identifier_preparer.quote_identifier
         quoted_table = quote(table_name)
         quoted_keys = [quote(column) for column in key_cols]
         valid_key_predicate = _valid_key_predicate(quoted_keys)
-        dedup_sql = (
-            f"DELETE FROM {quoted_table} WHERE rowid NOT IN ("
-            f"SELECT MAX(rowid) FROM {quoted_table} WHERE {valid_key_predicate} "
-            f"GROUP BY {', '.join(quoted_keys)}"
-            f") AND {valid_key_predicate}"
+        try:
+            column_names = [col["name"] for col in inspect(engine).get_columns(table_name)]
+        except SQLAlchemyError:
+            column_names = []
+        dedup_sql = _dedup_delete_sql(
+            dialect,
+            quoted_table,
+            quoted_keys,
+            valid_key_predicate,
+            table_name=table_name,
+            column_names=column_names,
+            quote=quote,
         )
+        constraint_sql = _add_unique_constraint_sql(quoted_table, quote(constraint_name), quoted_keys)
+        index_name = constraint_name
 
         if dialect == "sqlite":
             index_name = _sqlite_available_index_name(engine, constraint_name, table_name, key_cols)
@@ -1880,57 +2128,71 @@ def _migrate_unique_constraints(engine, backup_func=None):
                     conn.execute(text(index_sql))
             except SQLAlchemyError as e:
                 logger.warn(
-                    "Could not add SQLite UNIQUE index %s on %s; changes rolled back: %s",
+                    "[UNIQUE-MIGRATION] Could not add SQLite UNIQUE index %s on %s; changes rolled back: %s",
                     index_name,
                     table_name,
                     e,
                 )
                 continue
-        else:
-            index_name = constraint_name
-            # Keep the legacy non-SQLite sequence: rowid deduplication is
-            # best-effort, then the database-native constraint is attempted.
+        elif dialect == "postgresql":
             try:
                 with engine.begin() as conn:
                     conn.execute(text(dedup_sql))
-            except (OperationalError, ProgrammingError) as e:
-                logger.warn("Dedup on %s failed (non-fatal): %s", table_name, e)
-
+                    conn.execute(text(constraint_sql))
+            except SQLAlchemyError as e:
+                logger.warn(
+                    "[UNIQUE-MIGRATION] Could not add PostgreSQL UNIQUE constraint %s on %s; changes rolled back: %s",
+                    constraint_name,
+                    table_name,
+                    e,
+                )
+                continue
+        elif dialect == "mysql":
             try:
                 with engine.begin() as conn:
-                    conn.execute(
-                        text(
-                            f"ALTER TABLE {quoted_table} ADD CONSTRAINT {quote(constraint_name)} "
-                            f"UNIQUE ({', '.join(quoted_keys)})"
-                        )
-                    )
-            except (OperationalError, ProgrammingError) as e:
-                logger.warn("Could not add constraint %s: %s", constraint_name, e)
+                    _mysql_dedup_valid_keys(conn, table_name, key_cols)
+                    conn.execute(text(constraint_sql))
+            except SQLAlchemyError as e:
+                logger.warn(
+                    "[UNIQUE-MIGRATION] Could not add MySQL UNIQUE constraint %s on %s; changes rolled back: %s",
+                    constraint_name,
+                    table_name,
+                    e,
+                )
                 continue
+        else:
+            logger.warn(
+                "[UNIQUE-MIGRATION] Unsupported dialect %s for unique-constraint migration on %s",
+                dialect,
+                table_name,
+            )
+            continue
 
         try:
             constraint_installed = _has_unique_enforcement(engine, table_name, key_cols)
         except SQLAlchemyError as e:
-            logger.warn("Could not verify UNIQUE enforcement for %s: %s", table_name, e)
+            logger.warn("[UNIQUE-MIGRATION] Could not verify UNIQUE enforcement for %s: %s", table_name, e)
             continue
 
         if constraint_installed:
             logger.info(
-                "Added UNIQUE enforcement %s on %s(%s)",
+                "[UNIQUE-MIGRATION] Added UNIQUE enforcement %s on %s(%s)",
                 index_name,
                 table_name,
                 ", ".join(key_cols),
             )
         else:
             logger.warn(
-                "UNIQUE enforcement %s on %s was not installed",
+                "[UNIQUE-MIGRATION] UNIQUE enforcement %s on %s was not installed",
                 constraint_name,
                 table_name,
             )
 
-    # if to_the_rss_update is True:
-    #    comicarr.MAINTENANCE = True
-    #    comicarr.MAINTENANCE_DB_TOTAL = 1 # set this to 1 to kick it.
+    remaining = _remaining_unenforced_tables(engine, pending_constraints)
+    if remaining:
+        message = "Unique-constraint migration incomplete for: %s" % ", ".join(remaining)
+        logger.error("[UNIQUE-MIGRATION] %s", message)
+        raise RuntimeError(message)
 
 
 def halt():

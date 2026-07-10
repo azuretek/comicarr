@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 import comicarr
 from comicarr import db
-from comicarr.tables import metadata
+from comicarr.tables import UPSERT_KEYS, metadata
 
 EXPECTED_CONSTRAINTS = {
     "issues": (["IssueID"], "uq_issues_issueid"),
@@ -157,6 +157,16 @@ def test_legacy_sqlite_migration_repairs_real_single_and_composite_upserts(legac
         conn.execute(text("INSERT INTO issues VALUES ('', 'empty-c', 'Wanted')"))
 
 
+def test_upsert_unique_constraint_map_matches_upsert_keys_allowlist():
+    """Lock migration key columns to tables.UPSERT_KEYS for the allowlisted tables."""
+    assert comicarr._UPSERT_UNIQUE_CONSTRAINTS == EXPECTED_CONSTRAINTS
+    assert set(comicarr._UPSERT_UNIQUE_CONSTRAINT_NAMES) == set(EXPECTED_CONSTRAINTS)
+    for table_name, (key_columns, constraint_name) in EXPECTED_CONSTRAINTS.items():
+        assert comicarr._UPSERT_UNIQUE_CONSTRAINT_NAMES[table_name] == constraint_name
+        assert list(UPSERT_KEYS[table_name]) == key_columns
+        assert comicarr._UPSERT_UNIQUE_CONSTRAINTS[table_name][0] == list(UPSERT_KEYS[table_name])
+
+
 def test_sqlite_migration_covers_every_declared_legacy_upsert_table_and_is_idempotent(legacy_engine):
     assert comicarr._UPSERT_UNIQUE_CONSTRAINTS == EXPECTED_CONSTRAINTS
     with legacy_engine.begin() as conn:
@@ -287,7 +297,8 @@ def test_sqlite_migration_rolls_back_deduplication_on_forced_ddl_failure(legacy_
 
     event.listen(legacy_engine, "before_cursor_execute", fail_index_creation)
     try:
-        _run_migration(legacy_engine)
+        with pytest.raises(RuntimeError, match="Unique-constraint migration incomplete"):
+            _run_migration(legacy_engine)
     finally:
         event.remove(legacy_engine, "before_cursor_execute", fail_index_creation)
 
@@ -308,24 +319,20 @@ def test_sqlite_migration_backs_up_before_delete_and_only_once(legacy_engine):
         )
 
     backup_calls = []
+    source_path = os.path.abspath(legacy_engine.url.database)
+    expected_backup_dir = os.path.join(os.path.dirname(source_path), "backups", "migrations")
 
-    def backup_before_delete(source_path, dest_dir, retention):
+    def backup_before_delete(source, dest_dir, retention):
         with legacy_engine.connect() as conn:
             assert conn.scalar(text("SELECT COUNT(*) FROM issues WHERE IssueID = 'issue-1'")) == 2
-        backup_calls.append((source_path, dest_dir, retention))
+        backup_calls.append((source, dest_dir, retention))
         return True
 
     with patch.object(comicarr.maintenance, "auto_backup_db", side_effect=backup_before_delete) as backup:
         comicarr._migrate_unique_constraints(legacy_engine)
         comicarr._migrate_unique_constraints(legacy_engine)
 
-    assert backup_calls == [
-        (
-            os.path.abspath(legacy_engine.url.database),
-            os.path.join(comicarr.DATA_DIR, "backups", "migrations"),
-            7,
-        )
-    ]
+    assert backup_calls == [(source_path, expected_backup_dir, 7)]
     backup.assert_called_once_with(*backup_calls[0])
 
 
@@ -343,7 +350,8 @@ def test_migration_backup_survives_same_second_normal_backup(legacy_engine):
     fixed_timestamp = "20260710_010203"
     source_path = os.path.abspath(legacy_engine.url.database)
     normal_backup_dir = Path(comicarr.DATA_DIR) / "backups"
-    migration_backup_dir = normal_backup_dir / "migrations"
+    migration_backup_dir = Path(os.path.dirname(source_path)) / "backups" / "migrations"
+    pin_backup = migration_backup_dir / comicarr._PRE_UNIQUE_MIGRATION_BACKUP
     with patch.object(comicarr.maintenance.time, "strftime", return_value=fixed_timestamp):
         _run_migration(legacy_engine, comicarr.maintenance.auto_backup_db)
         assert comicarr.maintenance.auto_backup_db(source_path, str(normal_backup_dir), 7)
@@ -352,12 +360,52 @@ def test_migration_backup_survives_same_second_normal_backup(legacy_engine):
     normal_backup = normal_backup_dir / f"comicarr.db.{fixed_timestamp}.bak"
     assert migration_backup != normal_backup
     assert migration_backup.is_file()
+    assert pin_backup.is_file()
     assert normal_backup.is_file()
 
     with sqlite3.connect(migration_backup) as conn:
         assert conn.execute("SELECT COUNT(*) FROM issues WHERE IssueID = 'issue-1'").fetchone()[0] == 2
+    with sqlite3.connect(pin_backup) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM issues WHERE IssueID = 'issue-1'").fetchone()[0] == 2
     with sqlite3.connect(normal_backup) as conn:
         assert conn.execute("SELECT COUNT(*) FROM issues WHERE IssueID = 'issue-1'").fetchone()[0] == 1
+
+
+def test_pre_unique_migration_pin_is_reused_and_not_rotated(legacy_engine, tmp_path):
+    """Pin is written once; retention rotation must not delete it."""
+    with legacy_engine.begin() as conn:
+        _create_legacy_table(conn, "issues", ["IssueID", "ComicName"])
+        conn.execute(
+            text("INSERT INTO issues VALUES (:id, :name)"),
+            [
+                {"id": "issue-1", "name": "old"},
+                {"id": "issue-1", "name": "newest"},
+            ],
+        )
+
+    source_path = os.path.abspath(legacy_engine.url.database)
+    migration_backup_dir = Path(os.path.dirname(source_path)) / "backups" / "migrations"
+    pin_path = migration_backup_dir / comicarr._PRE_UNIQUE_MIGRATION_BACKUP
+
+    with patch.object(comicarr.maintenance.time, "strftime", return_value="20260710_010203"):
+        _run_migration(legacy_engine, comicarr.maintenance.auto_backup_db)
+
+    assert pin_path.is_file()
+    pin_stat = pin_path.stat()
+
+    # Simulate many subsequent rotating backups in the same dir; pin must remain.
+    for index in range(8):
+        with patch.object(comicarr.maintenance.time, "strftime", return_value=f"20260710_02020{index}"):
+            assert comicarr.maintenance.auto_backup_db(source_path, str(migration_backup_dir), 2)
+
+    assert pin_path.is_file()
+    assert pin_path.stat().st_mtime == pin_stat.st_mtime
+    assert pin_path.stat().st_size == pin_stat.st_size
+
+    # Second migration with pin present must not re-backup (pending already cleared).
+    backup = MagicMock(return_value=True)
+    comicarr._migrate_unique_constraints(legacy_engine, backup_func=backup)
+    backup.assert_not_called()
 
 
 def test_sqlite_migration_backup_failure_prevents_all_changes(legacy_engine):
@@ -433,7 +481,7 @@ def test_sqlite_memory_like_paths_without_uri_mode_are_backed_up(tmp_path, monke
     monkeypatch.chdir(tmp_path)
     engine = create_engine(database_url)
     monkeypatch.setattr(db, "_engine", engine)
-    monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path / "other-data-dir"))
     monkeypatch.setattr(comicarr, "CONFIG", SimpleNamespace(BACKUP_RETENTION=7))
     with engine.begin() as conn:
         _create_legacy_table(conn, "issues", ["IssueID", "ComicName"])
@@ -448,9 +496,10 @@ def test_sqlite_memory_like_paths_without_uri_mode_are_backed_up(tmp_path, monke
     backup = MagicMock(return_value=True)
     comicarr._migrate_unique_constraints(engine, backup_func=backup)
 
+    source_path = str(tmp_path / database_name)
     backup.assert_called_once_with(
-        str(tmp_path / database_name),
-        str(tmp_path / "backups" / "migrations"),
+        source_path,
+        os.path.join(os.path.dirname(source_path), "backups", "migrations"),
         7,
     )
     with engine.connect() as conn:
@@ -498,3 +547,116 @@ def test_non_sqlite_full_unique_index_is_enforcement():
 
     with patch.object(comicarr, "inspect", return_value=inspector):
         assert comicarr._has_unique_enforcement(engine, "issues", ["IssueID"])
+
+
+def test_dedup_sql_uses_dialect_native_row_identity():
+    quoted_table = '"issues"'
+    quoted_keys = ['"IssueID"']
+    predicate = '"IssueID" IS NOT NULL AND "IssueID" != \'\''
+    # Without quality columns / table context, keep MAX(rowid|ctid).
+    sqlite_sql = comicarr._dedup_delete_sql("sqlite", quoted_table, quoted_keys, predicate)
+    pg_sql = comicarr._dedup_delete_sql("postgresql", quoted_table, quoted_keys, predicate)
+    mysql_sql = comicarr._dedup_delete_sql("mysql", quoted_table, quoted_keys, predicate)
+
+    assert "MAX(rowid)" in sqlite_sql
+    assert "MAX(ctid)" in pg_sql
+    assert "rowid" not in pg_sql
+    assert mysql_sql is None
+
+
+def test_dedup_sql_library_tables_use_status_location_ranking():
+    quote = lambda name: f'"{name}"'
+    quoted_table = quote("issues")
+    quoted_keys = [quote("IssueID")]
+    predicate = '"IssueID" IS NOT NULL AND "IssueID" != \'\''
+    sql = comicarr._dedup_delete_sql(
+        "sqlite",
+        quoted_table,
+        quoted_keys,
+        predicate,
+        table_name="issues",
+        column_names=["IssueID", "Status", "Location", "ComicName"],
+        quote=quote,
+    )
+    assert "ROW_NUMBER()" in sql
+    assert "Downloaded" in sql
+    assert "Location" in sql
+    assert "MAX(rowid)" not in sql
+
+
+def test_library_quality_dedup_keeps_older_downloaded_with_location(legacy_engine):
+    """Prefer complete library row over a newer Wanted refresh stub."""
+    with legacy_engine.begin() as conn:
+        _create_legacy_table(conn, "issues", ["IssueID", "ComicName", "Status", "Location"])
+        conn.execute(
+            text("INSERT INTO issues VALUES (:id, :name, :status, :location)"),
+            [
+                {
+                    "id": "issue-1",
+                    "name": "complete",
+                    "status": "Downloaded",
+                    "location": "/library/issue-1.cbz",
+                },
+                {
+                    "id": "issue-1",
+                    "name": "stub",
+                    "status": "Wanted",
+                    "location": "",
+                },
+            ],
+        )
+
+    _run_migration(legacy_engine)
+
+    with legacy_engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT ComicName, Status, Location FROM issues WHERE IssueID = 'issue-1'")
+        ).all()
+        assert len(rows) == 1
+        assert rows[0] == ("complete", "Downloaded", "/library/issue-1.cbz")
+
+
+def test_recheck_inspect_error_still_attempts_migration(legacy_engine):
+    with legacy_engine.begin() as conn:
+        _create_legacy_table(conn, "issues", ["IssueID", "ComicName"])
+        conn.execute(
+            text("INSERT INTO issues VALUES (:id, :name)"),
+            [
+                {"id": "issue-1", "name": "old"},
+                {"id": "issue-1", "name": "newest"},
+            ],
+        )
+
+    pending = comicarr._pending_unique_constraints(legacy_engine)
+    assert pending
+    real_has_enforcement = comicarr._has_unique_enforcement
+    calls = {"n": 0}
+
+    def recheck_then_real(engine, table_name, key_cols):
+        calls["n"] += 1
+        # First call is the per-table recheck inside the migration loop.
+        if calls["n"] == 1:
+            raise OperationalError("recheck", {}, Exception("inspect failed"))
+        return real_has_enforcement(engine, table_name, key_cols)
+
+    with (
+        patch.object(comicarr, "_pending_unique_constraints", return_value=pending),
+        patch.object(comicarr, "_has_unique_enforcement", side_effect=recheck_then_real),
+    ):
+        _run_migration(legacy_engine)
+
+    with legacy_engine.connect() as conn:
+        assert conn.scalar(text("SELECT COUNT(*) FROM issues WHERE IssueID = 'issue-1'")) == 1
+    assert tuple(["IssueID"]) in _unique_column_sets(legacy_engine, "issues")
+
+
+def test_initialize_source_rethrows_runtime_error_from_dbcheck():
+    """Guard the initialize() fail-closed branch for unique-migration RuntimeError."""
+    import inspect as py_inspect
+
+    source = py_inspect.getsource(comicarr.initialize)
+    marker = "Checking to see if the database has all tables"
+    dbcheck_branch = source[source.index(marker) : source.index(marker) + 500]
+    assert "except RuntimeError as e:" in dbcheck_branch
+    assert "[UNIQUE-MIGRATION] Refusing startup after migration abort" in dbcheck_branch
+    assert dbcheck_branch.index("except RuntimeError as e:") < dbcheck_branch.index("except Exception as e:")

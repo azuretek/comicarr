@@ -85,8 +85,14 @@ def auto_backup_db(source_path, dest_dir, retention=4):
         if src_conn:
             src_conn.close()
 
-    # Rotate old backups — keep only `retention` most recent
-    existing = sorted(glob.glob(os.path.join(dest_dir, "comicarr.db.*.bak")))
+    # Rotate only timestamped comicarr.db.YYYYMMDD_HHMMSS.bak files. Fixed-name
+    # pins (e.g. comicarr.db.pre-unique-migration.bak) are never pruned here.
+    timestamped_backup = re.compile(r"^comicarr\.db\.\d{8}_\d{6}\.bak$")
+    existing = sorted(
+        path
+        for path in glob.glob(os.path.join(dest_dir, "comicarr.db.*.bak"))
+        if timestamped_backup.match(os.path.basename(path))
+    )
     while len(existing) > retention:
         oldest = existing.pop(0)
         try:
