@@ -230,7 +230,7 @@ def _ddl_item(idv="ddl-1", issueid="DI1"):
         "site": "DDL(External)",
         "link": "http://x/y",
         "mainlink": "http://x",
-        "link_type": "GC-Main",
+        "link_type": "GC-Mega",
         "resume": None,
         "remote_filesize": 0,
         "oneoff": False,

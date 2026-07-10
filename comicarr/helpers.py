@@ -95,6 +95,7 @@ from comicarr.app.downloads.service import (  # noqa: F401
     lookupthebitches,
     nzb_monitor,
     postprocess_main,
+    recover_queued_ddl_commands,
     rename_param,
     renamefile_readingorder,
     reverse_the_pack_snatch,

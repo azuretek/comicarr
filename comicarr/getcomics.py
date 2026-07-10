@@ -42,6 +42,7 @@ from comicarr.app.common.remote_artifacts import (
     safe_remote_filename,
     write_chunks_atomically,
 )
+from comicarr.app.downloads.ddl_commands import DDLCommand, DDLCommandError
 
 
 class GC(object):
@@ -1074,82 +1075,104 @@ class GC(object):
                     "[DDL-QUEUER] This pack has been broken up into %s separate packs -"
                     " queueing each in sequence for your enjoyment." % len(links)
                 )
-        cnt = 1
-        for x in links:
-            if len(links) == 1:
-                mod_id = id
-            else:
-                mod_id = id + "-" + str(cnt)
+        return self._queue_download_batch(id, mainlink, links, tmp_filename, comicinfo, packinfo)
 
-            lt_site = x["site"].lower()
-            if any([lt_site == "main server", lt_site == "download now"]):
+    def _queue_download_batch(self, item_id, mainlink, links, tmp_filename, comicinfo, packinfo):
+        """Validate a GetComics batch completely before its first mutation."""
+        if comicinfo:
+            if self.issueid is None:
+                self.issueid = comicinfo[0].get("IssueID")
+            if self.comicid is None:
+                self.comicid = comicinfo[0].get("ComicID")
+            if self.oneoff is None:
+                self.oneoff = comicinfo[0].get("oneoff", False)
+
+        commands = []
+        last_link_type = None
+        for index, link_info in enumerate(links, start=1):
+            command_id = item_id if len(links) == 1 else "%s-%d" % (item_id, index)
+            link_site = str(link_info.get("site") or "").lower()
+            if link_site in {"main server", "download now"}:
                 link_type = "GC-Main"
-            elif lt_site == "mirror download":
+            elif link_site == "mirror download":
                 link_type = "GC-Mirror"
-            elif lt_site == "mega":
+            elif link_site == "mega":
                 link_type = "GC-Mega"
-            elif lt_site == "mediafire":
+            elif link_site == "mediafire":
                 link_type = "GC-Media"
-            elif lt_site == "pixeldrain":
+            elif link_site == "pixeldrain":
                 link_type = "GC-Pixel"
             else:
-                logger.warn("[GC-Site-Unknown] Unknown site detected...%s" % lt_site)
                 link_type = "Unknown"
 
-            if self.issueid is None:
-                self.issueid = comicinfo[0]["IssueID"]
-            if self.comicid is None:
-                self.comicid = comicinfo[0]["ComicID"]
-            if self.oneoff is None:
-                self.oneoff = comicinfo[0]["oneoff"]
-
-            ctrlval = {"id": mod_id}
-            vals = {
-                "series": x["series"],
-                "year": x["year"],
-                "size": x["size"],
-                "issues": x["issues"],
+            command_values = {
+                "id": command_id,
+                "series": link_info.get("series"),
+                "year": link_info.get("year"),
+                "size": link_info.get("size"),
+                "issues": link_info.get("issues"),
+                "pack": link_info.get("pack"),
                 "issueid": self.issueid,
                 "comicid": self.comicid,
-                "link": x["links"],
+                "oneoff": self.oneoff,
+                "link": link_info.get("links"),
                 "mainlink": mainlink,
                 "site": "DDL(GetComics)",
-                "pack": x["pack"],
                 "link_type": link_type,
-                "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "status": "Queued",
+                "filename": tmp_filename,
+                "comicinfo": comicinfo,
+                "packinfo": packinfo,
+                "remote_filesize": 0,
+                "resume": None,
             }
-            db.upsert("ddl_info", vals, ctrlval)
-
-            # tmp_filename = None
-            # if any([link_type == 'Mega', link_type == 'Mega Link']):
-            # this is needed so that we assign some tmp filename
-            # (it will get renamed upon completion anyways)
-            # tmp_filename = comicinfo[0]['nzbtitle']
-
-            comicarr.DDL_QUEUE.put(
-                {
-                    "link": x["links"],
-                    "mainlink": mainlink,
-                    "series": x["series"],
-                    "year": x["year"],
-                    "size": x["size"],
-                    "comicid": self.comicid,
-                    "issueid": self.issueid,
-                    "oneoff": self.oneoff,
-                    "id": mod_id,
-                    "link_type": link_type,
-                    "filename": tmp_filename,
-                    "comicinfo": comicinfo,
-                    "packinfo": packinfo,
-                    "site": "DDL(GetComics)",
-                    "remote_filesize": 0,
-                    "resume": None,
+            try:
+                command = DDLCommand.from_mapping(command_values)
+            except DDLCommandError as e:
+                logger.warn("[DDL-QUEUER] Refusing non-runnable DDL command %s: %s" % (command_id, e))
+                return {
+                    "success": False,
+                    "validation_error": True,
+                    "error": str(e),
+                    "queued_ids": [],
+                    "failed_ids": [command_id],
                 }
-            )
-            cnt += 1
+            commands.append(command.to_queue_item())
+            last_link_type = link_type
 
-        return {"success": True, "site": link_type}
+        from comicarr.app.downloads.service import queue_ddl_download
+
+        queued_ids = []
+        failed_ids = []
+        for command in commands:
+            queue_result = queue_ddl_download(command)
+            if queue_result["success"]:
+                queued_ids.append(command["id"])
+            else:
+                failed_ids.append(command["id"])
+                logger.warn("[DDL-QUEUER] Unable to hand off validated DDL command %s." % command["id"])
+
+        if queued_ids and failed_ids:
+            return {
+                "success": True,
+                "partial": True,
+                "site": last_link_type,
+                "queued_ids": queued_ids,
+                "failed_ids": failed_ids,
+            }
+        if failed_ids:
+            return {
+                "success": False,
+                "partial": False,
+                "error": "Unable to queue any validated DDL commands",
+                "queued_ids": [],
+                "failed_ids": failed_ids,
+            }
+        return {
+            "success": True,
+            "site": last_link_type,
+            "queued_ids": queued_ids,
+            "failed_ids": [],
+        }
 
     def downloadit(self, id, link, mainlink, resume=None, issueid=None, remote_filesize=0, link_type=None):
         # logger.fdebug('[%s] %s -- mainlink: %s' % (id, link, mainlink))
@@ -1157,21 +1180,21 @@ class GC(object):
             logger.fdebug(
                 "[Paywall-link detected] This is not a valid link, this should be requeued to search to gather all available links"
             )
-            return {"success": False, "link_type": link_type}
+            return {"success": False, "filename": None, "path": None, "link_type": link_type}
 
-        if comicarr.DDL_LOCK.locked():
+        ddl_lock = comicarr.DDL_LOCK
+        if ddl_lock.locked():
             logger.fdebug(
                 "[DDL] Another item is currently downloading via DDL. Only one item can"
                 " be downloaded at a time using DDL. Patience."
             )
-            return
-        else:
-            comicarr.DDL_LOCK.acquire()
+            return {"success": False, "filename": None, "path": None, "link_type": link_type}
 
-        comicarr.DDL_QUEUED.add(id)
         filename = None
-        self.cookie_receipt()
+        ddl_lock.acquire()
         try:
+            comicarr.DDL_QUEUED.add(id)
+            self.cookie_receipt()
             with requests.Session():
                 if resume is not None:
                     logger.info("[DDL-RESUME] Attempting to resume from: %s bytes" % resume)
@@ -1216,7 +1239,6 @@ class GC(object):
                                     " invalid and will ignore this result."
                                 )
                                 remote_filesize = 0
-                                comicarr.DDL_LOCK.release()
                                 return {
                                     "success": False,
                                     "filename": filename,
@@ -1234,14 +1256,13 @@ class GC(object):
                                 "[WARNING] Considering this particular download as invalid and will ignore this result."
                             )
                             remote_filesize = 0
-                            comicarr.DDL_LOCK.release()
                             return {"success": False, "filename": filename, "path": None, "link_type": link_type}
 
                 # write the filename to the db for tracking purposes...
                 db.upsert(
                     "ddl_info",
                     {"filename": filename, "remote_filesize": remote_filesize},
-                    {"id": id},
+                    {"ID": id},
                 )
 
                 if comicarr.CONFIG.DDL_LOCATION is not None and not os.path.isdir(comicarr.CONFIG.DDL_LOCATION):
@@ -1268,19 +1289,17 @@ class GC(object):
                         logger.fdebug("%s already exists - replacing it after the download completes" % dst_path)
 
                     write_chunks_atomically(dst_path, t.iter_content(chunk_size=1024))
+            return self.zip_zip(id, dst_path, filename)
 
         except requests.exceptions.Timeout as e:
             logger.error("[ERROR] download has timed out due to inactivity...: %s", e)
-            comicarr.DDL_LOCK.release()
             return {"success": False, "filename": filename, "path": None, "link_type": link_type}
 
         except Exception as e:
             logger.error("[ERROR] %s" % e)
-            comicarr.DDL_LOCK.release()
             return {"success": False, "filename": filename, "path": None, "link_type": link_type}
-        else:
-            comicarr.DDL_LOCK.release()
-            return self.zip_zip(id, dst_path, filename)
+        finally:
+            ddl_lock.release()
 
     def zip_zip(self, id, dst_path, filename):
         try:
@@ -1314,7 +1333,6 @@ class GC(object):
                 new_path = str(dst_path)
             return {"success": True, "filename": filename, "path": str(new_path)}
 
-        comicarr.DDL_LOCK.release()
         return {"success": False, "filename": filename, "path": None}
 
     def check_for_pack(self, title, issue_in_pack=None):

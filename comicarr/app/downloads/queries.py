@@ -55,6 +55,16 @@ def get_ddl_queue():
     return db.select_all(stmt)
 
 
+def get_queued_ddl_items():
+    """Get durable outbox rows that have not started downloading yet."""
+    stmt = (
+        select(t_ddl_info)
+        .where(t_ddl_info.c.status == "Queued")
+        .order_by(t_ddl_info.c.updated_date.asc(), t_ddl_info.c.ID.asc())
+    )
+    return db.select_all(stmt)
+
+
 def get_ddl_item(item_id):
     """Get a single DDL queue item."""
     return db.select_one(select(t_ddl_info).where(t_ddl_info.c.ID == item_id))

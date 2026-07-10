@@ -267,6 +267,9 @@ def _ddl_item(idv="ddl-1", issueid="DI1"):
         "link_type": "GC-Main",
         "resume": None,
         "remote_filesize": 0,
+        "oneoff": False,
+        "comicinfo": [{"pack": False}],
+        "packinfo": None,
     }
 
 
@@ -316,7 +319,7 @@ def test_ddl_worker_survives_journal_failure_and_processes_next_item(monkeypatch
 
     # Stop the legacy worker right after the (committed) snatch block of the
     # SECOND item so we can assert it was reached.
-    class _StopAfterSnatch(Exception):
+    class _StopAfterSnatch(BaseException):
         pass
 
     def _boom_gc(*a, **k):
@@ -360,7 +363,7 @@ def test_ddl_snatch_atomic_cocommit_success(monkeypatch):
     # download dispatch raise a sentinel so the worker stops immediately after
     # the (already committed) snatch block — we only assert the snatch block's
     # co-commit here, not the rest of the legacy worker.
-    class _StopAfterSnatch(Exception):
+    class _StopAfterSnatch(BaseException):
         pass
 
     def _boom_gc(*a, **k):
@@ -532,5 +535,10 @@ def test_ddl_snatch_failure_stops_requeue_after_cap_no_infinite_loop(monkeypatch
     assert q.empty()  # final attempt was NOT requeued
     assert "exceeded requeue cap" in capture_logs.text
     assert "system down" in capture_logs.text
-    assert _rows(ddl_info) == []
+    # Durable row is terminal Failed (not left Queued/Downloading) so operators
+    # can requeue once the DB recovers; no journal obligation remains open.
+    rows = _rows(ddl_info)
+    assert len(rows) == 1
+    assert rows[0]["ID"] == "ddl-cap"
+    assert rows[0]["status"] == "Failed"
     assert _rows(pipeline_journal) == []

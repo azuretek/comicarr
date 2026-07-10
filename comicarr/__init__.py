@@ -1214,6 +1214,12 @@ def queue_schedule(queuetype, mode):
                 "Succesfully started Post-Processing Queuer....",
             )
         elif queuetype == "ddl_queue":
+            try:
+                if DDLPOOL.is_alive() is True:
+                    return
+            except Exception:
+                pass
+            helpers.recover_queued_ddl_commands(DDL_QUEUE)
             start(
                 "DDLPOOL",
                 helpers.ddl_downloader,
@@ -1590,6 +1596,10 @@ def dbcheck():
         ("pack", "INTEGER"),
         ("link_type", "TEXT"),
         ("tmp_filename", "TEXT"),
+        ("oneoff", "INTEGER"),
+        ("resume", "INTEGER"),
+        ("comicinfo", "TEXT"),
+        ("packinfo", "TEXT"),
     ]
     _ensure_columns(engine, "ddl_info", ddl_cols)
 

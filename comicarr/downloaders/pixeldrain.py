@@ -97,7 +97,7 @@ class PixelDrain(object):
                 "remote_filesize": str(file_info["filesize"]),
                 "size": helpers.human_size(file_info["filesize"]),
             },
-            {"id": self.id},
+            {"ID": self.id},
         )
         logger.fdebug(file_info)
 
@@ -115,7 +115,7 @@ class PixelDrain(object):
         db.upsert(
             "ddl_info",
             {"tmp_filename": filename},  # tmp_filename should be all that's needed to be updated at this point...
-            {"id": self.id},
+            {"ID": self.id},
         )
 
         try:

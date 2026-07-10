@@ -3305,13 +3305,24 @@ def searcher(
             ggc.loadsite(nzbid, link)
             ddl_it = ggc.parse_downloadresults(nzbid, link, comicinfo, pack_info)
             tnzbprov = nzbprov
-            if ddl_it["success"] is True:
+            if ddl_it.get("success") is True and not ddl_it.get("partial") and not ddl_it.get("failed_ids"):
                 logger.info(
                     "[%s] Successfully snatched %s from DDL site. It is currently being queued"
                     " to download in position %s" % (tnzbprov, nzbname, comicarr.DDL_QUEUE.qsize())
                 )
             else:
-                logger.info("[%s] Failed to retrieve %s from the DDL site." % (tnzbprov, nzbname))
+                if ddl_it.get("partial") or ddl_it.get("failed_ids"):
+                    logger.warn(
+                        "[%s] Incomplete DDL handoff for %s (queued=%s failed=%s); not treating as full snatch success"
+                        % (
+                            tnzbprov,
+                            nzbname,
+                            ddl_it.get("queued_ids") or [],
+                            ddl_it.get("failed_ids") or [],
+                        )
+                    )
+                else:
+                    logger.info("[%s] Failed to retrieve %s from the DDL site." % (tnzbprov, nzbname))
                 return "ddl-fail"
         else:
             cinfo = {
