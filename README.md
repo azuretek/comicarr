@@ -1,22 +1,26 @@
 # Comicarr
 
-An automated comic book manager with a modern React frontend. Part of the *arr ecosystem (like Sonarr, Radarr, Lidarr).
+An automated comic book (and manga) manager with a modern React frontend. Part of the *arr ecosystem (like Sonarr, Radarr, Lidarr).
 
 ## Overview
 
-Comicarr is a modernized fork of Mylar3, rebuilt with a React 19 frontend and focused on performance improvements. It provides automated comic book library management with an intuitive web interface.
+Comicarr is a modernized fork of [Mylar3](https://github.com/mylar3/mylar3), rebuilt with a **React 19** frontend and a **FastAPI** backend. It provides automated comic book library management — monitoring series, searching indexers, downloading via NZB/torrent/DDL clients, and post-processing with metadata tagging.
 
 ## Features
 
-- **Modern React 19 Frontend** - Fast, responsive UI with real-time updates
-- **Automated Downloads** - Monitor series and automatically grab new issues
-- **Library Management** - Scan existing collections, identify missing issues
-- **Multiple Download Support** - NZB clients (SABnzbd, NZBGet) and torrent clients (qBittorrent, Deluge, Transmission, rTorrent)
-- **Direct Downloads** - Mega, MediaFire, Pixeldrain support
-- **Weekly Pull Lists** - Track upcoming releases up to 4 weeks ahead
-- **Story Arc Management** - Organize and track story arcs across series
-- **Dark/Light Themes** - Native theme support with system preference detection
-- **Real-time Updates** - Server-Sent Events for live status without page refreshes
+- **Modern React 19 Frontend** — Fast, responsive UI with dark/light themes and system preference detection
+- **Automated Downloads** — Monitor series and automatically grab new issues
+- **Library Management** — Scan existing collections, identify missing issues, interactive import matching
+- **Multiple Download Clients** — NZB (SABnzbd, NZBGet) and torrent (qBittorrent, Deluge, Transmission, rTorrent, uTorrent)
+- **Direct Downloads** — Mega, MediaFire, and Pixeldrain support
+- **Metadata Providers** — ComicVine and Metron for series/issue metadata
+- **Manga Support** — MangaDex (and optional MyAnimeList) with dedicated manga library paths
+- **Weekly Pull Lists** — Track the current week's releases and match them to your library
+- **Story Arc Management** — Organize and track story arcs across series
+- **OPDS Catalog** — Optional OPDS feed for compatible comic readers (enable via `config.ini`)
+- **Optional AI Assist** — Bring-your-own-key LLM features (suggestions, enrichment) when configured in Settings
+- **Real-time Updates** — Server-Sent Events for live status without page refreshes
+- **Mylar3 Migration** — First-run wizard to import config and library data from an existing Mylar3 install
 
 ## Quick Start
 
@@ -36,32 +40,37 @@ docker run -d \
   ghcr.io/frankieramirez/comicarr:latest
 ```
 
-Or use docker-compose:
+Or use docker Compose:
 
 ```bash
 curl -o docker-compose.yml https://raw.githubusercontent.com/frankieramirez/comicarr/main/docker-compose.yml
 # Edit paths in docker-compose.yml, then:
-docker-compose up -d
+docker compose up -d
 ```
+
+Multi-architecture images (`amd64`, `arm64`) are published to `ghcr.io/frankieramirez/comicarr`.
 
 ### Manual Installation
 
 **Requirements:**
+
 - Python 3.10+
-- Node.js 22+
+- Node.js 22+ (to build the frontend)
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
 **Steps:**
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/frankieramirez/comicarr.git
 cd comicarr
 ```
 
 2. Install Python dependencies:
+
 ```bash
-# Using uv (recommended - creates .venv automatically)
+# Using uv (recommended — creates .venv automatically)
 uv sync
 
 # Or using pip
@@ -69,6 +78,7 @@ pip install -r requirements.txt
 ```
 
 3. Build the frontend:
+
 ```bash
 cd frontend
 npm ci
@@ -77,27 +87,44 @@ cd ..
 ```
 
 4. Run the application:
+
 ```bash
 source .venv/bin/activate  # if using uv
 python3 Comicarr.py --nolaunch
 ```
 
-5. Access at `http://localhost:8090`
+5. Open `http://localhost:8090`
 
 ## Configuration
 
-On first run:
-1. Get a Comic Vine API key from https://comicvine.gamespot.com/api/
-2. Configure download clients (SABnzbd, NZBGet, or torrent clients)
-3. Set your comic library and download paths
-4. Optionally configure Metron credentials for enhanced search
+### First-run setup
+
+On a fresh install, the web UI prompts you to create an admin account. Docker and quiet-mode installs print a setup token in the server/container logs:
+
+```text
+[SETUP] *** First-run setup required ***
+[SETUP] Setup token: <token>
+```
+
+Enter that token (when prompted) along with a username and password (minimum 8 characters). The app restarts once credentials are saved.
+
+### After login
+
+In **Settings**, configure:
+
+1. **Comic Vine API key** — from [Comic Vine](https://comicvine.gamespot.com/api/) (required for most metadata/search workflows)
+2. **Download clients** — SABnzbd, NZBGet, and/or torrent clients
+3. **Paths** — comic library, optional manga library, and download directories
+4. **Optional** — Metron credentials, MangaDex/MyAnimeList, AI (BYOK), indexers, and notifiers
+
+If you are migrating from Mylar3, the first-run onboarding wizard can import an existing install. For Docker, mount the Mylar3 config directory read-only (see comments in `docker-compose.yml`, typically at `/mylar3`).
 
 ## Project Structure
 
 ```
 ├── Comicarr.py          # Main entry point (uvicorn → comicarr.app.main)
 ├── comicarr/            # Python backend package
-│   ├── app/             # FastAPI domains (routers, services)
+│   ├── app/             # FastAPI domains (routers, services, middleware)
 │   ├── search.py        # Search orchestration
 │   ├── postprocessor.py # Download processing
 │   └── ...
@@ -105,11 +132,28 @@ On first run:
 │   ├── src/
 │   │   ├── components/  # React components
 │   │   ├── pages/       # Page components
-│   │   └── lib/         # API and utilities
+│   │   └── lib/         # API client and utilities
 │   └── package.json
-├── data/                # Static assets and templates
-├── lib/                 # Bundled libraries
-└── docs/                # Documentation
+├── lib/                 # Bundled third-party libraries
+├── docker/              # Docker entrypoint
+├── docs/                # Additional documentation
+├── tests/               # Backend unit and integration tests
+└── pyproject.toml       # Python project metadata and dependencies
+```
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local development, testing, linting, and PR conventions.
+
+Quick summary:
+
+```bash
+uv sync --extra dev
+cd frontend && npm ci && cd ..
+python3 Comicarr.py --nolaunch   # backend on :8090
+
+# separate terminal — frontend HMR (proxies API to :8090)
+cd frontend && npm run dev
 ```
 
 ## Attribution
@@ -118,8 +162,10 @@ Comicarr is built on the foundation of [Mylar3](https://github.com/mylar3/mylar3
 
 ## Support
 
-- [GitHub Issues](https://github.com/frankieramirez/comicarr/issues) - Bug reports and feature requests
+- [GitHub Issues](https://github.com/frankieramirez/comicarr/issues) — Bug reports and feature requests
+- [Security policy](SECURITY.md) — How to report vulnerabilities
+- [Contributing guide](CONTRIBUTING.md) — Development setup and PR process
 
 ## License
 
-This project maintains the same license as the original Mylar3 project (GPL v3).
+This project is licensed under the [GNU General Public License v3.0](LICENSE) (same as Mylar3).
