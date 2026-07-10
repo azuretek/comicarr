@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from comicarr.app.core.context import AppContext
-from comicarr.app.core.events import EventBus
+from comicarr.app.core.events import AppEvent, EventBus
 from comicarr.app.core.exceptions import (
     AuthError,
     ConfigError,
@@ -112,6 +112,17 @@ class TestEventBus:
         bus.publish_sync("test", {"msg": "hello"})
         assert q.empty()
 
+    def test_publish_ignores_closed_loop_during_shutdown(self):
+        bus = EventBus()
+        loop = MagicMock()
+        loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+        bus.set_loop(loop)
+        bus.subscribe()
+
+        bus.publish_sync("shutdown", {"message": "stopping"})
+
+        loop.call_soon_threadsafe.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_publish_delivers_to_subscriber(self):
         bus = EventBus()
@@ -169,6 +180,33 @@ class TestEventBus:
         assert not q.empty()
         event = q.get_nowait()
         assert event.event_type == "bg_event"
+        bus.unsubscribe(sub_id)
+
+    @pytest.mark.asyncio
+    async def test_publish_replaces_oldest_event_when_subscriber_queue_is_full(self):
+        bus = EventBus()
+        loop = asyncio.get_running_loop()
+        bus.set_loop(loop)
+
+        sub_id, q = bus.subscribe()
+        seed_events = [AppEvent("seed", {"index": index}) for index in range(q.maxsize)]
+        for event in seed_events:
+            q.put_nowait(event)
+
+        loop_errors = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            bus.publish_sync("latest", {"index": q.maxsize})
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+        queued_events = [q.get_nowait() for _ in range(q.qsize())]
+        assert loop_errors == []
+        assert len(queued_events) == q.maxsize
+        assert queued_events[0] == seed_events[1]
+        assert queued_events[-1] == AppEvent("latest", {"index": q.maxsize})
         bus.unsubscribe(sub_id)
 
 

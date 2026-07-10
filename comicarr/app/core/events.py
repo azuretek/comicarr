@@ -51,6 +51,25 @@ class EventBus:
         with self._lock:
             self._subscribers.pop(sub_id, None)
 
+    @staticmethod
+    def _enqueue_latest(q, event):
+        """Enqueue on the event-loop thread, retaining the newest event."""
+        try:
+            q.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
     def publish_sync(self, event_type, payload):
         """Thread-safe publish from background threads into async queues.
 
@@ -66,9 +85,7 @@ class EventBus:
 
         for q in snapshot:
             try:
-                self._loop.call_soon_threadsafe(q.put_nowait, event)
-            except asyncio.QueueFull:
-                pass  # Slow consumer — drop oldest would be better but skip for now
+                self._loop.call_soon_threadsafe(self._enqueue_latest, q, event)
             except RuntimeError:
                 pass  # Event loop closed during shutdown
 
