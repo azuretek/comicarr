@@ -24,6 +24,8 @@ import sqlalchemy
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.acquisition.models import AcquisitionIntent, Fulfillment
+from comicarr.app.acquisition.policy import EligibilityInput, evaluate_eligibility, project_legacy_state
 from comicarr.app.common.filesystem import is_path_within_allowed_dirs
 from comicarr.app.series import queries as series_queries
 from comicarr.tables import annuals, comics, issues, oneoffhistory, storyarcs, weekly
@@ -46,6 +48,158 @@ _LIBRARY_ROOT_CONFIG_KEYS = (
 # gap between accepting an API request and the worker acquiring that lock.
 _COMIC_SCAN_START_LOCK = threading.Lock()
 _MANGA_SCAN_START_LOCK = threading.Lock()
+
+_DISPLAY_BY_FULFILLMENT = {
+    Fulfillment.RESERVED: "Reserved",
+    Fulfillment.SNATCHED: "Snatched",
+    Fulfillment.DOWNLOADED: "Downloaded",
+    Fulfillment.ARCHIVED: "Archived",
+    Fulfillment.FAILED: "Failed",
+}
+_DISPLAY_BY_INTENT = {
+    AcquisitionIntent.WANTED: "Wanted",
+    AcquisitionIntent.SKIPPED: "Skipped",
+    AcquisitionIntent.IGNORED: "Ignored",
+}
+_LEGACY_INTENT_STATES = {"wanted": "Wanted", "skipped": "Skipped", "ignored": "Ignored"}
+_DATE_SOURCE_NAMES = {
+    "release_date": "releaseDate",
+    "digital_date": "digitalDate",
+    "issue_date": "issueDate",
+}
+
+
+def _row_value(row, *keys):
+    for key in keys:
+        if key in row:
+            return row[key]
+    return None
+
+
+def _optional_text(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value if value and value.lower() != "none" else None
+
+
+def _display_state(projection, legacy_status):
+    if projection.fulfillment in _DISPLAY_BY_FULFILLMENT:
+        return _DISPLAY_BY_FULFILLMENT[projection.fulfillment]
+    if projection.intent in _DISPLAY_BY_INTENT:
+        return _DISPLAY_BY_INTENT[projection.intent]
+    legacy_display = _LEGACY_INTENT_STATES.get(str(legacy_status or "").strip().lower())
+    if legacy_display:
+        return legacy_display
+    if projection.fulfillment is Fulfillment.MISSING:
+        return "Missing"
+    return "Unknown"
+
+
+def project_issue_state(row, *, series_status, today=None, annual=False):
+    """Return one canonical intent, fulfillment, eligibility, and UI projection."""
+    values = dict(row)
+    legacy_status = _row_value(values, "status", "Status")
+    acquisition_intent = _row_value(values, "acquisitionIntent", "AcquisitionIntent")
+    projection = project_legacy_state(acquisition_intent, legacy_status)
+    location = _optional_text(_row_value(values, "location", "Location"))
+
+    fulfillment = projection.fulfillment
+    if location and fulfillment is not Fulfillment.ARCHIVED:
+        fulfillment = Fulfillment.DOWNLOADED
+        evidence = "location"
+    elif legacy_status is not None and str(legacy_status).strip():
+        evidence = "legacy_status"
+    else:
+        evidence = "none"
+
+    normalized_series_status = str(series_status or "").strip().lower()
+    decision = evaluate_eligibility(
+        EligibilityInput(
+            series_active=normalized_series_status in {"active", "loading", "paused"},
+            paused=normalized_series_status == "paused",
+            intent=projection.intent,
+            fulfillment=fulfillment,
+            release_date=_row_value(values, "releaseDate", "ReleaseDate"),
+            digital_date=_row_value(values, "digitalDate", "DigitalDate"),
+            issue_date=_row_value(values, "issueDate", "IssueDate"),
+        ),
+        today=today,
+    )
+    display_state = _display_state(
+        projection.__class__(projection.intent, fulfillment, projection.intent_is_explicit),
+        legacy_status,
+    )
+    owned = fulfillment.is_owned
+    in_flight = fulfillment.is_in_flight
+    missing = not owned and not in_flight
+    monitored = projection.intent not in {AcquisitionIntent.SKIPPED, AcquisitionIntent.IGNORED}
+    selected_date = decision.selected_date.isoformat() if decision.selected_date else None
+    date_source = _DATE_SOURCE_NAMES.get(decision.date_source, decision.date_source)
+
+    values.update(
+        {
+            "legacyStatus": legacy_status,
+            "acquisitionIntent": projection.intent.value,
+            "intentExplicit": projection.intent_is_explicit,
+            "fulfillment": fulfillment.value,
+            "fulfillmentEvidence": evidence,
+            "displayState": display_state,
+            "eligible": decision.eligible,
+            "eligibilityReason": decision.reason,
+            "eligibilityDate": selected_date,
+            "eligibilityDateSource": date_source,
+            "eligibility": {
+                "eligible": decision.eligible,
+                "reason": decision.reason,
+                "date": selected_date,
+                "source": date_source,
+            },
+            "owned": owned,
+            "physicalOwned": bool(location),
+            "archived": fulfillment is Fulfillment.ARCHIVED,
+            "inFlight": in_flight,
+            "missing": missing,
+            "monitored": monitored,
+            "future": decision.reason == "future",
+            "deferred": missing and not decision.eligible,
+            "annual": bool(annual),
+        }
+    )
+    return values
+
+
+def _issue_summary(projected):
+    total = len(projected)
+    owned = sum(bool(row["owned"]) for row in projected)
+    return {
+        "total": total,
+        "issues": sum(not row["annual"] for row in projected),
+        "annuals": sum(bool(row["annual"]) for row in projected),
+        "owned": owned,
+        "physicalOwned": sum(bool(row["physicalOwned"]) for row in projected),
+        "archived": sum(bool(row["archived"]) for row in projected),
+        "inFlight": sum(bool(row["inFlight"]) for row in projected),
+        "missing": sum(bool(row["missing"]) for row in projected),
+        "monitored": sum(bool(row["monitored"]) for row in projected),
+        "wanted": sum(row["displayState"] == "Wanted" for row in projected),
+        "skipped": sum(row["acquisitionIntent"] == AcquisitionIntent.SKIPPED.value for row in projected),
+        "ignored": sum(row["acquisitionIntent"] == AcquisitionIntent.IGNORED.value for row in projected),
+        "failed": sum(row["fulfillment"] == Fulfillment.FAILED.value for row in projected),
+        "unknown": sum(row["fulfillment"] == Fulfillment.UNKNOWN.value for row in projected),
+        "future": sum(bool(row["future"]) for row in projected),
+        "eligible": sum(bool(row["eligible"]) for row in projected),
+        "deferred": sum(bool(row["deferred"]) for row in projected),
+        "completionPercent": round((owned / total) * 100) if total else 0,
+    }
+
+
+def project_issue_collection(rows, *, series_status, today=None, annual=False):
+    """Project a homogeneous issue collection and its internally consistent summary."""
+    projected = [
+        project_issue_state(row, series_status=series_status, today=today, annual=annual) for row in rows
+    ]
+    return projected, _issue_summary(projected)
 
 
 def _start_library_scan(scanner, status_attr, worker, start_lock, scan_label, scan_dir, thread_name):
@@ -134,12 +288,21 @@ def list_comics(ctx, limit=None, offset=None):
 def get_comic_detail(ctx, comic_id):
     """Get a single comic with its issues and annuals."""
     comic = series_queries.get_comic(comic_id)
-    issues = series_queries.get_issues(comic_id)
+    issue_rows = series_queries.get_issues(comic_id)
 
     annuals_on = getattr(ctx.config, "ANNUALS_ON", False) if ctx.config else False
-    annuals_list = series_queries.get_annuals(comic_id) if annuals_on else []
+    annual_rows = series_queries.get_annuals(comic_id) if annuals_on else []
+    series_status = comic[0].get("Status") if comic else None
+    projected_issues, _ = project_issue_collection(issue_rows, series_status=series_status)
+    projected_annuals, _ = project_issue_collection(annual_rows, series_status=series_status, annual=True)
+    summary = _issue_summary(projected_issues + projected_annuals)
 
-    return {"comic": comic, "issues": issues, "annuals": annuals_list}
+    return {
+        "comic": comic,
+        "issues": projected_issues,
+        "annuals": projected_annuals,
+        "summary": summary,
+    }
 
 
 def add_comic(ctx, comic_id):

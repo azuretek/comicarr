@@ -24,6 +24,12 @@ from comicarr.tables import (
     acquisition_maintenance,
     acquisition_maintenance_events,
     acquisition_maintenance_leases,
+    acquisition_repair_canaries,
+    acquisition_repair_events,
+    acquisition_repair_items,
+    acquisition_repair_manifests,
+    acquisition_repair_runs,
+    acquisition_repair_series,
     acquisition_run_items,
     acquisition_runs,
     acquisition_schema_versions,
@@ -32,10 +38,10 @@ from comicarr.tables import (
 )
 
 SCHEMA_COMPONENT = "acquisition"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CONTROL_ID = "acquisition"
 
-_SCHEMA_TABLES = (
+_BASE_SCHEMA_TABLES = (
     acquisition_schema_versions,
     acquisition_runs,
     acquisition_run_items,
@@ -43,13 +49,34 @@ _SCHEMA_TABLES = (
     acquisition_maintenance_leases,
     acquisition_maintenance_events,
 )
-_REQUIRED_INDEXES = {
+_REPAIR_SCHEMA_TABLES = (
+    acquisition_repair_runs,
+    acquisition_repair_manifests,
+    acquisition_repair_items,
+    acquisition_repair_series,
+    acquisition_repair_events,
+    acquisition_repair_canaries,
+)
+_SCHEMA_TABLES = _BASE_SCHEMA_TABLES + _REPAIR_SCHEMA_TABLES
+
+_BASE_REQUIRED_INDEXES = {
     "issues": {"issues_acquisition_intent"},
     "annuals": {"annuals_acquisition_intent"},
     "acquisition_runs": {"acquisition_runs_state"},
     "acquisition_run_items": {"acquisition_run_items_run_state", "acquisition_run_items_entity"},
     "acquisition_maintenance_leases": {"acquisition_maintenance_leases_active"},
     "acquisition_maintenance_events": {"acquisition_maintenance_events_epoch"},
+}
+_REPAIR_REQUIRED_INDEXES = {
+    "acquisition_repair_runs": {"acq_repair_runs_state"},
+    "acquisition_repair_manifests": {"acq_repair_manifest_run"},
+    "acquisition_repair_items": {
+        "acq_repair_items_run_state",
+        "acq_repair_items_entity",
+    },
+    "acquisition_repair_series": {"acq_repair_series_run_state"},
+    "acquisition_repair_events": {"acq_repair_events_run"},
+    "acquisition_repair_canaries": {"acq_repair_canary_run"},
 }
 
 
@@ -180,25 +207,49 @@ def _ensure_control_row(engine):
 
 
 def _apply_schema_v1(engine):
-    for table in _SCHEMA_TABLES:
+    for table in _BASE_SCHEMA_TABLES:
         table.create(engine, checkfirst=True)
     _add_intent_column(engine, "issues")
     _add_intent_column(engine, "annuals")
     _create_declared_index(engine, issues, "issues_acquisition_intent")
     _create_declared_index(engine, annuals, "annuals_acquisition_intent")
-    for table_name, names in _REQUIRED_INDEXES.items():
+    for table_name, names in _BASE_REQUIRED_INDEXES.items():
         if table_name in {"issues", "annuals"}:
             continue
-        table = next(table for table in _SCHEMA_TABLES if table.name == table_name)
+        table = next(table for table in _BASE_SCHEMA_TABLES if table.name == table_name)
         for name in names:
             _create_declared_index(engine, table, name)
     _ensure_control_row(engine)
 
 
-def _verify_schema(engine):
+def _apply_schema_v2(engine):
+    for table in _REPAIR_SCHEMA_TABLES:
+        table.create(engine, checkfirst=True)
+    for table_name, names in _REPAIR_REQUIRED_INDEXES.items():
+        table = next(table for table in _REPAIR_SCHEMA_TABLES if table.name == table_name)
+        for name in names:
+            _create_declared_index(engine, table, name)
+
+
+def _version_tables(target_version):
+    tables = list(_BASE_SCHEMA_TABLES)
+    if target_version >= 2:
+        tables.extend(_REPAIR_SCHEMA_TABLES)
+    return tuple(tables)
+
+
+def _version_indexes(target_version):
+    required = dict(_BASE_REQUIRED_INDEXES)
+    if target_version >= 2:
+        required.update(_REPAIR_REQUIRED_INDEXES)
+    return required
+
+
+def _verify_schema(engine, target_version=SCHEMA_VERSION):
     inspector = inspect(engine)
     actual_tables = set(inspector.get_table_names())
-    required_tables = {"issues", "annuals"} | {table.name for table in _SCHEMA_TABLES}
+    version_tables = _version_tables(target_version)
+    required_tables = {"issues", "annuals"} | {table.name for table in version_tables}
     missing_tables = sorted(required_tables - actual_tables)
     if missing_tables:
         raise RuntimeError("missing acquisition tables: %s" % ", ".join(missing_tables))
@@ -206,7 +257,7 @@ def _verify_schema(engine):
     required_columns = {
         "issues": {"AcquisitionIntent"},
         "annuals": {"AcquisitionIntent"},
-        **{table.name: {column.name for column in table.columns} for table in _SCHEMA_TABLES},
+        **{table.name: {column.name for column in table.columns} for table in version_tables},
     }
     missing_columns = []
     for table_name, expected in required_columns.items():
@@ -216,7 +267,7 @@ def _verify_schema(engine):
         raise RuntimeError("missing acquisition columns: %s" % ", ".join(missing_columns))
 
     missing_indexes = []
-    for table_name, expected in _REQUIRED_INDEXES.items():
+    for table_name, expected in _version_indexes(target_version).items():
         actual = {index["name"] for index in inspector.get_indexes(table_name)}
         missing_indexes.extend(sorted(expected - actual))
     if missing_indexes:
@@ -249,7 +300,7 @@ def ensure_acquisition_schema(engine=None):
             )
         if version < 1:
             _apply_schema_v1(engine)
-            _verify_schema(engine)
+            _verify_schema(engine, target_version=1)
             with engine.begin() as conn:
                 conn.execute(
                     insert(acquisition_schema_versions).values(
@@ -259,7 +310,19 @@ def ensure_acquisition_schema(engine=None):
                     )
                 )
             version = 1
-        _verify_schema(engine)
+        if version < 2:
+            _apply_schema_v2(engine)
+            _verify_schema(engine, target_version=2)
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(acquisition_schema_versions).values(
+                        component=SCHEMA_COMPONENT,
+                        version=2,
+                        applied_at=_utcnow(),
+                    )
+                )
+            version = 2
+        _verify_schema(engine, target_version=SCHEMA_VERSION)
         status = SchemaStatus(True, version, None)
     except Exception as e:
         status = SchemaStatus(False, version, str(e)[:1000])

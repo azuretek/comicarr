@@ -16,6 +16,7 @@ from sqlalchemy import String, create_engine, inspect, text
 
 import comicarr
 from comicarr.app.acquisition.maintenance import (
+    SCHEMA_VERSION,
     MaintenanceBlocked,
     MaintenanceController,
     ensure_acquisition_schema,
@@ -89,7 +90,7 @@ def test_schema_migration_is_versioned_idempotent_and_detects_drift():
     first = ensure_acquisition_schema(get_engine())
     second = ensure_acquisition_schema(get_engine())
     assert first.ready and second.ready
-    assert first.version == second.version == 1
+    assert first.version == second.version == SCHEMA_VERSION
 
     with get_engine().begin() as conn:
         conn.execute(text("DROP INDEX issues_acquisition_intent"))
@@ -109,7 +110,7 @@ def test_schema_migration_upgrades_a_v0189_shaped_legacy_schema(tmp_path):
     second = ensure_acquisition_schema(legacy_engine)
 
     assert first.ready and second.ready
-    assert first.version == second.version == 1
+    assert first.version == second.version == SCHEMA_VERSION
     assert "AcquisitionIntent" in {column["name"] for column in inspect(legacy_engine).get_columns("issues")}
     assert "AcquisitionIntent" in {column["name"] for column in inspect(legacy_engine).get_columns("annuals")}
     legacy_engine.dispose()

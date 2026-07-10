@@ -50,6 +50,10 @@ ISSUES_COLUMNS = [
     t_issues.c.ReleaseDate.label("releaseDate"),
     t_issues.c.IssueDate.label("issueDate"),
     t_issues.c.Status.label("status"),
+    t_issues.c.AcquisitionIntent.label("acquisitionIntent"),
+    t_issues.c.Location.label("location"),
+    t_issues.c.DigitalDate.label("digitalDate"),
+    t_issues.c.ComicID.label("comicId"),
     t_issues.c.ComicName.label("comicName"),
     t_issues.c.ChapterNumber.label("chapterNumber"),
     t_issues.c.VolumeNumber.label("volumeNumber"),
@@ -62,6 +66,10 @@ ANNUALS_COLUMNS = [
     t_annuals.c.ReleaseDate.label("releaseDate"),
     t_annuals.c.IssueDate.label("issueDate"),
     t_annuals.c.Status.label("status"),
+    t_annuals.c.AcquisitionIntent.label("acquisitionIntent"),
+    t_annuals.c.Location.label("location"),
+    t_annuals.c.DigitalDate.label("digitalDate"),
+    t_annuals.c.ComicID.label("comicId"),
     t_annuals.c.ComicName.label("comicName"),
 ]
 
@@ -176,7 +184,12 @@ def get_issues(comic_id):
 
 def get_annuals(comic_id):
     """Get all annuals for a comic."""
-    return db.select_all(select(*ANNUALS_COLUMNS).where(t_annuals.c.ComicID == comic_id))
+    return db.select_all(
+        select(*ANNUALS_COLUMNS).where(
+            t_annuals.c.ComicID == comic_id,
+            or_(t_annuals.c.Deleted.is_(None), t_annuals.c.Deleted != 1),
+        )
+    )
 
 
 def queue_issue(issue_id, audit_identity):

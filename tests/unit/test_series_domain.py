@@ -11,6 +11,7 @@
 
 import os
 import queue
+import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -21,6 +22,163 @@ from comicarr.app.core.context import AppContext
 from comicarr.app.search import commands as search_commands
 from comicarr.app.series import queries as series_queries
 from comicarr.app.series import service as series_service
+
+
+def _state_row(**overrides):
+    row = {
+        "id": "issue-1",
+        "status": None,
+        "acquisitionIntent": None,
+        "location": None,
+        "releaseDate": "2026-01-01",
+        "digitalDate": None,
+        "issueDate": None,
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.parametrize(
+    ("row", "series_status", "expected"),
+    [
+        (
+            _state_row(status=None),
+            "Active",
+            {"fulfillment": "unknown", "displayState": "Unknown", "owned": False, "eligible": True},
+        ),
+        (
+            _state_row(status="Archived"),
+            "Active",
+            {"fulfillment": "archived", "displayState": "Archived", "owned": True, "eligible": False},
+        ),
+        (
+            _state_row(status="Reserved"),
+            "Active",
+            {"fulfillment": "reserved", "displayState": "Reserved", "inFlight": True, "eligible": False},
+        ),
+        (
+            _state_row(status="Snatched"),
+            "Active",
+            {"fulfillment": "snatched", "displayState": "Snatched", "inFlight": True, "eligible": False},
+        ),
+        (
+            _state_row(status="Failed"),
+            "Active",
+            {"fulfillment": "failed", "displayState": "Failed", "missing": True, "eligible": True},
+        ),
+        (
+            _state_row(status="Skipped", acquisitionIntent="skipped", location="/comics/issue.cbz"),
+            "Active",
+            {
+                "acquisitionIntent": "skipped",
+                "fulfillment": "downloaded",
+                "displayState": "Downloaded",
+                "owned": True,
+                "physicalOwned": True,
+                "monitored": False,
+            },
+        ),
+        (
+            _state_row(status="Skipped", releaseDate="2027-01-01"),
+            "Active",
+            {"displayState": "Skipped", "eligibilityReason": "future", "future": True, "eligible": False},
+        ),
+        (
+            _state_row(status="Wanted"),
+            "Paused",
+            {"displayState": "Wanted", "eligibilityReason": "paused", "eligible": False},
+        ),
+        (
+            _state_row(status="Wanted"),
+            "Ended",
+            {"displayState": "Wanted", "eligibilityReason": "series_inactive", "eligible": False},
+        ),
+    ],
+)
+def test_project_issue_state_is_canonical_and_evidence_backed(row, series_status, expected):
+    projected = series_service.project_issue_state(
+        row,
+        series_status=series_status,
+        today=datetime.date(2026, 7, 10),
+    )
+
+    for key, value in expected.items():
+        assert projected[key] == value
+    assert projected["legacyStatus"] == row["status"]
+
+
+def test_absolute_batman_projection_reconciles_18_owned_2_released_2_future():
+    rows = [
+        _state_row(id="file-%s" % index, status="Skipped", location="/comics/absolute-%s.cbz" % index)
+        for index in range(18)
+    ]
+    rows.extend(
+        _state_row(id="released-%s" % index, status=None, releaseDate="2026-06-01") for index in range(2)
+    )
+    rows.extend(
+        _state_row(id="future-%s" % index, status="Skipped", releaseDate="2027-01-01") for index in range(2)
+    )
+
+    projected, summary = series_service.project_issue_collection(
+        rows,
+        series_status="Active",
+        today=datetime.date(2026, 7, 10),
+    )
+
+    assert len(projected) == 22
+    assert summary == {
+        "total": 22,
+        "issues": 22,
+        "annuals": 0,
+        "owned": 18,
+        "physicalOwned": 18,
+        "archived": 0,
+        "inFlight": 0,
+        "missing": 4,
+        "monitored": 22,
+        "wanted": 0,
+        "skipped": 0,
+        "ignored": 0,
+        "failed": 0,
+        "unknown": 2,
+        "future": 2,
+        "eligible": 2,
+        "deferred": 2,
+        "completionPercent": 82,
+    }
+
+
+def test_get_comic_detail_returns_backend_summary_for_issues_and_null_deleted_annuals(monkeypatch):
+    monkeypatch.setattr(series_service.series_queries, "get_comic", lambda _comic_id: [{"Status": "Active"}])
+    monkeypatch.setattr(
+        series_service.series_queries,
+        "get_issues",
+        lambda _comic_id: [_state_row(id="owned", status="Downloaded")],
+    )
+    monkeypatch.setattr(
+        series_service.series_queries,
+        "get_annuals",
+        lambda _comic_id: [_state_row(id="annual", status="Archived")],
+    )
+
+    result = series_service.get_comic_detail(_make_ctx(ANNUALS_ON=True), "160294")
+
+    assert result["summary"]["total"] == 2
+    assert result["summary"]["owned"] == 2
+    assert result["summary"]["issues"] == 1
+    assert result["summary"]["annuals"] == 1
+    assert result["annuals"][0]["annual"] is True
+
+
+def test_get_annuals_keeps_legacy_null_deleted_rows(monkeypatch):
+    select_all = MagicMock(return_value=[])
+    monkeypatch.setattr(series_queries.db, "select_all", select_all)
+
+    series_queries.get_annuals("160294")
+
+    sql = str(select_all.call_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "annuals.\"Deleted\" IS NULL" in sql
+    assert "annuals.\"Deleted\" != 1" in sql
 
 
 def _make_ctx(**config_overrides):

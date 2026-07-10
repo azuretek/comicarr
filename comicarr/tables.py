@@ -795,6 +795,143 @@ acquisition_maintenance_events = Table(
 )
 
 # ---------------------------------------------------------------------------
+# acquisition repair manifests
+# ---------------------------------------------------------------------------
+# Repair is deliberately modelled separately from acquisition command runs.
+# A preview creates one durable run plus a complete ordered set of items;
+# confirmation freezes that set into a manifest.  JSON columns are never
+# indexed and contain bounded, canonical projections written by the repair
+# service.  Every identifier participating in a key/index uses a bounded
+# String so the schema remains portable to MySQL as well as SQLite/PostgreSQL.
+
+acquisition_repair_runs = Table(
+    "acquisition_repair_runs",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("scope_type", String(32), nullable=False),
+    Column("scope_id", String(255), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("preview_token_digest", String(64), nullable=False),
+    Column("token_expires_at", String(40), nullable=False),
+    Column("token_consumed_at", String(40)),
+    Column("preview_fingerprint", String(64), nullable=False),
+    Column("manifest_id", String(64)),
+    Column("maintenance_epoch", Integer),
+    Column("item_count", Integer, nullable=False, server_default="0"),
+    Column("selected_count", Integer, nullable=False, server_default="0"),
+    Column("applied_count", Integer, nullable=False, server_default="0"),
+    Column("conflict_count", Integer, nullable=False, server_default="0"),
+    Column("rollback_count", Integer, nullable=False, server_default="0"),
+    Column("rollback_conflict_count", Integer, nullable=False, server_default="0"),
+    Column("last_sequence", Integer, nullable=False, server_default="0"),
+    Column("created_at", String(40), nullable=False),
+    Column("confirmed_at", String(40)),
+    Column("started_at", String(40)),
+    Column("updated_at", String(40), nullable=False),
+    Column("completed_at", String(40)),
+)
+
+acquisition_repair_manifests = Table(
+    "acquisition_repair_manifests",
+    metadata,
+    Column("manifest_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False),
+    Column("preview_fingerprint", String(64), nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("item_count", Integer, nullable=False),
+    Column("selected_count", Integer, nullable=False),
+    Column("frozen_by", String(255), nullable=False),
+    Column("frozen_at", String(40), nullable=False),
+    UniqueConstraint("run_id", name="uq_acq_repair_manifest_run"),
+)
+
+acquisition_repair_items = Table(
+    "acquisition_repair_items",
+    metadata,
+    Column("item_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String(64), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("entity_type", String(32), nullable=False),
+    Column("entity_id", String(255), nullable=False),
+    Column("series_id", String(255), nullable=False),
+    Column("intent", String(16), nullable=False),
+    Column("fulfillment", String(32), nullable=False),
+    Column("reason", String(64), nullable=False),
+    Column("date_source", String(32)),
+    Column("selected_date", String(10)),
+    Column("evidence_json", Text, nullable=False),
+    Column("before_json", Text, nullable=False),
+    Column("proposed_json", Text, nullable=False),
+    Column("optional", Integer, nullable=False, server_default="0"),
+    Column("selected", Integer, nullable=False, server_default="0"),
+    Column("apply_state", String(32), nullable=False),
+    Column("apply_reason", String(255)),
+    Column("applied_json", Text),
+    Column("rollback_state", String(32), nullable=False),
+    Column("rollback_reason", String(255)),
+    Column("created_at", String(40), nullable=False),
+    Column("updated_at", String(40), nullable=False),
+    Column("applied_at", String(40)),
+    Column("rolled_back_at", String(40)),
+    UniqueConstraint("run_id", "sequence", name="uq_acq_repair_item_sequence"),
+    UniqueConstraint(
+        "run_id",
+        "entity_type",
+        "entity_id",
+        name="uq_acq_repair_item_entity",
+    ),
+)
+
+acquisition_repair_series = Table(
+    "acquisition_repair_series",
+    metadata,
+    Column("series_item_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String(64), nullable=False),
+    Column("series_id", String(255), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("dirty", Integer, nullable=False, server_default="0"),
+    Column("aggregate_selected", Integer, nullable=False, server_default="0"),
+    Column("before_have", Integer),
+    Column("before_total", Integer),
+    Column("final_have", Integer),
+    Column("final_total", Integer),
+    Column("conflict_reason", String(255)),
+    Column("updated_at", String(40), nullable=False),
+    UniqueConstraint("run_id", "series_id", name="uq_acq_repair_series_run"),
+)
+
+acquisition_repair_events = Table(
+    "acquisition_repair_events",
+    metadata,
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String(64), nullable=False),
+    Column("sequence", Integer),
+    Column("action", String(32), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("entity_type", String(32)),
+    Column("entity_id", String(255)),
+    Column("reason", String(255), nullable=False),
+    Column("created_at", String(40), nullable=False),
+)
+
+acquisition_repair_canaries = Table(
+    "acquisition_repair_canaries",
+    metadata,
+    Column("canary_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False),
+    Column("entity_type", String(32), nullable=False),
+    Column("entity_id", String(255), nullable=False),
+    Column("owner_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("confirmed_at", String(40), nullable=False),
+    Column("consumed_at", String(40)),
+    UniqueConstraint("run_id", name="uq_acq_repair_canary_run"),
+)
+
+# ---------------------------------------------------------------------------
 # Indexes
 # ---------------------------------------------------------------------------
 
@@ -830,6 +967,25 @@ Index(
     acquisition_maintenance_leases.c.epoch,
 )
 Index("acquisition_maintenance_events_epoch", acquisition_maintenance_events.c.epoch)
+Index("acq_repair_runs_state", acquisition_repair_runs.c.state)
+Index("acq_repair_manifest_run", acquisition_repair_manifests.c.run_id)
+Index(
+    "acq_repair_items_run_state",
+    acquisition_repair_items.c.run_id,
+    acquisition_repair_items.c.apply_state,
+)
+Index(
+    "acq_repair_items_entity",
+    acquisition_repair_items.c.entity_type,
+    acquisition_repair_items.c.entity_id,
+)
+Index(
+    "acq_repair_series_run_state",
+    acquisition_repair_series.c.run_id,
+    acquisition_repair_series.c.state,
+)
+Index("acq_repair_events_run", acquisition_repair_events.c.run_id, acquisition_repair_events.c.event_id)
+Index("acq_repair_canary_run", acquisition_repair_canaries.c.run_id)
 ddl_info_status_updated = Index("ddl_info_status_updated", ddl_info.c.status, ddl_info.c.updated_date)
 
 # Case-insensitive indexes (SQLite uses COLLATE NOCASE on column definition;
@@ -880,6 +1036,12 @@ TABLE_MAP = {
     "acquisition_maintenance": acquisition_maintenance,
     "acquisition_maintenance_leases": acquisition_maintenance_leases,
     "acquisition_maintenance_events": acquisition_maintenance_events,
+    "acquisition_repair_runs": acquisition_repair_runs,
+    "acquisition_repair_manifests": acquisition_repair_manifests,
+    "acquisition_repair_items": acquisition_repair_items,
+    "acquisition_repair_series": acquisition_repair_series,
+    "acquisition_repair_events": acquisition_repair_events,
+    "acquisition_repair_canaries": acquisition_repair_canaries,
 }
 
 
