@@ -1,0 +1,35 @@
+# Local gates that mirror CI lint/format checks.
+# Install once after cloning: uv sync --extra dev && pre-commit install
+# Frontend hooks need frontend deps: cd frontend && npm ci
+#
+# Keep the ruff pre-commit rev aligned with the ruff version in uv.lock.
+
+default_language_version:
+  python: python3
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.7
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^comicarr/
+      - id: ruff-format
+        files: ^comicarr/
+
+  - repo: local
+    hooks:
+      - id: frontend-prettier
+        name: prettier (frontend)
+        language: system
+        entry: python scripts/pre-commit/run_frontend_hook.py prettier
+        files: >-
+          ^frontend/(src/.*\.(ts|tsx|js|jsx|css|json)|tests/e2e/.*\.(ts|tsx|js|jsx|mjs)|playwright\.config\.ts)$
+        pass_filenames: true
+      - id: frontend-eslint
+        name: eslint (frontend)
+        language: system
+        entry: python scripts/pre-commit/run_frontend_hook.py eslint
+        files: ^frontend/.*\.(ts|tsx|js|jsx|mjs)$
+        exclude: ^frontend/(dist|node_modules)/
+        pass_filenames: true

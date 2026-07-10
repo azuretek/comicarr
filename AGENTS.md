@@ -27,7 +27,12 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 | Format check | `ruff format --check comicarr/` |
 | Format fix | `ruff format comicarr/` |
 | Lint frontend | `cd frontend && npm run lint` |
+| Format frontend | `cd frontend && npm run format` / `format:check` |
 | Typecheck | `cd frontend && npm run typecheck` |
+| Lint all (CI parity) | `npm run lint` |
+| Lint fix all | `npm run lint:fix` |
+| Install git hooks | `pre-commit install` (after `uv sync --extra dev`) |
+| Run hooks on tree | `pre-commit run --all-files` |
 
 When using Vite (`npm run dev`) with a separate backend process, the proxy targets `http://localhost:8090`. Override with `VITE_API_PROXY_TARGET` if needed.
 
@@ -51,13 +56,14 @@ Domain packages under `comicarr/app/`: `series`, `search`, `downloads`, `system`
 
 ## Style & anti-patterns
 
-- **Formatting**: `ruff format` enforced in CI; do not use Black
-- **Lint**: `ruff check comicarr/`
+- **Formatting**: `ruff format` enforced in CI and pre-commit; do not use Black
+- **Lint**: `ruff check comicarr/`; frontend ESLint + Prettier enforced in CI and pre-commit
 - **Type hints**: do not mass-add to large legacy modules (`search.py`, `postprocessor.py`); new `comicarr/app/**` code may use annotations like neighboring files
 - Always `except Exception as e` — never bare `except:`
 - GPL license header on new Python files
 - Frontend: `npm` only (not bun)
 - Do not manually bump versions — Changesets automation
+- **Before finishing a change**: run `npm run lint` (or `npm run lint:fix` then re-check). Do not skip with `--no-verify`
 
 ## Common patterns
 
