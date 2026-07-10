@@ -20,18 +20,28 @@ import os
 import shutil
 
 
-def is_path_within_allowed_dirs(path, allowed_dirs):
+def is_path_within_allowed_dirs(path, allowed_dirs, *, strict=False):
     """Check if a path is within any of the allowed directories.
 
     Uses os.path.realpath + os.path.commonpath to prevent path traversal.
     Unlike the original helpers.py version, this takes allowed_dirs as a
     parameter instead of reading from global config.
+
+    When strict=True, the path must be a real descendant of a root — equality
+    with a root is rejected (needed for destructive operations that must never
+    target a configured library root itself). Overbroad roots that realpath to
+    the filesystem root are ignored in strict mode so they cannot authorize
+    arbitrary absolute paths.
     """
     real_path = os.path.realpath(path)
     for root in allowed_dirs:
         if not root:
             continue
         real_root = os.path.realpath(root)
+        if strict and real_root == os.sep:
+            continue
+        if strict and real_path == real_root:
+            continue
         try:
             if os.path.commonpath([real_root, real_path]) == real_root:
                 return True
