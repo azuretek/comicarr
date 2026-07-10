@@ -151,5 +151,11 @@ def force_rss(ctx: AppContext = Depends(get_context)):
 
 @router.get("/providers", dependencies=[Depends(require_session)])
 def get_provider_stats(ctx: AppContext = Depends(get_context)):
-    """Get provider search statistics."""
+    """Get sanitized provider search statistics."""
     return search_service.get_provider_stats(ctx)
+
+
+@router.get("/health", dependencies=[Depends(require_session)])
+def get_search_health(ctx: AppContext = Depends(get_context)):
+    """Get acquisition-route, durable run, worker, and maintenance health."""
+    return search_service.get_health(ctx)

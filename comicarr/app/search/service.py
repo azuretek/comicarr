@@ -203,10 +203,18 @@ def force_rss(ctx):
 
 
 def get_provider_stats(ctx):
-    """Get provider search statistics."""
-    from comicarr.app.search import queries as search_queries
+    """Preserve the provider-list response shape while sanitizing its fields."""
+    return get_health(ctx)["providers"]
 
-    return search_queries.get_provider_stats()
+
+def get_health(ctx):
+    """Get provider, route, run, worker, and maintenance health."""
+    from comicarr.app.search.health import get_search_health
+
+    return get_search_health(
+        ctx.config,
+        provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
+    )
 
 
 # --- Extracted from helpers.py ---
@@ -522,6 +530,12 @@ def block_provider_check(site, simple=True, force=False):
         if prov["site"] == site:
             if force is True:
                 comicarr.PROVIDER_BLOCKLIST.remove(prov)
+                try:
+                    from comicarr.app.search.health import clear_route_block, route_for_site
+
+                    clear_route_block(route_for_site(site))
+                except Exception as e:
+                    logger.fdebug("[SEARCH] Unable to clear durable route block: %s" % e)
                 if simple is True:
                     return False
                 else:
@@ -553,6 +567,17 @@ def disable_provider(site, reason=None, delay=0):
             comicarr.PROVIDER_BLOCKLIST.remove(entry)
     newentry = {"site": site, "resume": int(time.time()) + delay, "reason": reason}
     comicarr.PROVIDER_BLOCKLIST.append(newentry)
+    try:
+        from comicarr.app.search.health import record_route_outcome, route_for_site
+
+        record_route_outcome(
+            route_for_site(site),
+            success=False,
+            error=reason or "Provider temporarily blocked",
+            blocked_until=newentry["resume"],
+        )
+    except Exception as e:
+        logger.fdebug("[SEARCH] Unable to persist provider route failure: %s" % e)
     logger.info("provider_blocklist: %s" % comicarr.PROVIDER_BLOCKLIST)
 
 
@@ -722,25 +747,42 @@ def _requeue_search_command(queue, command, ledger, reason):
     queue.put(command.to_mapping())
 
 
+def _record_search_worker_health(state, error=None):
+    """Keep health telemetry best-effort so diagnostics cannot break queue ownership."""
+    try:
+        from comicarr.app.search.health import record_worker_heartbeat
+
+        record_worker_heartbeat("search", state=state, error=error)
+    except Exception as e:
+        logger.fdebug("[SEARCH-QUEUE] Unable to persist worker heartbeat: %s" % e)
+
+
 def search_queue(queue, ledger=None, maintenance=None):
     import queue as queue_module
 
     from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
 
     worker_maintenance = maintenance
+    last_heartbeat = 0.0
+    _record_search_worker_health("running")
 
     while True:
         try:
             item = queue.get(timeout=5)
         except queue_module.Empty:
+            if time.monotonic() - last_heartbeat >= 30:
+                _record_search_worker_health("idle")
+                last_heartbeat = time.monotonic()
             continue
 
         try:
             if item == "exit":
                 logger.info("[SEARCH-QUEUE] Cleaning up workers for shutdown")
+                _record_search_worker_health("stopped")
                 break
 
             command = SearchCommand.from_mapping(item)
+            _record_search_worker_health("running")
             command_ledger = ledger
             if command.run_id:
                 from comicarr.app.acquisition.runs import RunLedger
@@ -791,8 +833,10 @@ def search_queue(queue, ledger=None, maintenance=None):
                             reason=str(e),
                         )
                     logger.error("[SEARCH-QUEUE] Search command %s failed: %s" % (command.issueid, e))
+                    _record_search_worker_health("failed", e)
                     continue
                 _requeue_search_command(queue, command, command_ledger, str(e))
+                _record_search_worker_health("blocked", e)
                 time.sleep(1)
                 continue
 
@@ -809,10 +853,13 @@ def search_queue(queue, ledger=None, maintenance=None):
                     outcome,
                     reason=outcome_reason,
                 )
+            _record_search_worker_health("idle")
             time.sleep(5)
         except SearchCommandError as e:
             logger.error("[SEARCH-QUEUE] Rejected malformed command: %s" % e)
+            _record_search_worker_health("failed", e)
         except Exception as e:
             logger.error("[SEARCH-QUEUE] Queue ownership failure; continuing worker: %s" % e)
+            _record_search_worker_health("failed", e)
         finally:
             _safe_task_done(queue)

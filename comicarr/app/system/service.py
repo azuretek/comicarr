@@ -29,10 +29,18 @@ import threading
 from collections import namedtuple
 from pathlib import Path
 
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+)
 from sqlalchemy import select
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.acquisition.models import DispatchState
+from comicarr.app.common.dates import normalize_utc_datetime
 from comicarr.app.core.security import LoginRateLimiter
 from comicarr.tables import comics, jobhistory, storyarcs
 
@@ -41,6 +49,16 @@ _rate_limiter = LoginRateLimiter()
 _fallback_weekly_refresh_lock = threading.Lock()
 
 WEEKLY_JOB_NAME = "Weekly Pullist"
+SCHEDULER_JOB_NAMES = {
+    "dbupdater": "DB Updater",
+    "search": "Auto-Search",
+    "weekly": WEEKLY_JOB_NAME,
+    "rss": "RSS Feeds",
+    "version": "Check Version",
+    "monitor": "Folder Monitor",
+    "importinbox": "Import Inbox Scanner",
+    "ddl_health": "DDL Health Check",
+}
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
 CONFIG_PERSISTENCE_ERROR = "Failed to persist configuration"
@@ -574,6 +592,29 @@ def get_version_info(ctx):
         "commits_behind": ctx.commits_behind,
         "install_type": ctx.install_type,
         "current_branch": ctx.current_branch,
+        "build": get_build_identity(ctx),
+    }
+
+
+def get_build_identity(ctx):
+    """Return deploy identity without pretending an unavailable commit is known."""
+    build_id = os.environ.get("COMICARR_BUILD_ID")
+    build_commit = os.environ.get("COMICARR_BUILD_COMMIT")
+    source = "environment" if build_id or build_commit else "runtime"
+    runtime_commit = getattr(ctx, "current_version", None)
+    if not build_commit and runtime_commit and re.fullmatch(r"[0-9a-fA-F]{7,64}", str(runtime_commit)):
+        build_commit = str(runtime_commit)
+    release = getattr(ctx, "current_version_name", None) or getattr(ctx, "current_release_name", None)
+    version = getattr(ctx, "current_version", None)
+    if not build_id:
+        build_id = release or version or "unknown"
+    return {
+        "id": str(build_id),
+        "commit": str(build_commit) if build_commit else None,
+        "release": release,
+        "version": version,
+        "source": source,
+        "verified": bool(build_commit and build_id != "unknown"),
     }
 
 
@@ -601,33 +642,51 @@ def get_recent_logs(ctx):
 
 def get_job_info(ctx):
     """Return scheduled job information."""
-    if not ctx.scheduler:
-        return {"jobs": []}
+    try:
+        from comicarr.app.search.health import get_acquisition_health
 
-    weekly_history = _get_weekly_job_history()
+        acquisition = get_acquisition_health()
+    except Exception as e:
+        acquisition = {"unavailable": {"reason": "schema_unavailable", "error": sanitize_job_error(e)}}
+    if not ctx.scheduler:
+        return {"jobs": [], "acquisition": acquisition}
+
     jobs = []
     for job in ctx.scheduler.get_jobs():
+        history = _get_weekly_job_history() if job.id == "weekly" else _get_job_history(job.name)
+        status = history.get("status") or "Waiting"
+        if job.next_run_time is None:
+            status = "Paused"
         job_info = {
             "id": job.id,
             "name": job.name,
             "next_run_time": str(job.next_run_time) if job.next_run_time else None,
             "trigger": str(job.trigger),
+            "status": status,
+            "state": _weekly_state(status),
+            "dispatch": {
+                "state": _weekly_state(status),
+                "last_attempt": history.get("prev_run_timestamp"),
+                "last_success": history.get("last_success_timestamp"),
+                "last_failure": history.get("last_failure_timestamp"),
+                "last_error": sanitize_job_error(history.get("last_error")) if history.get("last_error") else None,
+            },
         }
         if job.id == "weekly":
-            status = weekly_history.get("status") or getattr(comicarr, "WEEKLY_STATUS", "Waiting")
-            if job.next_run_time is None:
-                status = "Paused"
+            if not history.get("status"):
+                status = getattr(comicarr, "WEEKLY_STATUS", "Waiting")
+                job_info["status"] = status
+                job_info["state"] = _weekly_state(status)
+                job_info["dispatch"]["state"] = _weekly_state(status)
             job_info.update(
                 {
-                    "status": status,
-                    "state": _weekly_state(status),
-                    "last_success_timestamp": weekly_history.get("last_success_timestamp"),
-                    "last_failure_timestamp": weekly_history.get("last_failure_timestamp"),
-                    "last_error": weekly_history.get("last_error"),
+                    "last_success_timestamp": history.get("last_success_timestamp"),
+                    "last_failure_timestamp": history.get("last_failure_timestamp"),
+                    "last_error": sanitize_job_error(history.get("last_error")) if history.get("last_error") else None,
                 }
             )
         jobs.append(job_info)
-    return {"jobs": jobs}
+    return {"jobs": jobs, "acquisition": acquisition}
 
 
 def _weekly_state(status):
@@ -642,6 +701,7 @@ def _get_weekly_job_history():
             db.select_one(
                 select(
                     jobhistory.c.status,
+                    jobhistory.c.prev_run_timestamp,
                     jobhistory.c.last_success_timestamp,
                     jobhistory.c.last_failure_timestamp,
                     jobhistory.c.last_error,
@@ -651,6 +711,26 @@ def _get_weekly_job_history():
         )
     except Exception as e:
         logger.warn("[WEEKLY] Could not read durable refresh status: %s" % e)
+        return {}
+
+
+def _get_job_history(job_name):
+    """Read one durable scheduler outcome without making diagnostics fail."""
+    try:
+        return (
+            db.select_one(
+                select(
+                    jobhistory.c.status,
+                    jobhistory.c.prev_run_timestamp,
+                    jobhistory.c.last_success_timestamp,
+                    jobhistory.c.last_failure_timestamp,
+                    jobhistory.c.last_error,
+                ).where(jobhistory.c.JobName == str(job_name))
+            )
+            or {}
+        )
+    except Exception as e:
+        logger.warn("[SCHEDULER] Could not read durable status for %s: %s" % (job_name, e))
         return {}
 
 
@@ -707,7 +787,76 @@ def sanitize_job_error(error):
         message,
     )
     message = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[redacted]@", message)
-    return message[:500] or "Weekly refresh failed; check server logs for details."
+    return message[:500] or "Scheduled job failed; check server logs for details."
+
+
+def _event_timestamp(event):
+    scheduled = getattr(event, "scheduled_run_time", None)
+    if scheduled is None:
+        scheduled_runs = getattr(event, "scheduled_run_times", None) or []
+        scheduled = scheduled_runs[-1] if scheduled_runs else None
+    if isinstance(scheduled, datetime.datetime):
+        return normalize_utc_datetime(scheduled).timestamp()
+    return datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+
+def persist_scheduler_event(event):
+    """Persist APScheduler dispatch outcome without claiming acquisition completion."""
+    job_id = str(getattr(event, "job_id", "unknown"))
+    job_name = SCHEDULER_JOB_NAMES.get(job_id, job_id)
+    timestamp = _event_timestamp(event)
+    event_code = getattr(event, "code", None)
+    values = {
+        "prev_run_timestamp": timestamp,
+        "prev_run_datetime": datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc).isoformat(),
+        "last_run_completed": "True",
+    }
+    if event_code == EVENT_JOB_EXECUTED:
+        values.update(
+            {
+                "status": DispatchState.ACCEPTED.value,
+                "last_success_timestamp": timestamp,
+                "last_error": None,
+            }
+        )
+    elif event_code == EVENT_JOB_ERROR:
+        values.update(
+            {
+                "status": DispatchState.ERROR.value,
+                "last_failure_timestamp": timestamp,
+                "last_error": sanitize_job_error(getattr(event, "exception", None)),
+            }
+        )
+    elif event_code == EVENT_JOB_MISSED:
+        values.update(
+            {
+                "status": DispatchState.MISSED.value,
+                "last_failure_timestamp": timestamp,
+                "last_error": "Scheduled run was missed.",
+            }
+        )
+    elif event_code == EVENT_JOB_MAX_INSTANCES:
+        values.update(
+            {
+                "status": DispatchState.MAX_INSTANCES.value,
+                "last_failure_timestamp": timestamp,
+                "last_error": "Scheduled run was blocked by the max-instance limit.",
+            }
+        )
+    else:
+        return False
+    db.upsert("jobhistory", values, {"JobName": job_name})
+    return True
+
+
+def register_scheduler_health_listener(scheduler):
+    """Register the durable listener once per scheduler instance."""
+    if scheduler.__dict__.get("_comicarr_health_listener", False):
+        return False
+    mask = EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES
+    scheduler.add_listener(persist_scheduler_event, mask)
+    scheduler._comicarr_health_listener = True
+    return True
 
 
 def get_startup_diagnostics(ctx):
@@ -728,9 +877,21 @@ def get_startup_diagnostics(ctx):
         logger.warn("[DIAGNOSTICS] Live db_empty check failed, falling back to startup flag: %s" % e)
         db_empty = comicarr.DB_EMPTY
 
+    try:
+        from comicarr.app.search.health import get_search_health
+
+        acquisition = get_search_health(
+            ctx.config,
+            provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
+        )
+    except Exception as e:
+        acquisition = {"blocked": True, "reason": "health_unavailable", "error": sanitize_job_error(e)}
+
     return {
         "db_empty": db_empty,
         "migration_dismissed": getattr(ctx.config, "MIGRATION_DISMISSED", False) if ctx.config else False,
+        "build": get_build_identity(ctx),
+        "acquisition": acquisition,
     }
 
 
@@ -1091,14 +1252,18 @@ def job_management(
                 was_running = jstatus == "Running"
                 jstatus = "Waiting"
                 recovery_values = {"status": jstatus}
-                if "weekly" in ji["JobName"].lower():
-                    if was_running:
-                        recovery_values.update(
-                            {
-                                "last_failure_timestamp": ji["prev_run_timestamp"],
-                                "last_error": "Previous weekly refresh was interrupted by restart.",
-                            }
-                        )
+                if was_running:
+                    if "weekly" in ji["JobName"].lower():
+                        interrupted_error = "Previous weekly refresh was interrupted by restart."
+                    else:
+                        interrupted_error = "Previous %s run was interrupted by restart." % ji["JobName"]
+                    recovery_values.update(
+                        {
+                            "status": "Interrupted",
+                            "last_failure_timestamp": ji["prev_run_timestamp"],
+                            "last_error": interrupted_error,
+                        }
+                    )
                 db.upsert("jobhistory", recovery_values, {"JobName": ji["JobName"]})
             if "update" in ji["JobName"].lower():
                 if comicarr.SCHED_DBUPDATE_LAST is None:
@@ -1280,10 +1445,41 @@ def job_management(
         else:
             updateCtrl = {"JobName": job}
             if current_run is not None:
-                pr_datetime = datetime.datetime.utcfromtimestamp(current_run)
+                pr_datetime = datetime.datetime.fromtimestamp(current_run, tz=datetime.timezone.utc)
                 pr_datetime = pr_datetime.replace(microsecond=0)
-                updateVals = {"prev_run_timestamp": current_run, "prev_run_datetime": pr_datetime, "status": status}
+                updateVals = {
+                    "prev_run_timestamp": current_run,
+                    "prev_run_datetime": pr_datetime.isoformat(),
+                    "status": status,
+                }
             elif last_run_completed is not None:
+                # Persist the terminal fact before scheduler inspection, date
+                # presentation, or logging. Those secondary operations must
+                # never be able to mask a completed/failed dispatch.
+                terminal_datetime = datetime.datetime.fromtimestamp(
+                    last_run_completed, tz=datetime.timezone.utc
+                ).replace(microsecond=0)
+                terminal_values = {
+                    "prev_run_timestamp": last_run_completed,
+                    "prev_run_datetime": terminal_datetime.isoformat(),
+                    "last_run_completed": "True",
+                    "status": status,
+                }
+                if failure:
+                    terminal_values.update(
+                        {
+                            "last_failure_timestamp": last_run_completed,
+                            "last_error": sanitize_job_error(failure_message),
+                        }
+                    )
+                else:
+                    terminal_values.update(
+                        {
+                            "last_success_timestamp": last_run_completed,
+                            "last_error": None,
+                        }
+                    )
+                db.upsert("jobhistory", terminal_values, updateCtrl)
                 if any(
                     [
                         job == "DB Updater",
@@ -1396,27 +1592,27 @@ def job_management(
                             if job == "Weekly Pullist":
                                 nextrun_date = getattr(jobstore, "next_run_time", None)
                             else:
-                                nextrun_date = datetime.datetime.utcfromtimestamp(nextrun_stamp)
+                                nextrun_date = datetime.datetime.fromtimestamp(nextrun_stamp, tz=datetime.timezone.utc)
                                 jobstore.modify(next_run_time=nextrun_date)
                             if nextrun_date is not None:
                                 nextrun_date = nextrun_date.replace(microsecond=0)
                     else:
                         # if the rss is enabled after startup, we have to re-set it up...
                         nextrun_stamp = utctimestamp() + (int(comicarr.CONFIG.RSS_CHECKINTERVAL) * 60)
-                        nextrun_date = datetime.datetime.utcfromtimestamp(nextrun_stamp)
+                        nextrun_date = datetime.datetime.fromtimestamp(nextrun_stamp, tz=datetime.timezone.utc)
                         comicarr.SCHED_RSS_LAST = last_run_completed
 
                 if nextrun_date is not None:
                     logger.fdebug("ReScheduled job: %s to %s" % (job, comicarr.helpers.utc_date_to_local(nextrun_date)))
-                lastrun_comp = datetime.datetime.utcfromtimestamp(last_run_completed)
+                lastrun_comp = datetime.datetime.fromtimestamp(last_run_completed, tz=datetime.timezone.utc)
                 lastrun_comp = lastrun_comp.replace(microsecond=0)
                 # if it's completed, then update the last run time to the ending time of the job
                 updateVals = {
                     "prev_run_timestamp": last_run_completed,
-                    "prev_run_datetime": lastrun_comp,
+                    "prev_run_datetime": lastrun_comp.isoformat(),
                     "last_run_completed": "True",
                     "next_run_timestamp": nextrun_stamp,
-                    "next_run_datetime": nextrun_date,
+                    "next_run_datetime": nextrun_date.isoformat() if nextrun_date is not None else None,
                     "status": status,
                 }
                 if failure:

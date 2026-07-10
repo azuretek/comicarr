@@ -4,6 +4,7 @@ import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -39,7 +40,8 @@ def test_weekly_run_records_failure_and_recovers_status(monkeypatch):
     monkeypatch.setattr(weeklypullit.weeklypull, "future_check", MagicMock())
     monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Queued")
 
-    weeklypullit.Weekly().run()
+    with pytest.raises(RuntimeError, match="upstream down"):
+        weeklypullit.Weekly().run()
 
     assert comicarr.WEEKLY_STATUS == "Error"
     failure_call = job_management.call_args_list[-1].kwargs
@@ -59,7 +61,8 @@ def test_weekly_run_records_returned_pull_failure(monkeypatch):
     future_check = MagicMock()
     monkeypatch.setattr(weeklypullit.weeklypull, "future_check", future_check)
 
-    weeklypullit.Weekly().run()
+    with pytest.raises(RuntimeError, match="reported a failure"):
+        weeklypullit.Weekly().run()
 
     future_check.assert_not_called()
     assert job_management.call_args_list[-1].kwargs["status"] == "Error"

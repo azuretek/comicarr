@@ -777,8 +777,42 @@ class TestConfigService:
 
         assert job.modify_calls == 0
         values = upsert.call_args.args[1]
-        assert values["next_run_datetime"] == next_run
+        assert values["next_run_datetime"] == next_run.isoformat()
         assert values["next_run_timestamp"] == next_run.timestamp()
+
+    def test_terminal_outcome_is_persisted_before_date_presentation(self, monkeypatch):
+        """A display-only datetime failure cannot erase the durable job outcome."""
+        next_run = datetime.datetime(2026, 7, 10, 16, tzinfo=datetime.timezone.utc)
+        job = MagicMock()
+        job.name = "Weekly Pullist"
+        job.next_run_time = next_run
+        job.__str__.return_value = "Weekly Pullist (trigger: interval], next run at: 2026-07-10 16:00:00 UTC)"
+        scheduler = MagicMock()
+        scheduler.get_jobs.return_value = [job]
+        monkeypatch.setattr(comicarr, "SCHED", scheduler)
+        monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
+        monkeypatch.setattr(comicarr, "SCHED_WEEKLY_LAST", None)
+        monkeypatch.setattr(comicarr, "FORCE_STATUS", {})
+        monkeypatch.setattr(
+            comicarr.helpers,
+            "utc_date_to_local",
+            MagicMock(side_effect=RuntimeError("presentation failed")),
+        )
+
+        with patch.object(system_service.db, "upsert") as upsert, pytest.raises(RuntimeError, match="presentation"):
+            system_service.job_management(
+                write=True,
+                job="Weekly Pullist",
+                last_run_completed=1_783_692_000.0,
+                status="Error",
+                failure=True,
+                failure_message="upstream failed",
+            )
+
+        first_values = upsert.call_args_list[0].args[1]
+        assert first_values["status"] == "Error"
+        assert first_values["last_failure_timestamp"] == 1_783_692_000.0
+        assert first_values["last_error"] == "upstream failed"
 
     def test_startup_recovers_an_interrupted_weekly_refresh(self, monkeypatch):
         """A persisted Running state becomes safe-to-schedule after a restart."""
@@ -804,7 +838,7 @@ class TestConfigService:
         upsert.assert_called_once_with(
             "jobhistory",
             {
-                "status": "Waiting",
+                "status": "Interrupted",
                 "last_failure_timestamp": 200.0,
                 "last_error": "Previous weekly refresh was interrupted by restart.",
             },
@@ -834,6 +868,31 @@ class TestConfigService:
         assert result["weekly"] == {"last": 100.0, "status": "Waiting"}
         upsert.assert_called_once_with("jobhistory", {"status": "Waiting"}, {"JobName": "Weekly Pullist"})
 
+    def test_startup_marks_every_running_acquisition_job_interrupted(self, monkeypatch):
+        monkeypatch.setattr(comicarr, "SCHED_SEARCH_LAST", None)
+        monkeypatch.setattr(comicarr, "SEARCH_STATUS", "Waiting")
+        monkeypatch.setattr(
+            system_service.db,
+            "select_all",
+            lambda statement: [
+                {
+                    "JobName": "Auto-Search",
+                    "status": "Running",
+                    "prev_run_timestamp": 300.0,
+                    "last_success_timestamp": 100.0,
+                }
+            ],
+        )
+
+        with patch.object(system_service.db, "upsert") as upsert:
+            result = system_service.job_management(startup=True)
+
+        assert result["search"] == {"last": 300.0, "status": "Waiting"}
+        values = upsert.call_args.args[1]
+        assert values["status"] == "Interrupted"
+        assert values["last_failure_timestamp"] == 300.0
+        assert values["last_error"] == "Previous Auto-Search run was interrupted by restart."
+
     def test_sanitize_job_error_redacts_credentials(self):
         message = system_service.sanitize_job_error("token=secret https://user:pass@example.test failed")
 
@@ -848,6 +907,22 @@ class TestConfigService:
         result = system_service.get_version_info(ctx)
         assert result["current_version"] == "0.6.0"
         assert result["install_type"] == "git"
+
+    def test_get_version_info_includes_truthful_build_identity(self, monkeypatch):
+        monkeypatch.setenv("COMICARR_BUILD_ID", "synology-20260710")
+        monkeypatch.setenv("COMICARR_BUILD_COMMIT", "abc1234")
+        ctx = _make_test_ctx(current_version="0.18.9", current_version_name="v0.18.9")
+
+        result = system_service.get_version_info(ctx)
+
+        assert result["build"] == {
+            "id": "synology-20260710",
+            "commit": "abc1234",
+            "release": "v0.18.9",
+            "version": "0.18.9",
+            "source": "environment",
+            "verified": True,
+        }
 
 
 class _JsonRequest:

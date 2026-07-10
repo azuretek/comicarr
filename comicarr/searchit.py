@@ -31,9 +31,22 @@ class CurrentSearcher:
         logger.info("[SEARCH] Running Search for Wanted.")
         helpers.job_management(write=True, job="Auto-Search", current_run=helpers.utctimestamp(), status="Running")
         comicarr.SEARCH_STATUS = "Running"
-        comicarr.search.searchforissue()
+        try:
+            comicarr.search.searchforissue()
+        except Exception as e:
+            comicarr.SEARCH_STATUS = "Error"
+            helpers.job_management(
+                write=True,
+                job="Auto-Search",
+                last_run_completed=helpers.utctimestamp(),
+                status="Error",
+                failure=True,
+                failure_message=e,
+            )
+            raise
         helpers.job_management(
             write=True, job="Auto-Search", last_run_completed=helpers.utctimestamp(), status="Waiting"
         )
+        comicarr.SEARCH_STATUS = "Waiting"
         # comicarr.SEARCH_STATUS = 'Waiting'
         # comicarr.SCHED_SEARCH_LAST = helpers.now()

@@ -36,13 +36,29 @@ def utctimestamp():
     return time.time()
 
 
+def normalize_utc_datetime(value, legacy_naive_timezone=datetime.timezone.utc):
+    """Return ``value`` as an aware UTC datetime.
+
+    APScheduler 3 returns aware values while the legacy scheduler persistence
+    path stored naive datetimes that were intended to be UTC. Treating both
+    forms explicitly avoids aware/naive subtraction errors and preserves the
+    historical interpretation of existing rows.
+    """
+    if not isinstance(value, datetime.datetime):
+        raise TypeError("expected a datetime value")
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=legacy_naive_timezone)
+    return value.astimezone(datetime.timezone.utc)
+
+
+def utc_datetime_timestamp(value):
+    """Return a UTC epoch timestamp for an aware or legacy-naive datetime."""
+    return normalize_utc_datetime(value).timestamp()
+
+
 def utc_date_to_local(run_time):
-    """Convert a UTC datetime to local datetime."""
-    pr = (run_time - datetime.datetime.utcfromtimestamp(0)).total_seconds()
-    try:
-        return datetime.datetime.fromtimestamp(int(pr))
-    except Exception:
-        return datetime.datetime.fromtimestamp(pr)
+    """Convert an aware or legacy-naive UTC datetime to aware local time."""
+    return normalize_utc_datetime(run_time).astimezone()
 
 
 def convert_milliseconds(ms):

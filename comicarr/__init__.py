@@ -41,6 +41,7 @@ import webbrowser
 from datetime import timedelta
 
 import requests
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import inspect, text
@@ -339,6 +340,19 @@ SCHED = BackgroundScheduler(
         "apscheduler.job_defaults.max_instances": "3",
         "apscheduler.timezone": "UTC",
     }
+)
+
+
+def _persist_scheduler_health_event(event):
+    """Late import avoids a package-initialization cycle while keeping every event durable."""
+    from comicarr.app.system.service import persist_scheduler_event
+
+    return persist_scheduler_event(event)
+
+
+SCHED.add_listener(
+    _persist_scheduler_health_event,
+    EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES,
 )
 BACKENDSTATUS_WS = "up"
 BACKENDSTATUS_CV = "up"
