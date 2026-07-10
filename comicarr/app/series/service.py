@@ -23,12 +23,71 @@ import sqlalchemy
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.common.filesystem import is_path_within_allowed_dirs
 from comicarr.app.series import queries as series_queries
 from comicarr.tables import annuals, comics, issues, oneoffhistory, storyarcs, weekly
 
 # ---------------------------------------------------------------------------
 # Series CRUD
 # ---------------------------------------------------------------------------
+
+_LIBRARY_ROOT_CONFIG_KEYS = (
+    "DESTINATION_DIR",
+    "MANGA_DESTINATION_DIR",
+    "COMIC_DIR",
+    "MANGA_DIR",
+    "MULTIPLE_DEST_DIRS",
+    "NEWCOM_DIR",
+)
+
+
+def _configured_library_roots(config):
+    """Return explicit, non-empty roots that can contain series directories."""
+    if config is None:
+        return []
+
+    roots = []
+    for key in _LIBRARY_ROOT_CONFIG_KEYS:
+        root = getattr(config, key, None)
+        # Config path fields are defined as strings. Ignoring other dynamic
+        # attribute values ensures only explicitly configured roots authorize
+        # deletion.
+        if not isinstance(root, str):
+            continue
+        root = root.strip()
+        if root and root.lower() != "none":
+            roots.append(root)
+    return roots
+
+
+def _is_strict_library_descendant(path, config):
+    """Require path to resolve below, but never equal, a configured root."""
+    if not isinstance(path, (str, os.PathLike)):
+        return False
+
+    roots = _configured_library_roots(config)
+    if not roots:
+        return False
+
+    try:
+        return is_path_within_allowed_dirs(path, roots, strict=True)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _remove_comic_location(comic_location):
+    """Remove a validated ComicLocation without following directory symlinks.
+
+    Symlinks and regular files are unlinked in place. Real directories use
+    rmtree. Other special nodes are skipped so DB cleanup can still proceed.
+    """
+    if os.path.islink(comic_location) or os.path.isfile(comic_location):
+        os.unlink(comic_location)
+        return "unlinked"
+    if os.path.isdir(comic_location):
+        shutil.rmtree(comic_location)
+        return "removed"
+    return "skipped"
 
 
 def list_comics(ctx, limit=None, offset=None):
@@ -89,14 +148,36 @@ def delete_comic(ctx, comic_id, delete_directory=False):
     logger.fdebug("Deletion request received for %s (%s) [%s]" % (comic["ComicName"], comic["ComicYear"], comic_id))
 
     try:
-        series_queries.delete_comic(comic_id)
-
         if delete_directory and comic.get("ComicLocation"):
-            if os.path.exists(comic["ComicLocation"]):
-                shutil.rmtree(comic["ComicLocation"])
-                logger.fdebug("[SERIES-DELETE] Comic Location (%s) successfully deleted" % comic["ComicLocation"])
+            comic_location = comic["ComicLocation"]
+            if not _is_strict_library_descendant(comic_location, ctx.config):
+                logger.error(
+                    "[SERIES-DELETE] Refusing to delete Comic Location (%s): "
+                    "not a strict descendant of a configured library root" % comic_location
+                )
+                return {
+                    "success": False,
+                    "error": "Unable to safely delete the directory for ComicID: %s" % comic_id,
+                }
+
+            # Remove the requested path before its database rows. This
+            # preserves a recoverable watchlist entry when filesystem removal
+            # fails; the database helper owns a separate atomic transaction.
+            if os.path.lexists(comic_location):
+                action = _remove_comic_location(comic_location)
+                if action == "skipped":
+                    logger.fdebug(
+                        "[SERIES-DELETE] Comic Location (%s) is not a regular file, "
+                        "symlink, or directory; skipping filesystem removal" % comic_location
+                    )
+                else:
+                    logger.fdebug(
+                        "[SERIES-DELETE] Comic Location (%s) successfully %s" % (comic_location, action)
+                    )
             else:
-                logger.fdebug("[SERIES-DELETE] Comic Location (%s) does not exist" % comic["ComicLocation"])
+                logger.fdebug("[SERIES-DELETE] Comic Location (%s) does not exist" % comic_location)
+
+        series_queries.delete_comic(comic_id)
 
     except Exception as e:
         logger.error("Unable to delete ComicID: %s. Error: %s" % (comic_id, e))

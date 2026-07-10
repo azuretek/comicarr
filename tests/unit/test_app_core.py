@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from comicarr.app.core.context import AppContext
-from comicarr.app.core.events import EventBus
+from comicarr.app.core.events import AppEvent, EventBus
 from comicarr.app.core.exceptions import (
     AuthError,
     ConfigError,
@@ -112,6 +112,17 @@ class TestEventBus:
         bus.publish_sync("test", {"msg": "hello"})
         assert q.empty()
 
+    def test_publish_ignores_closed_loop_during_shutdown(self):
+        bus = EventBus()
+        loop = MagicMock()
+        loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+        bus.set_loop(loop)
+        bus.subscribe()
+
+        bus.publish_sync("shutdown", {"message": "stopping"})
+
+        loop.call_soon_threadsafe.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_publish_delivers_to_subscriber(self):
         bus = EventBus()
@@ -169,6 +180,62 @@ class TestEventBus:
         assert not q.empty()
         event = q.get_nowait()
         assert event.event_type == "bg_event"
+        bus.unsubscribe(sub_id)
+
+    @pytest.mark.asyncio
+    async def test_publish_replaces_oldest_event_when_subscriber_queue_is_full(self):
+        bus = EventBus()
+        loop = asyncio.get_running_loop()
+        bus.set_loop(loop)
+
+        sub_id, q = bus.subscribe()
+        seed_events = [AppEvent("seed", {"index": index}) for index in range(q.maxsize)]
+        for event in seed_events:
+            q.put_nowait(event)
+
+        loop_errors = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            bus.publish_sync("latest", {"index": q.maxsize})
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+        queued_events = [q.get_nowait() for _ in range(q.qsize())]
+        assert loop_errors == []
+        assert len(queued_events) == q.maxsize
+        assert queued_events == seed_events[1:] + [AppEvent("latest", {"index": q.maxsize})]
+        bus.unsubscribe(sub_id)
+
+    @pytest.mark.asyncio
+    async def test_publish_burst_retains_newest_window_when_queue_full(self):
+        bus = EventBus()
+        loop = asyncio.get_running_loop()
+        bus.set_loop(loop)
+
+        sub_id, q = bus.subscribe()
+        seed_events = [AppEvent("seed", {"index": index}) for index in range(q.maxsize)]
+        for event in seed_events:
+            q.put_nowait(event)
+
+        burst_count = 3
+        newest_events = [AppEvent("burst", {"index": q.maxsize + offset}) for offset in range(burst_count)]
+
+        loop_errors = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        try:
+            for event in newest_events:
+                bus.publish_sync(event.event_type, event.payload)
+            await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+        queued_events = [q.get_nowait() for _ in range(q.qsize())]
+        assert loop_errors == []
+        assert len(queued_events) == q.maxsize
+        assert queued_events == seed_events[burst_count:] + newest_events
         bus.unsubscribe(sub_id)
 
 
@@ -341,6 +408,17 @@ class TestCommonFilesystem:
         allowed = [str(tmp_path)]
         traversal = str(tmp_path) + "/../../../etc/passwd"
         assert not is_path_within_allowed_dirs(traversal, allowed)
+
+    def test_strict_rejects_root_itself_and_filesystem_root(self, tmp_path):
+        import os
+
+        from comicarr.app.common.filesystem import is_path_within_allowed_dirs
+
+        child = tmp_path / "series"
+        child.mkdir()
+        assert is_path_within_allowed_dirs(str(child), [str(tmp_path)], strict=True)
+        assert not is_path_within_allowed_dirs(str(tmp_path), [str(tmp_path)], strict=True)
+        assert not is_path_within_allowed_dirs(str(child), [os.sep], strict=True)
 
     def test_windows_hardlink_uses_os_link(self):
         from comicarr.app.common.filesystem import file_ops
