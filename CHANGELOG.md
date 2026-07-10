@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.7
+
+### Patch Changes
+
+- 860faea: Show the real app version in the sidebar, login screen, and onboarding welcome step instead of a hardcoded 0.15 / v0.15.1 badge.
+
 ## 0.18.6
 
 ### Patch Changes
