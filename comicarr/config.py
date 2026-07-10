@@ -19,12 +19,16 @@
 
 import codecs
 import configparser
+import copy
 import errno
 import glob
 import json
 import os
 import re
 import shutil
+import stat
+import tempfile
+import threading
 from collections import OrderedDict
 from operator import itemgetter
 from pathlib import Path
@@ -33,6 +37,9 @@ import comicarr
 from comicarr import db, encrypted, filechecker, helpers, logger, maintenance
 
 config = configparser.ConfigParser()
+_CONFIG_TRANSACTION_LOCK = threading.RLock()
+_CONFIG_TEMP_PREFIX = ".comicarr-config-"
+_CONFIG_TEMP_SUFFIX = ".tmp"
 
 _CONFIG_DEFINITIONS = OrderedDict(
     {
@@ -1186,7 +1193,203 @@ class Config(object):
             else:
                 pass
 
+    def apply_transaction(self, values, configure=True):
+        """Apply, encrypt, and persist config values as one recoverable update."""
+        with _CONFIG_TRANSACTION_LOCK:
+            try:
+                config_path = self._config_write_target()
+            except (OSError, RuntimeError) as e:
+                logger.error("[CONFIG] Refusing unsafe config write target: %s" % e)
+                return False
+
+            runtime_snapshot = self._snapshot_runtime_state()
+            parser_defaults = copy.deepcopy(config._defaults)
+            parser_sections = copy.deepcopy(config._sections)
+            file_existed = config_path.is_file()
+            file_contents = config_path.read_bytes() if file_existed else None
+            file_mode = config_path.stat().st_mode if file_existed else None
+
+            try:
+                self.process_kwargs(values)
+                self._encrypt_config_for_write()
+                if self.writeconfig() is False:
+                    raise OSError("config write failed")
+                if configure:
+                    # configure() still owns legacy filesystem and queue side effects.
+                    # Running it after the durable write prevents those effects on write
+                    # failure; config state can be rolled back if configure itself fails,
+                    # but already-completed external effects are not reversible here.
+                    self.configure(update=True, startup=False)
+                return True
+            except BaseException as e:
+                try:
+                    self._restore_transaction_state(runtime_snapshot, parser_defaults, parser_sections)
+                except Exception as rollback_error:
+                    logger.error("[CONFIG] Failed to restore runtime state after update failure: %s" % rollback_error)
+                try:
+                    self._restore_config_file(config_path, file_existed, file_contents, file_mode)
+                except Exception as rollback_error:
+                    logger.error(
+                        "[CONFIG] Failed to restore configuration file after update failure: %s" % rollback_error
+                    )
+                logger.error("[CONFIG] Transactional update failed: %s" % e)
+                if isinstance(e, (KeyboardInterrupt, GeneratorExit)):
+                    raise
+                return False
+
+    def _snapshot_runtime_state(self):
+        """Copy mutable runtime state while retaining references to opaque helpers."""
+        snapshot = {}
+        for key, value in self.__dict__.items():
+            try:
+                snapshot[key] = copy.deepcopy(value)
+            except Exception:
+                snapshot[key] = value
+        return snapshot
+
+    def _encrypt_config_for_write(self):
+        """Encrypt every configured secret in the parser without changing runtime values."""
+        configured_secrets = []
+        for attr_name, (section, ini_key) in ENCRYPTED_CONFIG_ITEMS.items():
+            value = getattr(self, attr_name, None)
+            if isinstance(value, (tuple, list)):
+                value = value[0] if value else None
+            if value not in (None, "", "None"):
+                configured_secrets.append((section, ini_key))
+
+        if not configured_secrets:
+            return
+
+        self.ENCRYPT_PASSWORDS = True
+        if not config.has_section("General"):
+            config.add_section("General")
+        config.set("General", "encrypt_passwords", "True")
+        self.encrypt_items(mode="encrypt")
+
+        for section, ini_key in configured_secrets:
+            encrypted_value = config.get(section, ini_key, raw=True, fallback=None)
+            if not encrypted_value or not encrypted_value.startswith("gAAAAA"):
+                raise ValueError("Unable to encrypt configured secret: %s.%s" % (section, ini_key))
+
+    def _restore_transaction_state(self, runtime_snapshot, parser_defaults, parser_sections):
+        """Restore the Config object and shared parser to their pre-update state."""
+        self.__dict__.clear()
+        self.__dict__.update(runtime_snapshot)
+
+        config.clear()
+        config._defaults.clear()
+        config._defaults.update(copy.deepcopy(parser_defaults))
+        for section, options in parser_sections.items():
+            config.add_section(section)
+            for option, value in options.items():
+                config.set(section, option, value)
+
+    def _restore_config_file(self, config_path, file_existed, file_contents, file_mode):
+        """Restore the last durable config only when the transaction changed it."""
+        if file_existed:
+            current_contents = config_path.read_bytes() if config_path.is_file() else None
+            if current_contents == file_contents:
+                return
+            self._atomic_replace_file(
+                config_path,
+                stat.S_IMODE(file_mode),
+                lambda rollback_file: rollback_file.write(file_contents),
+                binary=True,
+            )
+        elif config_path.exists():
+            config_path.unlink()
+
+    def _config_write_target(self):
+        """Resolve a configured symlink target without replacing the link itself."""
+        configured_path = Path(self._config_file).absolute()
+        if configured_path.is_symlink():
+            target_path = configured_path.resolve(strict=False)
+            if target_path.exists() and not target_path.is_file():
+                raise OSError("config symlink target is not a regular file")
+            return target_path
+        if configured_path.exists() and not configured_path.is_file():
+            raise OSError("config path is not a regular file")
+        return configured_path
+
+    @staticmethod
+    def _apply_file_mode(file_descriptor, temp_path, mode):
+        """Apply POSIX permissions with a safe Windows fallback."""
+        fchmod = getattr(os, "fchmod", None)
+        if callable(fchmod):
+            try:
+                fchmod(file_descriptor, mode)
+                return
+            except (AttributeError, NotImplementedError):
+                pass
+            except OSError:
+                if os.name != "nt":
+                    raise
+
+        chmod = getattr(os, "chmod", None)
+        if callable(chmod):
+            try:
+                chmod(temp_path, mode)
+                return
+            except (AttributeError, NotImplementedError):
+                pass
+            except OSError:
+                if os.name != "nt":
+                    raise
+
+        if os.name != "nt":
+            raise OSError("platform cannot apply config file permissions")
+
+    @classmethod
+    def _atomic_replace_file(cls, target_path, mode, write_content, binary=False):
+        """Write through an exclusive same-directory temp and atomically replace."""
+        temp_fd = None
+        temp_path = None
+        try:
+            temp_fd, temp_name = tempfile.mkstemp(
+                prefix=_CONFIG_TEMP_PREFIX,
+                suffix=_CONFIG_TEMP_SUFFIX,
+                dir=str(target_path.parent),
+            )
+            temp_path = Path(temp_name)
+            cls._apply_file_mode(temp_fd, temp_path, mode)
+            open_mode = "wb" if binary else "w"
+            open_kwargs = {} if binary else {"encoding": "utf8"}
+            with os.fdopen(temp_fd, mode=open_mode, **open_kwargs) as temp_file:
+                temp_fd = None
+                write_content(temp_file)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, target_path)
+            temp_path = None
+        finally:
+            if temp_fd is not None:
+                os.close(temp_fd)
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as cleanup_error:
+                    logger.warn("Unable to remove config temp file %s: %s" % (temp_path, cleanup_error))
+
     def writeconfig(self, values=None, startup=False):
+        """Serialize every parser mutation and atomic config-file replacement."""
+        with _CONFIG_TRANSACTION_LOCK:
+            return self._writeconfig(values=values, startup=startup)
+
+    def writeconfig_values(self, values, startup=False):
+        """Process values before provider sequencing under the shared write lock."""
+        with _CONFIG_TRANSACTION_LOCK:
+            self.process_kwargs(values)
+            return self._writeconfig(startup=startup)
+
+    def _writeconfig(self, values=None, startup=False):
+        try:
+            config_path = self._config_write_target()
+        except (OSError, RuntimeError) as e:
+            logger.warn("Refusing unsafe configuration write target: %s" % e)
+            return False
+
         logger.fdebug("Writing configuration to file")
         config.set("Newznab", "extra_newznabs", ", ".join(self.write_extras(self.EXTRA_NEWZNABS)))
         tmp_torz = self.write_extras(self.EXTRA_TORZNABS)
@@ -1218,17 +1421,18 @@ class Config(object):
         if values is not None:
             self.process_kwargs(values)
 
-        # Atomic write: write to temp file then rename to prevent config loss on crash
+        # Atomic write: restrict the temporary file before making it visible.
+        target_mode = 0o600
         try:
-            tmp_path = self._config_file + ".tmp"
-            with codecs.open(tmp_path, encoding="utf8", mode="w") as configfile:
-                config.write(configfile)
-                configfile.flush()
-                os.fsync(configfile.fileno())
-            os.replace(tmp_path, self._config_file)
+            target_mode = stat.S_IMODE(config_path.stat().st_mode)
+        except FileNotFoundError:
+            pass
+
+        try:
+            self._atomic_replace_file(config_path, target_mode, config.write)
             logger.fdebug("Configuration written to disk.")
             return True
-        except OSError as e:
+        except Exception as e:
             logger.warn("Error writing configuration file: %s", e)
             return False
 
@@ -1308,6 +1512,14 @@ class Config(object):
         if new_encrypted > 0:
             self.WRITE_THE_CONFIG = True
 
+    def _normalize_git_token_auth(self):
+        """Keep the requests Basic-auth token tuple flat across reconfiguration."""
+        token = self.GIT_TOKEN
+        while isinstance(token, (tuple, list)) and token:
+            token = token[0]
+        if token:
+            self.GIT_TOKEN = (token, "x-oauth-basic")
+
     def configure(self, update=False, startup=False):
 
         if all([self.CLEAR_PROVIDER_TABLE is True, startup is True]):
@@ -1322,7 +1534,7 @@ class Config(object):
         self.ENABLE_PUBLIC = False
 
         if self.GIT_TOKEN:
-            self.GIT_TOKEN = (self.GIT_TOKEN, "x-oauth-basic")
+            self._normalize_git_token_auth()
             # logger.info('git_token set to %s' % (self.GIT_TOKEN,))
 
         try:

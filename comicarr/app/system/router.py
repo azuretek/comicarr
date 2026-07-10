@@ -127,7 +127,12 @@ async def setup(request: Request, ctx: AppContext = Depends(get_context)):
             return system_service.initial_setup(ctx, username, password, setup_token)
 
     result = await asyncio.to_thread(_run_setup)
-    status_code = 200 if result["success"] else 400
+    if result["success"]:
+        status_code = 200
+    elif result.get("error") == system_service.SETUP_PERSISTENCE_ERROR:
+        status_code = 500
+    else:
+        status_code = 400
     return JSONResponse(status_code=status_code, content=result)
 
 
@@ -184,6 +189,9 @@ async def update_config(request: Request, ctx: AppContext = Depends(get_context)
     """Update configuration key-values."""
     body = await request.json()
     result = await asyncio.to_thread(system_service.update_config, ctx, body)
+    if not result["success"]:
+        status_code = 500 if result.get("error") == system_service.CONFIG_PERSISTENCE_ERROR else 400
+        return JSONResponse(status_code=status_code, content=result)
     return result
 
 
