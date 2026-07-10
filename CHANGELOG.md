@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.9
+
+### Patch Changes
+
+- 7157998: Restore current operational dashboard data and add a safe, observable weekly release refresh.
+
 ## 0.18.8
 
 ### Patch Changes
