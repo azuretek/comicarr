@@ -43,7 +43,9 @@ export class ApiError extends Error {
       `An unexpected error occurred (${status}). Please try again.`;
     // Prefer server-provided detail when present so settings/setup toasts are specific.
     const userMessage =
-      originalMessage && originalMessage.trim() ? originalMessage : defaultMessage;
+      originalMessage && originalMessage.trim()
+        ? originalMessage
+        : defaultMessage;
 
     super(userMessage);
     this.name = "ApiError";
@@ -357,7 +359,10 @@ export async function apiRequest<T = unknown>(
         };
         if (typeof errBody?.error === "string" && errBody.error.trim()) {
           detail = errBody.error;
-        } else if (typeof errBody?.detail === "string" && errBody.detail.trim()) {
+        } else if (
+          typeof errBody?.detail === "string" &&
+          errBody.detail.trim()
+        ) {
           detail = errBody.detail;
         }
       } catch {

@@ -1197,9 +1197,7 @@ class Config(object):
         """Apply, encrypt, and persist config values as one recoverable update."""
         with _CONFIG_TRANSACTION_LOCK:
             if getattr(self, "_config_write_halted", False):
-                logger.error(
-                    "[CONFIG] Refusing config write: a previous transactional rollback was incomplete"
-                )
+                logger.error("[CONFIG] Refusing config write: a previous transactional rollback was incomplete")
                 return False
 
             try:
@@ -1228,9 +1226,7 @@ class Config(object):
                     self.configure(update=True, startup=False)
                 return True
             except BaseException as e:
-                durable_write_happened = self._durable_write_changed(
-                    config_path, file_existed, file_contents
-                )
+                durable_write_happened = self._durable_write_changed(config_path, file_existed, file_contents)
                 runtime_ok = False
                 file_ok = False
                 try:
@@ -1409,9 +1405,7 @@ class Config(object):
         """Serialize every parser mutation and atomic config-file replacement."""
         with _CONFIG_TRANSACTION_LOCK:
             if getattr(self, "_config_write_halted", False):
-                logger.error(
-                    "[CONFIG] Refusing config write: a previous transactional rollback was incomplete"
-                )
+                logger.error("[CONFIG] Refusing config write: a previous transactional rollback was incomplete")
                 return False
             return self._writeconfig(values=values, startup=startup)
 
@@ -1423,9 +1417,7 @@ class Config(object):
         """
         with _CONFIG_TRANSACTION_LOCK:
             if getattr(self, "_config_write_halted", False):
-                logger.error(
-                    "[CONFIG] Refusing config write: a previous transactional rollback was incomplete"
-                )
+                logger.error("[CONFIG] Refusing config write: a previous transactional rollback was incomplete")
                 return False
 
             runtime_snapshot = self._snapshot_runtime_state()
@@ -1441,8 +1433,7 @@ class Config(object):
                     self._restore_transaction_state(runtime_snapshot, parser_defaults, parser_sections)
                 except Exception as rollback_error:
                     logger.error(
-                        "[CONFIG] Failed to restore runtime state after writeconfig_values failure: %s"
-                        % rollback_error
+                        "[CONFIG] Failed to restore runtime state after writeconfig_values failure: %s" % rollback_error
                     )
                 logger.error("[CONFIG] writeconfig_values failed: %s" % e)
                 return False

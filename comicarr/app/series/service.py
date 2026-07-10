@@ -171,9 +171,7 @@ def delete_comic(ctx, comic_id, delete_directory=False):
                         "symlink, or directory; skipping filesystem removal" % comic_location
                     )
                 else:
-                    logger.fdebug(
-                        "[SERIES-DELETE] Comic Location (%s) successfully %s" % (comic_location, action)
-                    )
+                    logger.fdebug("[SERIES-DELETE] Comic Location (%s) successfully %s" % (comic_location, action))
             else:
                 logger.fdebug("[SERIES-DELETE] Comic Location (%s) does not exist" % comic_location)
 
