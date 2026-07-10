@@ -21,16 +21,38 @@ cd comicarr
 uv sync --extra dev
 
 # Activate virtual environment
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
 # Install frontend dependencies (lockfile-respecting; matches CI)
 cd frontend
 npm ci
 cd ..
 
+# Install git pre-commit hooks (lint/format on commit)
+pre-commit install
+
 # Run the application
 python3 Comicarr.py --nolaunch
 ```
+
+### Pre-commit hooks
+
+Hooks run automatically on `git commit` and mirror the CI lint/format checks:
+
+- **Backend**: `ruff` (lint + autofix) and `ruff format` on `comicarr/`
+- **Frontend**: Prettier and ESLint (via `frontend/` lockfile tools)
+
+One-time install: `uv sync --extra dev && pre-commit install` (and `cd frontend && npm ci` for frontend hooks).
+
+Useful commands:
+
+```bash
+pre-commit run --all-files   # run hooks on the whole tree
+npm run lint                 # same checks CI uses (backend + frontend)
+npm run lint:fix             # autofix what can be fixed
+```
+
+If a hook rewrites files, stage the changes and commit again. Avoid `git commit --no-verify` unless you have a deliberate reason — CI will still enforce the same rules.
 
 ### Frontend Development
 
@@ -62,7 +84,7 @@ npm run test:run
 
 ### Python
 
-- **Formatting**: `ruff format comicarr/` is enforced in CI; run it before pushing
+- **Formatting**: `ruff format comicarr/` is enforced in CI and by pre-commit; run it before pushing
 - **Lint**: `ruff check comicarr/`
 - **Type hints**: not required on large legacy modules; allowed in new `comicarr/app/**` code to match neighbors
 - **Always catch specific exceptions** — use `except Exception as e`, never bare `except:`
@@ -76,6 +98,8 @@ npm run test:run
 - Tailwind CSS 4 for styling
 - TanStack Query for data fetching
 - Radix UI for accessible components
+- **Lint**: `cd frontend && npm run lint` (ESLint)
+- **Format**: `cd frontend && npm run format` / `npm run format:check` (Prettier; enforced in CI and pre-commit)
 
 ### Import Ordering
 
@@ -97,8 +121,8 @@ All new Python files must include the GPL v3 license header at the top.
    docs/api-guide
    chore/update-deps
    ```
-2. Make your changes with clear, conventional commit messages
-3. Ensure all tests pass and linting is clean
+2. Make your changes with clear, conventional commit messages (pre-commit hooks will lint/format staged files)
+3. Ensure all tests pass and linting is clean (`npm run lint` from the repo root)
 4. Open a PR — **the title must follow conventional commit format** (CI enforces this):
    ```
    feat: Add manga search provider

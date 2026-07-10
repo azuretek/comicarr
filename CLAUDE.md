@@ -26,7 +26,12 @@ Comicarr is built on the foundation of Mylar3 with a completely rebuilt React 19
 | Format check | `ruff format --check comicarr/` |
 | Format fix | `ruff format comicarr/` |
 | Lint frontend | `cd frontend && npm run lint` |
+| Format frontend | `cd frontend && npm run format` / `format:check` |
 | Typecheck | `cd frontend && npm run typecheck` |
+| Lint all (CI parity) | `npm run lint` |
+| Lint fix all | `npm run lint:fix` |
+| Install git hooks | `pre-commit install` (after `uv sync --extra dev`) |
+| Run hooks on tree | `pre-commit run --all-files` |
 | Add dependency | `uv add <package>` |
 | Add dev dep | `uv add --optional dev <package>` |
 
@@ -87,10 +92,11 @@ Conventional PR titles keep history readable, but they do not control releases. 
 - **Do NOT mass-add type hints** to large legacy modules (`search.py`, `postprocessor.py`, etc.)
 - **New code under `comicarr/app/`** may use annotations matching neighboring files
 - **Do NOT use bare `except:` clauses** - Always catch `Exception as e`
-- **Do NOT use Black or other external formatters** - Use `ruff format` only (enforced by CI)
+- **Do NOT use Black or other external formatters** - Use `ruff format` only (enforced by CI and pre-commit)
 - **Do NOT use `bun` for frontend** - Use `npm` commands only
 - **Do NOT omit GPL license header** from new Python files
 - **Do NOT manually bump versions** - Changesets release automation handles this
+- **Do NOT finish without linting** - Run `npm run lint` (or `npm run lint:fix` then re-check) before considering work done; do not bypass hooks with `--no-verify`
 
 ## Common Patterns
 

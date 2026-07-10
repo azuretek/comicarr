@@ -84,8 +84,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Pin to match uv.lock / ruff-pre-commit rev so local hooks and CI agree.
       - name: Install linting tools
-        run: pip install ruff
+        run: pip install "ruff==0.15.7"
 
       - name: Run ruff linter
         run: ruff check comicarr/ --output-format=github
