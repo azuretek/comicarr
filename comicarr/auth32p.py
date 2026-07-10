@@ -141,7 +141,7 @@ class info32p(object):
         if self.test:
             return {"status": True, "inkdrops": comicarr.INKDROPS_32P}
 
-        logger.info("uid:%s / authkey:%s / passkey:%s" % (self.uid, self.authkey, self.passkey))
+        logger.info("%s Successfully authenticated using keyed credentials." % self.module)
         if comicarr.KEYS_32P is None:
             comicarr.KEYS_32P = {
                 "user": str(self.uid),

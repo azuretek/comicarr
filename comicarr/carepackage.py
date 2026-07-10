@@ -15,6 +15,12 @@ import comicarr
 from comicarr import config as config_module
 from comicarr import encrypted, logger, versioncheck
 
+_LEGACY_32P_CREDENTIAL_LINE_PATTERN = re.compile(
+    r"\buid\s*:\s*[^/\r\n]+\s*/\s*authkey\s*:\s*[^/\r\n]+\s*/\s*passkey\s*:\s*\S+",
+    re.IGNORECASE,
+)
+_RUNTIME_32P_CREDENTIAL_FIELDS = ("auth", "authkey", "passkey")
+
 
 class carePackage(object):
     def __init__(self, maintenance=False):
@@ -66,6 +72,20 @@ class carePackage(object):
             ("DDL", "http_proxy"),
             ("DDL", "https_proxy"),
         }
+
+    def _collect_runtime_secrets(self):
+        """Add derived 32P tokens that are not persisted in config.ini."""
+        runtime_32p_keys = getattr(comicarr, "KEYS_32P", None)
+        if not isinstance(runtime_32p_keys, dict):
+            return
+
+        for key in _RUNTIME_32P_CREDENTIAL_FIELDS:
+            value = runtime_32p_keys.get(key)
+            if value is None:
+                continue
+            secret = str(value)
+            if secret and secret != "None" and secret not in self.keylist:
+                self.keylist.append(secret)
 
     def loaders(self):
         self.cleaned_config()
@@ -296,6 +316,12 @@ class carePackage(object):
         return flattened
 
     def panicbutton(self):
+        self._collect_runtime_secrets()
+        redaction_keys = sorted(
+            (key for key in self.keylist if len(key) > 4 and not key.isdigit()),
+            key=len,
+            reverse=True,
+        )
         dbpath = os.path.join(comicarr.DATA_DIR, "comicarr.db")
         with zipfile.ZipFile(self.panicfile, "w") as zip:
             zip.write(self.filename, os.path.basename(self.filename))
@@ -327,8 +353,12 @@ class carePackage(object):
                         with open(fname, "r") as f:
                             line = f.readline()
                             while line:
-                                for keyed in self.keylist:
-                                    if keyed in line and len(keyed) > 0 and (len(keyed) > 4 and not keyed.isdigit()):
+                                line, structured_redactions = _LEGACY_32P_CREDENTIAL_LINE_PATTERN.subn(
+                                    "uid:-REDACTED- / authkey:-REDACTED- / passkey:-REDACTED-", line
+                                )
+                                cnt += structured_redactions
+                                for keyed in redaction_keys:
+                                    if keyed in line:
                                         cnt += 1
                                         line = line.replace(keyed, "-REDACTED-")
                                 output.write(line)
