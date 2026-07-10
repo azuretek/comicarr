@@ -166,6 +166,31 @@ describe("API Client", () => {
       await expect(apiRequest("GET", "/api/series")).rejects.toThrow(ApiError);
     });
 
+    it("should prefer body.error from non-OK JSON responses", async () => {
+      server.use(
+        http.put("/api/config", () => {
+          return HttpResponse.json(
+            { success: false, error: "Failed to persist configuration" },
+            { status: 500 },
+          );
+        }),
+      );
+
+      try {
+        await apiRequest("PUT", "/api/config", { comic_dir: "/x" });
+        throw new Error("expected apiRequest to reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ApiError);
+        expect((error as ApiError).message).toBe(
+          "Failed to persist configuration",
+        );
+        expect((error as ApiError).userMessage).toBe(
+          "Failed to persist configuration",
+        );
+        expect((error as ApiError).status).toBe(500);
+      }
+    });
+
     it("should include credentials for cookie-based auth", async () => {
       let capturedCredentials: RequestCredentials | undefined;
       server.use(

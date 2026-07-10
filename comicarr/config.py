@@ -1196,6 +1196,12 @@ class Config(object):
     def apply_transaction(self, values, configure=True):
         """Apply, encrypt, and persist config values as one recoverable update."""
         with _CONFIG_TRANSACTION_LOCK:
+            if getattr(self, "_config_write_halted", False):
+                logger.error(
+                    "[CONFIG] Refusing config write: a previous transactional rollback was incomplete"
+                )
+                return False
+
             try:
                 config_path = self._config_write_target()
             except (OSError, RuntimeError) as e:
@@ -1222,15 +1228,30 @@ class Config(object):
                     self.configure(update=True, startup=False)
                 return True
             except BaseException as e:
+                durable_write_happened = self._durable_write_changed(
+                    config_path, file_existed, file_contents
+                )
+                runtime_ok = False
+                file_ok = False
                 try:
                     self._restore_transaction_state(runtime_snapshot, parser_defaults, parser_sections)
+                    runtime_ok = True
                 except Exception as rollback_error:
                     logger.error("[CONFIG] Failed to restore runtime state after update failure: %s" % rollback_error)
                 try:
                     self._restore_config_file(config_path, file_existed, file_contents, file_mode)
+                    file_ok = True
                 except Exception as rollback_error:
                     logger.error(
                         "[CONFIG] Failed to restore configuration file after update failure: %s" % rollback_error
+                    )
+                if durable_write_happened and not (runtime_ok and file_ok):
+                    self._config_write_halted = True
+                    logger.error(
+                        "[CONFIG] CRITICAL: transactional rollback incomplete "
+                        "(runtime_restored=%s, file_restored=%s). "
+                        "Further config writes are refused until the process restarts or config is repaired."
+                        % (runtime_ok, file_ok)
                     )
                 logger.error("[CONFIG] Transactional update failed: %s" % e)
                 if isinstance(e, (KeyboardInterrupt, GeneratorExit)):
@@ -1246,6 +1267,18 @@ class Config(object):
             except Exception:
                 snapshot[key] = value
         return snapshot
+
+    @staticmethod
+    def _durable_write_changed(config_path, file_existed, file_contents):
+        """Return True when the on-disk config differs from the pre-transaction snapshot."""
+        try:
+            if file_existed:
+                current_contents = config_path.read_bytes() if config_path.is_file() else None
+                return current_contents != file_contents
+            return config_path.exists()
+        except Exception:
+            # If we cannot inspect disk state, assume a durable write may have landed.
+            return True
 
     def _encrypt_config_for_write(self):
         """Encrypt every configured secret in the parser without changing runtime values."""
@@ -1370,24 +1403,55 @@ class Config(object):
                 except FileNotFoundError:
                     pass
                 except OSError as cleanup_error:
-                    logger.warn("Unable to remove config temp file %s: %s" % (temp_path, cleanup_error))
+                    logger.warn("[CONFIG] Unable to remove config temp file %s: %s" % (temp_path, cleanup_error))
 
     def writeconfig(self, values=None, startup=False):
         """Serialize every parser mutation and atomic config-file replacement."""
         with _CONFIG_TRANSACTION_LOCK:
+            if getattr(self, "_config_write_halted", False):
+                logger.error(
+                    "[CONFIG] Refusing config write: a previous transactional rollback was incomplete"
+                )
+                return False
             return self._writeconfig(values=values, startup=startup)
 
     def writeconfig_values(self, values, startup=False):
-        """Process values before provider sequencing under the shared write lock."""
+        """Process values before provider sequencing under the shared write lock.
+
+        Runtime and parser state are restored when the durable write fails so
+        callers do not keep dirty in-memory values after a failed persist.
+        """
         with _CONFIG_TRANSACTION_LOCK:
-            self.process_kwargs(values)
-            return self._writeconfig(startup=startup)
+            if getattr(self, "_config_write_halted", False):
+                logger.error(
+                    "[CONFIG] Refusing config write: a previous transactional rollback was incomplete"
+                )
+                return False
+
+            runtime_snapshot = self._snapshot_runtime_state()
+            parser_defaults = copy.deepcopy(config._defaults)
+            parser_sections = copy.deepcopy(config._sections)
+            try:
+                self.process_kwargs(values)
+                if self._writeconfig(startup=startup) is False:
+                    raise OSError("config write failed")
+                return True
+            except Exception as e:
+                try:
+                    self._restore_transaction_state(runtime_snapshot, parser_defaults, parser_sections)
+                except Exception as rollback_error:
+                    logger.error(
+                        "[CONFIG] Failed to restore runtime state after writeconfig_values failure: %s"
+                        % rollback_error
+                    )
+                logger.error("[CONFIG] writeconfig_values failed: %s" % e)
+                return False
 
     def _writeconfig(self, values=None, startup=False):
         try:
             config_path = self._config_write_target()
         except (OSError, RuntimeError) as e:
-            logger.warn("Refusing unsafe configuration write target: %s" % e)
+            logger.warn("[CONFIG] Refusing unsafe configuration write target: %s" % e)
             return False
 
         logger.fdebug("Writing configuration to file")

@@ -150,6 +150,36 @@ class TestVerifyLogin:
         ctx.config.apply_transaction.assert_called_once_with({"http_password": "$2b$12$migrated"}, configure=False)
         ctx.config.writeconfig.assert_not_called()
 
+    @patch("comicarr.encrypted")
+    def test_password_migration_failure_is_logged_and_non_raising(self, mock_encrypted):
+        """Failed bcrypt migration must not raise out of the migration helper."""
+        ctx = _make_test_ctx()
+        mock_encrypted.hash_password.return_value = "$2b$12$migrated"
+        ctx.config.apply_transaction.side_effect = None
+        ctx.config.apply_transaction.return_value = False
+
+        system_service._migrate_password(ctx, "legacy-password")
+
+        ctx.config.apply_transaction.assert_called_once_with({"http_password": "$2b$12$migrated"}, configure=False)
+
+    @patch("comicarr.encrypted")
+    def test_plaintext_login_succeeds_when_password_migration_fails(self, mock_encrypted):
+        """Login still succeeds if hash migration cannot be persisted."""
+        ctx = _make_test_ctx()
+        ctx.config.HTTP_PASSWORD = "legacy-password"
+        mock_encrypted.hash_password.return_value = "$2b$12$migrated"
+        ctx.config.apply_transaction.side_effect = None
+        ctx.config.apply_transaction.return_value = False
+
+        result = system_service.verify_login(ctx, "admin", "legacy-password", "127.0.0.1")
+
+        assert result["success"] is True
+        assert result["username"] == "admin"
+        assert ctx.config.HTTP_PASSWORD == "legacy-password"
+        ctx.config.apply_transaction.assert_called_once_with(
+            {"http_password": "$2b$12$migrated"}, configure=False
+        )
+
 
 # =============================================================================
 # JWT Token Integration Tests
@@ -675,6 +705,25 @@ class TestConfigRouter:
         assert json.loads(response.body) == failure
 
     @pytest.mark.asyncio
+    async def test_setup_returns_bad_request_for_validation_failure(self):
+        """Client-input failures remain HTTP 400, not 500."""
+        ctx = _make_test_ctx(setup_token="setup-token")
+        failure = {"success": False, "error": "Password must be at least 8 characters"}
+        request = _JsonRequest(
+            {
+                "username": "admin",
+                "password": "short",
+                "setup_token": "setup-token",
+            }
+        )
+
+        with patch.object(system_router.system_service, "initial_setup", return_value=failure):
+            response = await system_router.setup(request, ctx)
+
+        assert response.status_code == 400
+        assert json.loads(response.body) == failure
+
+    @pytest.mark.asyncio
     async def test_update_config_returns_server_error_when_persistence_fails(self):
         """The settings endpoint must not report HTTP success for a failed write."""
         ctx = _make_test_ctx()
@@ -684,6 +733,18 @@ class TestConfigRouter:
             response = await system_router.update_config(_JsonRequest({"comic_dir": "/new/path"}), ctx)
 
         assert response.status_code == 500
+        assert json.loads(response.body) == failure
+
+    @pytest.mark.asyncio
+    async def test_update_config_returns_bad_request_for_validation_failure(self):
+        """Invalid settings payloads keep the 400 contract separate from storage errors."""
+        ctx = _make_test_ctx()
+        failure = {"success": False, "error": "No valid config keys provided"}
+
+        with patch.object(system_router.system_service, "update_config", return_value=failure):
+            response = await system_router.update_config(_JsonRequest({"api_key": "hacked"}), ctx)
+
+        assert response.status_code == 400
         assert json.loads(response.body) == failure
 
 
@@ -740,6 +801,42 @@ class TestConfigTransactions:
 
         assert cfg.COMIC_DIR == "/ordered/library"
         assert events == ["process", "provider_sequence", "write"]
+
+    def test_writeconfig_values_restores_runtime_when_write_fails(self, tmp_path, monkeypatch):
+        """Failed value writes must not leave process_kwargs mutations in memory."""
+        cfg, _config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        original_dir = cfg.COMIC_DIR
+
+        def fail_write(*_args, **_kwargs):
+            raise OSError("simulated replace failure")
+
+        cfg._atomic_replace_file = fail_write
+
+        assert cfg.writeconfig_values({"COMIC_DIR": "/should-not-stick"}) is False
+        assert cfg.COMIC_DIR == original_dir
+
+    def test_incomplete_file_restore_halts_further_writes(self, tmp_path, monkeypatch):
+        """After a durable write, failed file restore blocks subsequent config writes."""
+        cfg, config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        original_dir = cfg.COMIC_DIR
+        cfg.configure = MagicMock(side_effect=RuntimeError("configure boom"))
+
+        real_restore_state = cfg._restore_transaction_state
+
+        def restore_state_ok(*args, **kwargs):
+            return real_restore_state(*args, **kwargs)
+
+        def restore_file_fail(*_args, **_kwargs):
+            raise OSError("simulated file restore failure")
+
+        cfg._restore_transaction_state = restore_state_ok
+        cfg._restore_config_file = restore_file_fail
+
+        assert cfg.apply_transaction({"COMIC_DIR": "/new/library"}) is False
+        assert getattr(cfg, "_config_write_halted", False) is True
+        assert cfg.COMIC_DIR == original_dir
+        assert cfg.apply_transaction({"COMIC_DIR": "/another/library"}) is False
+        assert cfg.writeconfig() is False
 
     def test_transaction_encrypts_disk_secret_and_keeps_runtime_decrypted(self, tmp_path, monkeypatch):
         """A successful settings write persists ciphertext before configure runs."""

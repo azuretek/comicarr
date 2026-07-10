@@ -38,11 +38,14 @@ export class ApiError extends Error {
   isRetryable: boolean;
 
   constructor(status: number, originalMessage?: string) {
-    const userMessage =
+    const defaultMessage =
       HTTP_ERROR_MESSAGES[status] ||
       `An unexpected error occurred (${status}). Please try again.`;
+    // Prefer server-provided detail when present so settings/setup toasts are specific.
+    const userMessage =
+      originalMessage && originalMessage.trim() ? originalMessage : defaultMessage;
 
-    super(originalMessage || userMessage);
+    super(userMessage);
     this.name = "ApiError";
     this.status = status;
     this.userMessage = userMessage;
@@ -346,7 +349,21 @@ export async function apiRequest<T = unknown>(
     const response = await fetch(url, options);
 
     if (!response.ok) {
-      throw new ApiError(response.status);
+      let detail: string | undefined;
+      try {
+        const errBody = (await response.json()) as {
+          error?: unknown;
+          detail?: unknown;
+        };
+        if (typeof errBody?.error === "string" && errBody.error.trim()) {
+          detail = errBody.error;
+        } else if (typeof errBody?.detail === "string" && errBody.detail.trim()) {
+          detail = errBody.detail;
+        }
+      } catch {
+        // Non-JSON error bodies fall back to status-based messages.
+      }
+      throw new ApiError(response.status, detail);
     }
 
     const data = await response.json();
