@@ -20,6 +20,7 @@
 
 import csv
 import datetime
+import hashlib
 import itertools
 import json
 import locale
@@ -42,7 +43,7 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import inspect, text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import OperationalError, ProgrammingError, SQLAlchemyError
 
 import comicarr.config
 from comicarr import (
@@ -1651,85 +1652,281 @@ def dbcheck():
         helpers.upgrade_dynamic()
 
 
-def _migrate_unique_constraints(engine):
-    """Add UNIQUE constraints to tables that need them for atomic upserts.
+_UPSERT_UNIQUE_CONSTRAINTS = {
+    "issues": (["IssueID"], "uq_issues_issueid"),
+    "annuals": (["IssueID"], "uq_annuals_issueid"),
+    "storyarcs": (["IssueArcID"], "uq_storyarcs_issuearcid"),
+    "readlist": (["IssueID"], "uq_readlist_issueid"),
+    "failed": (["ID", "Provider", "NZBName"], "uq_failed_id_provider_nzbname"),
+    "upcoming": (["ComicID", "IssueNumber"], "uq_upcoming_comicid_issuenum"),
+    "nzblog": (["IssueID", "PROVIDER"], "uq_nzblog_issueid_provider"),
+    "importresults": (["impID"], "uq_importresults_impid"),
+    "jobhistory": (["JobName"], "uq_jobhistory_jobname"),
+    "snatched": (["IssueID", "Status", "Provider"], "uq_snatched_issue_status_provider"),
+    "oneoffhistory": (["ComicID", "IssueID"], "uq_oneoffhistory_comicid_issueid"),
+    "weekly": (["ComicID", "IssueID"], "uq_weekly_comicid_issueid"),
+}
 
-    For SQLite, this requires table recreation (cannot ALTER TABLE ADD CONSTRAINT).
-    For PostgreSQL/MySQL, uses ALTER TABLE ADD CONSTRAINT directly.
 
-    Only runs once — skips if constraints already exist.
-    """
-    from comicarr.db import get_dialect
+def _index_has_partial_predicate(index):
+    dialect_options = index.get("dialect_options") or {}
+    if any(name.endswith("_where") and value is not None for name, value in dialect_options.items()):
+        return True
+    return any(index.get(name) is not None for name in ("filter_definition", "predicate", "where"))
 
-    dialect = get_dialect()
 
-    # Tables needing UNIQUE constraints and their key columns
-    # Tables that already have them (comics, rssdb, ref32p, ddl_info, exceptions_log,
-    # tmp_searches, notifs, provider_searches, mylar_info) are skipped.
-    constraint_map = {
-        "issues": (["IssueID"], "uq_issues_issueid"),
-        "annuals": (["IssueID"], "uq_annuals_issueid"),
-        "storyarcs": (["IssueArcID"], "uq_storyarcs_issuearcid"),
-        "readlist": (["IssueID"], "uq_readlist_issueid"),
-        "failed": (["ID", "Provider", "NZBName"], "uq_failed_id_provider_nzbname"),
-        "upcoming": (["ComicID", "IssueNumber"], "uq_upcoming_comicid_issuenum"),
-        "nzblog": (["IssueID", "PROVIDER"], "uq_nzblog_issueid_provider"),
-        "importresults": (["impID"], "uq_importresults_impid"),
-        "jobhistory": (["JobName"], "uq_jobhistory_jobname"),
-        "snatched": (["IssueID", "Status", "Provider"], "uq_snatched_issue_status_provider"),
-        "oneoffhistory": (["ComicID", "IssueID"], "uq_oneoffhistory_comicid_issueid"),
-        "weekly": (["ComicID", "IssueID"], "uq_weekly_comicid_issueid"),
-    }
-
+def _has_unique_enforcement(engine, table_name, key_cols):
+    """Return whether a table has a unique constraint or index on ``key_cols``."""
     inspector = inspect(engine)
+    expected_columns = tuple(sorted(key_cols))
+    constraints = inspector.get_unique_constraints(table_name)
+    constraint_columns = {tuple(sorted(constraint.get("column_names") or [])) for constraint in constraints}
+    if expected_columns in constraint_columns:
+        return True
 
-    for table_name, (key_cols, constraint_name) in constraint_map.items():
-        # Check if constraint already exists
-        try:
-            existing_uq = inspector.get_unique_constraints(table_name)
-            existing_uq_names = {u.get("name") for u in existing_uq}
-            if constraint_name in existing_uq_names:
-                continue
-            # Also check if columns already have unique constraints by column set
-            existing_col_sets = {tuple(sorted(u.get("column_names", []))) for u in existing_uq}
-            if tuple(sorted(key_cols)) in existing_col_sets:
-                continue
-        except Exception:
+    for index in inspector.get_indexes(table_name):
+        index_columns = tuple(sorted(index.get("column_names") or []))
+        if not index.get("unique") or index_columns != expected_columns:
+            continue
+        if engine.dialect.name != "sqlite":
+            if not _index_has_partial_predicate(index):
+                return True
             continue
 
-        logger.info("Adding UNIQUE constraint %s on %s(%s)", constraint_name, table_name, ", ".join(key_cols))
+        sqlite_where = (index.get("dialect_options") or {}).get("sqlite_where")
+        if sqlite_where is None:
+            if not _index_has_partial_predicate(index):
+                return True
+        elif _sqlite_valid_key_predicate_matches(sqlite_where, key_cols):
+            return True
 
-        # Deduplicate first — keep row with highest rowid
-        null_checks = " AND ".join(f"{k} IS NOT NULL AND {k} != ''" for k in key_cols)
-        dedup_sql = (
-            f"DELETE FROM {table_name} WHERE rowid NOT IN ("
-            f"SELECT MAX(rowid) FROM {table_name} WHERE {null_checks} GROUP BY {', '.join(key_cols)}"
-            f") AND {null_checks}"
-        )
+    return False
+
+
+def _valid_key_predicate(columns):
+    return " AND ".join(f"{column} IS NOT NULL AND {column} != ''" for column in columns)
+
+
+def _canonical_sqlite_predicate(predicate):
+    predicate_sql = re.sub(r'["`\[\]]', "", str(predicate))
+    predicate_sql = predicate_sql.replace("<>", "!=")
+    predicate_sql = re.sub(r"[()]", "", predicate_sql)
+    predicate_sql = re.sub(r"\s*!=\s*", " != ", predicate_sql)
+    return re.sub(r"\s+", " ", predicate_sql).strip().casefold()
+
+
+def _sqlite_valid_key_predicate_matches(predicate, key_cols):
+    expected_predicate = _valid_key_predicate(key_cols)
+    return _canonical_sqlite_predicate(predicate) == _canonical_sqlite_predicate(expected_predicate)
+
+
+def _sqlite_unique_index_sql(engine, table_name, key_cols, constraint_name):
+    """Build a safely quoted partial UNIQUE index for valid legacy keys."""
+    quote = engine.dialect.identifier_preparer.quote_identifier
+    quoted_columns = [quote(column) for column in key_cols]
+    valid_key_predicate = _valid_key_predicate(quoted_columns)
+    return (
+        f"CREATE UNIQUE INDEX {quote(constraint_name)} ON {quote(table_name)} "
+        f"({', '.join(quoted_columns)}) WHERE {valid_key_predicate}"
+    )
+
+
+def _sqlite_database_path(engine):
+    database = engine.url.database
+    database_name = str(database).casefold() if database else ""
+    if not database or database_name == ":memory:":
+        return None
+
+    uri = engine.url.query.get("uri")
+    uri_values = uri if isinstance(uri, (tuple, list)) else (uri,)
+    uri_mode_enabled = any(
+        value is not None and str(value).casefold() in {"1", "true", "yes", "on"} for value in uri_values
+    )
+    if not uri_mode_enabled:
+        return os.path.abspath(os.path.expanduser(str(database)))
+
+    if database_name.startswith("file:"):
+        mode = engine.url.query.get("mode")
+        mode_values = mode if isinstance(mode, (tuple, list)) else (mode,)
+        if any(value is not None and str(value).casefold() == "memory" for value in mode_values):
+            return None
+
+        if database_name.startswith("file::memory:"):
+            return None
+
+    with engine.connect() as conn:
+        for _sequence, schema_name, database_path in conn.exec_driver_sql("PRAGMA database_list"):
+            if schema_name == "main" and database_path:
+                return os.path.abspath(os.path.expanduser(database_path))
+    return os.path.abspath(os.path.expanduser(str(database)))
+
+
+def _backup_sqlite_unique_migration(engine, backup_func=None):
+    """Create the mandatory WAL-safe backup for a destructive SQLite migration."""
+    source_path = _sqlite_database_path(engine)
+    if source_path is None:
+        return
+
+    data_dir = getattr(comicarr, "DATA_DIR", None) or os.path.dirname(source_path)
+    backup_dir = os.path.join(data_dir, "backups", "migrations")
+    config = getattr(comicarr, "CONFIG", None)
+    retention = getattr(config, "BACKUP_RETENTION", 4) if config is not None else 4
+    retention = retention or 4
+    backup = backup_func or maintenance.auto_backup_db
+
+    try:
+        backup_succeeded = backup(source_path, backup_dir, retention)
+    except Exception as e:
+        message = "SQLite unique-constraint backup failed before migration"
+        logger.error("%s: %s", message, e)
+        raise RuntimeError(message) from e
+
+    if not backup_succeeded:
+        message = "SQLite unique-constraint backup failed; migration was not started"
+        logger.error(message)
+        raise RuntimeError(message)
+
+
+def _pending_unique_constraints(engine):
+    pending = []
+    inspector = inspect(engine)
+    for table_name, (key_cols, constraint_name) in _UPSERT_UNIQUE_CONSTRAINTS.items():
         try:
-            with engine.begin() as conn:
-                conn.execute(text(dedup_sql))
-        except (OperationalError, ProgrammingError) as e:
-            logger.warn("Dedup on %s failed (non-fatal): %s", table_name, e)
+            if not inspector.has_table(table_name):
+                continue
+            if not _has_unique_enforcement(engine, table_name, key_cols):
+                pending.append((table_name, key_cols, constraint_name))
+        except SQLAlchemyError as e:
+            logger.warn("Could not inspect UNIQUE enforcement for %s: %s", table_name, e)
+    return pending
+
+
+def _bounded_alternate_index_name(engine, constraint_name, table_name, key_cols, attempt):
+    max_length = max(int(getattr(engine.dialect, "max_identifier_length", 128) or 128), 1)
+    identity = f"{table_name}|{','.join(key_cols)}|{attempt}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    suffix = f"_ca_{digest}"
+    if len(suffix) >= max_length:
+        return digest[:max_length]
+    return f"{constraint_name[: max_length - len(suffix)]}{suffix}"
+
+
+def _sqlite_available_index_name(engine, constraint_name, table_name, key_cols):
+    with engine.connect() as conn:
+        existing_names = {
+            str(name).casefold()
+            for name in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL")
+            ).scalars()
+        }
+
+    max_length = max(int(getattr(engine.dialect, "max_identifier_length", 128) or 128), 1)
+    if len(constraint_name) <= max_length and constraint_name.casefold() not in existing_names:
+        return constraint_name
+
+    for attempt in range(100):
+        candidate = _bounded_alternate_index_name(engine, constraint_name, table_name, key_cols, attempt)
+        if candidate.casefold() not in existing_names:
+            return candidate
+    raise RuntimeError(f"Could not allocate a unique index name for {table_name}")
+
+
+def _migrate_unique_constraints(engine, backup_func=None):
+    """Install the unique enforcement required by atomic upserts.
+
+    Legacy SQLite databases receive partial unique indexes so duplicate null or
+    empty keys remain valid. File-backed databases are backed up once after
+    preflight and before the first deduplication. Each table's deterministic
+    deduplication and index creation share one transaction, ensuring a failed
+    DDL statement restores the rows deleted by that attempt.
+    """
+    dialect = engine.dialect.name
+
+    # Tables that already have enforcement (comics, rssdb, ref32p, ddl_info,
+    # exceptions_log, tmp_searches, notifs, provider_searches, mylar_info) are
+    # intentionally outside _UPSERT_UNIQUE_CONSTRAINTS.
+    pending_constraints = _pending_unique_constraints(engine)
+    if not pending_constraints:
+        return
+
+    if dialect == "sqlite":
+        _backup_sqlite_unique_migration(engine, backup_func)
+
+    for table_name, key_cols, constraint_name in pending_constraints:
+        try:
+            if _has_unique_enforcement(engine, table_name, key_cols):
+                continue
+        except SQLAlchemyError as e:
+            logger.warn("Could not recheck UNIQUE enforcement for %s: %s", table_name, e)
+            continue
+
+        quote = engine.dialect.identifier_preparer.quote_identifier
+        quoted_table = quote(table_name)
+        quoted_keys = [quote(column) for column in key_cols]
+        valid_key_predicate = _valid_key_predicate(quoted_keys)
+        dedup_sql = (
+            f"DELETE FROM {quoted_table} WHERE rowid NOT IN ("
+            f"SELECT MAX(rowid) FROM {quoted_table} WHERE {valid_key_predicate} "
+            f"GROUP BY {', '.join(quoted_keys)}"
+            f") AND {valid_key_predicate}"
+        )
 
         if dialect == "sqlite":
-            # SQLite cannot ALTER TABLE ADD CONSTRAINT — must recreate table
-            # Skip for now; the constraint exists in tables.py for new databases.
-            # Existing SQLite databases will use the non-atomic upsert fallback
-            # until the user runs the migration tool.
-            logger.info(
-                "SQLite: UNIQUE constraint %s defined in schema for new databases. "
-                "Existing database will use legacy upsert until migration.",
-                constraint_name,
-            )
-        else:
-            # PostgreSQL / MySQL: add constraint directly
-            cols = ", ".join(key_cols)
+            index_name = _sqlite_available_index_name(engine, constraint_name, table_name, key_cols)
+            index_sql = _sqlite_unique_index_sql(engine, table_name, key_cols, index_name)
             try:
                 with engine.begin() as conn:
-                    conn.execute(text(f"ALTER TABLE {table_name} ADD CONSTRAINT {constraint_name} UNIQUE ({cols})"))
+                    conn.execute(text(dedup_sql))
+                    conn.execute(text(index_sql))
+            except SQLAlchemyError as e:
+                logger.warn(
+                    "Could not add SQLite UNIQUE index %s on %s; changes rolled back: %s",
+                    index_name,
+                    table_name,
+                    e,
+                )
+                continue
+        else:
+            index_name = constraint_name
+            # Keep the legacy non-SQLite sequence: rowid deduplication is
+            # best-effort, then the database-native constraint is attempted.
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(dedup_sql))
+            except (OperationalError, ProgrammingError) as e:
+                logger.warn("Dedup on %s failed (non-fatal): %s", table_name, e)
+
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {quoted_table} ADD CONSTRAINT {quote(constraint_name)} "
+                            f"UNIQUE ({', '.join(quoted_keys)})"
+                        )
+                    )
             except (OperationalError, ProgrammingError) as e:
                 logger.warn("Could not add constraint %s: %s", constraint_name, e)
+                continue
+
+        try:
+            constraint_installed = _has_unique_enforcement(engine, table_name, key_cols)
+        except SQLAlchemyError as e:
+            logger.warn("Could not verify UNIQUE enforcement for %s: %s", table_name, e)
+            continue
+
+        if constraint_installed:
+            logger.info(
+                "Added UNIQUE enforcement %s on %s(%s)",
+                index_name,
+                table_name,
+                ", ".join(key_cols),
+            )
+        else:
+            logger.warn(
+                "UNIQUE enforcement %s on %s was not installed",
+                constraint_name,
+                table_name,
+            )
 
     # if to_the_rss_update is True:
     #    comicarr.MAINTENANCE = True

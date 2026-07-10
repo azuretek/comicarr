@@ -34,7 +34,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import sqlalchemy
-from sqlalchemy import create_engine, event, func, text
+from sqlalchemy import and_, create_engine, event, func, literal_column, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
@@ -265,10 +265,24 @@ def _build_upsert_stmt(table_name: str, value_dict: dict, key_dict: dict):
             from sqlalchemy.dialects.postgresql import insert as dialect_insert
 
         stmt = dialect_insert(table).values(**all_values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=upsert_keys,
-            set_=value_dict,
-        )
+        conflict_options = {
+            "index_elements": upsert_keys,
+            "set_": value_dict,
+        }
+        if dialect == "sqlite":
+            # Legacy SQLite databases use partial unique indexes so historical
+            # null/empty keys remain valid. Use the identical literal predicate
+            # here so SQLite can infer those indexes as the conflict target.
+            conflict_options["index_where"] = and_(
+                *(
+                    and_(
+                        table.c[key].is_not(None),
+                        table.c[key] != literal_column("''"),
+                    )
+                    for key in upsert_keys
+                )
+            )
+        stmt = stmt.on_conflict_do_update(**conflict_options)
     elif dialect == "mysql":
         from sqlalchemy.dialects.mysql import insert as dialect_insert
 
