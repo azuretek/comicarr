@@ -159,6 +159,25 @@ def delete_ddl_item(item_id):
     return {"success": True}
 
 
+def _enqueue_ddl_queue_item(target_queue, item):
+    """Hand a DDL command to the in-memory worker queue with process-local dedupe.
+
+    ``DDL_QUEUED`` tracks ids already handed to this process's worker (queued or
+    in-flight). Skipping duplicates prevents cold-start Queued recovery from
+    racing journal STILL re-enqueue of the same id, and allows live outbox
+    sweeps without double-dispatching items already sitting in the queue.
+    """
+    item_id = None
+    if isinstance(item, dict):
+        item_id = item.get("id") or item.get("ID")
+    if item_id and item_id in comicarr.DDL_QUEUED:
+        return False
+    target_queue.put(item)
+    if item_id:
+        comicarr.DDL_QUEUED.add(item_id)
+    return True
+
+
 def recover_queued_ddl_commands(queue=None):
     """Replay the durable Queued outbox before the DDL worker starts.
 
@@ -180,7 +199,10 @@ def recover_queued_ddl_commands(queue=None):
             continue
 
         try:
-            target_queue.put(command.to_queue_item())
+            if not _enqueue_ddl_queue_item(target_queue, command.to_queue_item()):
+                # Already handed to this process's worker/queue — durable row
+                # remains Queued/Downloading under the existing owner.
+                continue
         except Exception as e:
             result["handoff_failed_ids"].append(command.id)
             logger.error(
@@ -210,6 +232,16 @@ def requeue_ddl_item(item_id):
     if not item:
         return {"success": False, "error": "DDL item not found: %s" % item_id, "not_found": True}
 
+    status = str(item.get("status") or item.get("Status") or "").strip()
+    # Failed = retry after terminal failure; Queued = re-handoff a durable orphan.
+    # Downloading/Completed must not be scheduled a second concurrent run.
+    if status and status not in {"Failed", "Queued"}:
+        return {
+            "success": False,
+            "error": "DDL item status %s cannot be requeued" % status,
+            "validation_error": True,
+        }
+
     try:
         command = DDLCommand.from_mapping(item)
     except DDLCommandError as e:
@@ -225,8 +257,15 @@ def requeue_ddl_item(item_id):
             "operational_error": True,
         }
 
+    # Allow a deliberate requeue to supersede an in-memory owner for this id.
+    comicarr.DDL_QUEUED.discard(item_id)
     try:
-        comicarr.DDL_QUEUE.put(command.to_queue_item())
+        if not _enqueue_ddl_queue_item(comicarr.DDL_QUEUE, command.to_queue_item()):
+            return {
+                "success": False,
+                "error": "Unable to insert DDL command into the worker queue",
+                "handoff_error": True,
+            }
     except Exception as e:
         logger.error("[DOWNLOADS] Unable to requeue DDL item %s; durable row remains Queued: %s" % (item_id, e))
         return {
@@ -262,7 +301,12 @@ def queue_ddl_download(command_values):
         }
 
     try:
-        comicarr.DDL_QUEUE.put(command.to_queue_item())
+        if not _enqueue_ddl_queue_item(comicarr.DDL_QUEUE, command.to_queue_item()):
+            # Durable row is already owned by this process's worker/queue.
+            logger.info(
+                "[DOWNLOADS] DDL download %s already queued in this process; durable row left unchanged" % command.id
+            )
+            return {"success": True, "message": "DDL download already queued: %s" % command.id}
     except Exception as e:
         logger.error("[DOWNLOADS] Unable to queue DDL item %s; durable row remains Queued: %s" % (command.id, e))
         return {
@@ -862,6 +906,36 @@ def ddl_downloader(queue):
                     )
                 except Exception as status_error:
                     logger.error("[DOWNLOADS-DDL] Unable to mark failed DDL item %s: %s" % (item_id, status_error))
+                # Close any open journal obligation for this id so recovery does
+                # not re-enqueue a poison command that just failed hard.
+                try:
+                    from comicarr.app.downloads import journal
+
+                    issueid = item.get("issueid") if isinstance(item, dict) else None
+                    filename = item.get("filename") if isinstance(item, dict) else None
+                    rkey = journal.release_key(
+                        issueid,
+                        "DDL",
+                        nzbname=filename,
+                        hash=None,
+                        discriminant=item_id,
+                    )
+                    existing = journal.read_one(rkey)
+                    if existing and not journal.is_terminal(existing.get("stage")):
+                        journal.mark_failed(
+                            rkey,
+                            fail_reason="ddl-worker-rejected: %s" % e,
+                            payload=item if isinstance(item, dict) else None,
+                            issueid=issueid,
+                            provider="DDL",
+                            downloader_type="ddl",
+                            nzbname=filename,
+                        )
+                except Exception as journal_error:
+                    logger.error(
+                        "[DOWNLOADS-DDL] Unable to close journal for rejected DDL item %s: %s"
+                        % (item_id, journal_error)
+                    )
                 comicarr.DDL_QUEUED.discard(item_id)
                 comicarr.DDL_STUCK_NOTIFIED.discard(item_id)
                 link_type_failure.pop(item_id, None)
@@ -964,10 +1038,23 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                             e,
                         )
                     )
-                    # Item is abandoned (cap exceeded, not requeued): mirror the
-                    # normal teardown's in-memory cleanup so it does not stay
-                    # marked queued / stuck-notified / link-failed for the rest
-                    # of the process lifetime.
+                    # Item is abandoned (cap exceeded, not requeued): mark
+                    # durable Failed so it is not stuck as Downloading/Queued,
+                    # then clear in-memory ownership for the process lifetime.
+                    try:
+                        db.upsert(
+                            "ddl_info",
+                            {
+                                "status": "Failed",
+                                "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            },
+                            {"ID": item["id"]},
+                        )
+                    except Exception as status_error:
+                        logger.error(
+                            "[DOWNLOADS-DDL] Unable to mark Failed after journal requeue cap for %s: %s"
+                            % (item.get("id"), status_error)
+                        )
                     comicarr.DDL_QUEUED.discard(item["id"])
                     comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
                     try:
@@ -1127,10 +1214,23 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                                 e,
                             )
                         )
-                        # Item is abandoned (cap exceeded, not requeued):
-                        # mirror the normal teardown's in-memory cleanup so it
-                        # does not stay marked queued / stuck-notified /
-                        # link-failed for the rest of the process lifetime.
+                        # Item is abandoned (cap exceeded, not requeued): mark
+                        # durable Failed so post-download work is not left as
+                        # permanent Downloading without a terminal state.
+                        try:
+                            db.upsert(
+                                "ddl_info",
+                                {
+                                    "status": "Failed",
+                                    "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                },
+                                {"ID": item["id"]},
+                            )
+                        except Exception as status_error:
+                            logger.error(
+                                "[DOWNLOADS-DDL] Unable to mark Failed after journal requeue cap for %s: %s"
+                                % (item.get("id"), status_error)
+                            )
                         comicarr.DDL_QUEUED.discard(item["id"])
                         comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
                         try:
@@ -1264,6 +1364,14 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                     )
             active_item["value"] = None
         else:
+            # Live outbox sweep: durable Queued rows whose in-memory handoff
+            # failed (or were never claimed) must not wait for process restart.
+            # _enqueue_ddl_queue_item dedupes against DDL_QUEUED so this is safe
+            # while the queue still holds the same ids.
+            try:
+                recover_queued_ddl_commands(queue)
+            except Exception as recover_error:
+                logger.error("[DOWNLOADS-DDL] Live Queued outbox sweep failed: %s" % recover_error)
             time.sleep(5)
 
 

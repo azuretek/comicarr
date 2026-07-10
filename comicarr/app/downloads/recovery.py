@@ -367,11 +367,24 @@ def _resume_item_from_row(row, payload):
         try:
             return "ddl", DDLCommand.from_mapping(payload).to_queue_item()
         except DDLCommandError:
-            # Older journal rows predate the canonical command payload. Keep
-            # their best-effort shape so startup replay remains backwards
-            # compatible; the worker now rejects it deterministically if it
-            # cannot actually be run.
+            # Prefer the durable ddl_info row when the journal payload predates
+            # the canonical command contract (or is incomplete).
             pass
+        if ddl_id:
+            try:
+                from comicarr.app.downloads import queries as dl_queries
+
+                durable = dl_queries.get_ddl_item(ddl_id)
+                if durable:
+                    return "ddl", DDLCommand.from_mapping(durable).to_queue_item()
+            except DDLCommandError:
+                pass
+            except Exception as e:
+                logger.fdebug("[RECOVERY] Unable to rebuild DDL command %s from ddl_info: %s" % (ddl_id, e))
+        # Older journal rows predate the canonical command payload. Keep
+        # their best-effort shape so startup replay remains backwards
+        # compatible; the worker now rejects it deterministically if it
+        # cannot actually be run.
         return "ddl", {
             "id": ddl_id,
             "issueid": payload.get("issueid") or row.get("issueid"),
@@ -677,11 +690,18 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
             # P2-5(a): DDL `still` resumes on DDL_QUEUE (the ddl_downloader
             # worker), NOT NZB_QUEUE — cdh/nzb_monitor cannot historycheck a
             # DDL item and the item would otherwise strand with no owner.
-            comicarr.DDL_QUEUE.put(item)
-            logger.info(
-                "[RECOVERY] %s -> STILL (downloading) — re-enqueued onto "
-                "DDL_QUEUE so the ddl_downloader worker resumes." % rkey
-            )
+            from comicarr.app.downloads.service import _enqueue_ddl_queue_item
+
+            if _enqueue_ddl_queue_item(comicarr.DDL_QUEUE, item):
+                logger.info(
+                    "[RECOVERY] %s -> STILL (downloading) — re-enqueued onto "
+                    "DDL_QUEUE so the ddl_downloader worker resumes." % rkey
+                )
+            else:
+                logger.fdebug(
+                    "[RECOVERY] %s -> STILL (downloading) — DDL id already owned "
+                    "by this process queue/worker; skip duplicate put." % rkey
+                )
         else:
             comicarr.NZB_QUEUE.put(item)
             logger.info(

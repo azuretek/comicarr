@@ -1079,12 +1079,13 @@ class GC(object):
 
     def _queue_download_batch(self, item_id, mainlink, links, tmp_filename, comicinfo, packinfo):
         """Validate a GetComics batch completely before its first mutation."""
-        if self.issueid is None:
-            self.issueid = comicinfo[0].get("IssueID")
-        if self.comicid is None:
-            self.comicid = comicinfo[0].get("ComicID")
-        if self.oneoff is None:
-            self.oneoff = comicinfo[0].get("oneoff", False)
+        if comicinfo:
+            if self.issueid is None:
+                self.issueid = comicinfo[0].get("IssueID")
+            if self.comicid is None:
+                self.comicid = comicinfo[0].get("ComicID")
+            if self.oneoff is None:
+                self.oneoff = comicinfo[0].get("oneoff", False)
 
         commands = []
         last_link_type = None

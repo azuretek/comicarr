@@ -535,5 +535,10 @@ def test_ddl_snatch_failure_stops_requeue_after_cap_no_infinite_loop(monkeypatch
     assert q.empty()  # final attempt was NOT requeued
     assert "exceeded requeue cap" in capture_logs.text
     assert "system down" in capture_logs.text
-    assert _rows(ddl_info) == []
+    # Durable row is terminal Failed (not left Queued/Downloading) so operators
+    # can requeue once the DB recovers; no journal obligation remains open.
+    rows = _rows(ddl_info)
+    assert len(rows) == 1
+    assert rows[0]["ID"] == "ddl-cap"
+    assert rows[0]["status"] == "Failed"
     assert _rows(pipeline_journal) == []

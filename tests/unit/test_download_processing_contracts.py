@@ -86,6 +86,7 @@ def test_process_issue_passes_issueid_by_keyword(monkeypatch):
 
 
 def test_queue_ddl_persists_reconstructable_command_before_enqueue(monkeypatch):
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
     operations = []
     persisted = {}
     queued = MagicMock()
@@ -189,6 +190,7 @@ def test_queue_ddl_router_returns_400_for_non_runnable_legacy_payload(monkeypatc
 
 
 def test_requeue_reconstructs_and_enqueues_persisted_command(monkeypatch):
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
     row = _complete_ddl_payload()
     row.update(
         {
@@ -213,6 +215,45 @@ def test_requeue_reconstructs_and_enqueues_persisted_command(monkeypatch):
     assert statuses == ["Queued"]
 
 
+def test_requeue_rejects_active_downloading_status(monkeypatch):
+    row = _complete_ddl_payload()
+    row.update(
+        {
+            "ID": row.pop("id"),
+            "oneoff": 0,
+            "remote_filesize": str(row["remote_filesize"]),
+            "comicinfo": '[{"pack": false, "IssueID": "issue-1"}]',
+            "packinfo": None,
+            "status": "Downloading",
+        }
+    )
+    ddl_queue = MagicMock()
+    statuses = []
+    monkeypatch.setattr(service.dl_queries, "get_ddl_item", lambda item_id: row)
+    monkeypatch.setattr(service.dl_queries, "update_ddl_status", lambda item_id, status: statuses.append(status))
+    monkeypatch.setattr(comicarr, "DDL_QUEUE", ddl_queue)
+
+    result = service.requeue_ddl_item("ddl-1")
+
+    assert result["success"] is False
+    assert result.get("validation_error") is True
+    assert "Downloading" in result["error"]
+    assert statuses == []
+    ddl_queue.put.assert_not_called()
+
+
+def test_recover_skips_ids_already_owned_by_this_process(sqlite_ddl_db, monkeypatch):
+    command = _complete_ddl_payload()
+    _persist_queued_command(command)
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", {"ddl-1"})
+    recovered_queue = queue.Queue()
+
+    result = service.recover_queued_ddl_commands(recovered_queue)
+
+    assert result["enqueued_ids"] == []
+    assert recovered_queue.empty()
+
+
 def test_requeue_does_not_mark_incomplete_persisted_item_queued(monkeypatch):
     statuses = []
     ddl_queue = MagicMock()
@@ -233,6 +274,7 @@ def test_requeue_does_not_mark_incomplete_persisted_item_queued(monkeypatch):
 
 
 def test_requeue_keeps_durable_queued_status_when_handoff_fails(monkeypatch):
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
     row = _complete_ddl_payload()
     row.update(
         {
@@ -292,9 +334,10 @@ def _persist_queued_command(command):
     service.db.upsert("ddl_info", DDLCommand.from_mapping(command).to_persisted_values(), {"ID": command["id"]})
 
 
-def test_startup_sweep_recovers_persisted_and_prejournal_crash(sqlite_ddl_db):
+def test_startup_sweep_recovers_persisted_and_prejournal_crash(sqlite_ddl_db, monkeypatch):
     command = _complete_ddl_payload()
     _persist_queued_command(command)
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
 
     first_process_queue = queue.Queue()
     first_result = service.recover_queued_ddl_commands(first_process_queue)
@@ -303,6 +346,8 @@ def test_startup_sweep_recovers_persisted_and_prejournal_crash(sqlite_ddl_db):
     assert first_result == {"enqueued_ids": ["ddl-1"], "failed_ids": [], "handoff_failed_ids": []}
     assert dequeued_before_journal == command
 
+    # Simulate process restart: in-memory ownership is lost, durable Queued remains.
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
     restarted_process_queue = queue.Queue()
     second_result = service.recover_queued_ddl_commands(restarted_process_queue)
 
@@ -310,7 +355,31 @@ def test_startup_sweep_recovers_persisted_and_prejournal_crash(sqlite_ddl_db):
     assert restarted_process_queue.get_nowait() == command
 
 
-def test_startup_sweep_marks_invalid_legacy_row_failed(sqlite_ddl_db):
+def test_startup_sweep_excludes_downloading_rows(sqlite_ddl_db, monkeypatch):
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
+    """Only Queued rows are recovered; Downloading belongs to journal recovery."""
+    queued = _complete_ddl_payload(id="ddl-queued")
+    downloading = _complete_ddl_payload(id="ddl-downloading")
+    _persist_queued_command(queued)
+    service.db.upsert(
+        "ddl_info",
+        DDLCommand.from_mapping(downloading).to_persisted_values(status="Downloading"),
+        {"ID": "ddl-downloading"},
+    )
+    recovered_queue = queue.Queue()
+
+    result = service.recover_queued_ddl_commands(recovered_queue)
+
+    assert result["enqueued_ids"] == ["ddl-queued"]
+    assert recovered_queue.get_nowait()["id"] == "ddl-queued"
+    assert recovered_queue.empty()
+    with sqlite_ddl_db.connect() as conn:
+        status = conn.execute(select(ddl_info.c.status).where(ddl_info.c.ID == "ddl-downloading")).scalar_one()
+    assert status == "Downloading"
+
+
+def test_startup_sweep_marks_invalid_legacy_row_failed(sqlite_ddl_db, monkeypatch):
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
     with sqlite_ddl_db.begin() as conn:
         conn.execute(
             insert(ddl_info).values(
@@ -331,7 +400,8 @@ def test_startup_sweep_marks_invalid_legacy_row_failed(sqlite_ddl_db):
     assert status == "Failed"
 
 
-def test_startup_sweep_queue_failure_keeps_row_recoverable(sqlite_ddl_db):
+def test_startup_sweep_queue_failure_keeps_row_recoverable(sqlite_ddl_db, monkeypatch):
+    monkeypatch.setattr(comicarr, "DDL_QUEUED", set())
     command = _complete_ddl_payload()
     _persist_queued_command(command)
     unavailable_queue = MagicMock()
@@ -469,6 +539,29 @@ def test_getcomics_batch_reports_partial_handoff_without_total_failure(monkeypat
         "failed_ids": ["ddl-batch-2"],
     }
     assert "https://" not in repr(result)
+
+
+def test_getcomics_batch_none_comicinfo_returns_structured_validation(monkeypatch):
+    """Missing comicinfo must not TypeError before DDLCommand validation."""
+    queue_command = MagicMock()
+    monkeypatch.setattr(service, "queue_ddl_download", queue_command)
+    downloader = _getcomics_batch_downloader()
+    downloader.issueid = None
+    downloader.comicid = None
+
+    result = downloader._queue_download_batch(
+        "ddl-none-info",
+        "https://getcomics.invalid/saga",
+        [_getcomics_link()],
+        "Saga (2026)",
+        None,
+        None,
+    )
+
+    assert result["success"] is False
+    assert result.get("validation_error") is True
+    assert "comicinfo" in result["error"].lower()
+    queue_command.assert_not_called()
 
 
 def test_worker_marks_poison_item_failed_and_continues_to_shutdown(monkeypatch):
