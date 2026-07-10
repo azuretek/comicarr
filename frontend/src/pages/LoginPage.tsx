@@ -13,6 +13,7 @@ import { checkHealth, checkSetup, setupCredentials } from "@/lib/api";
 import { Kbd } from "@/components/ui/kbd";
 import GridShader from "@/components/login/GridShader";
 import Logo from "@/components/Logo";
+import { formatAppVersion } from "@/lib/version";
 
 function MonoLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -393,7 +394,7 @@ export default function LoginPage() {
         <div className="flex items-center gap-2 mb-6">
           <Logo className="h-4 w-auto text-foreground" />
           <span className="ml-auto font-mono text-[10px] text-muted-foreground px-1.5 py-0.5 border border-border rounded-sm">
-            v0.15.1
+            {formatAppVersion()}
           </span>
         </div>
 

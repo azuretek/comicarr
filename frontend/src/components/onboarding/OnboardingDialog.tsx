@@ -20,6 +20,7 @@ import {
 } from "@/hooks/useMigration";
 import { Kbd } from "@/components/ui/kbd";
 import Logo from "@/components/Logo";
+import { formatAppVersion } from "@/lib/version";
 
 type Step = "welcome" | "migrate" | "fresh" | "running" | "done";
 
@@ -249,7 +250,7 @@ function WelcomeStep({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <MonoLabel>Welcome · v0.15.1</MonoLabel>
+      <MonoLabel>Welcome · {formatAppVersion()}</MonoLabel>
       <div className="text-[20px] font-semibold tracking-tight">
         Let's get your library set up.
       </div>

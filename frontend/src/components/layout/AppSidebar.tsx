@@ -4,6 +4,7 @@ import Logo from "@/components/Logo";
 import type { LucideIcon } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
+import { APP_VERSION } from "@/lib/version";
 import {
   Sidebar,
   SidebarContent,
@@ -129,7 +130,7 @@ export default function AppSidebar() {
             <Logo className="h-4 w-auto text-foreground" />
           </Link>
           <span className="group-data-[collapsible=icon]:hidden font-mono text-[10px] text-[var(--text-muted)] px-1.5 py-0.5 border border-sidebar-border rounded-sm">
-            0.15
+            {APP_VERSION}
           </span>
         </div>
       </SidebarHeader>
