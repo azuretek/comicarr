@@ -1,3 +1,12 @@
+#  Copyright (C) 2025–2026 Comicarr contributors
+#
+#  This file is part of Comicarr.
+#
+#  Comicarr is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+
 from sqlalchemy import create_engine, text
 
 from comicarr.db_migrate import migrate
@@ -166,3 +175,20 @@ def test_migrate_reports_target_integrity_conflicts(tmp_path, capsys):
     assert "Failed tables: 1" in output
     assert "Verification: FAILED" in output
     assert "Migration completed with issues" in output
+    # Per-table verification must mark the failed table FAILED (not only MISMATCH).
+    assert "source=       3  target=       3  FAILED" in output
+
+    # Prior successful batches stay committed; conflict row must not overwrite target seed.
+    target_engine = create_engine(_sqlite_url(target_path))
+    with target_engine.connect() as conn:
+        rows = {
+            row["ComicID"]: row["ComicName"]
+            for row in conn.execute(text("SELECT ComicID, ComicName FROM comics")).mappings()
+        }
+    target_engine.dispose()
+
+    assert rows == {
+        "first": "migrated before conflict",
+        "second": "also migrated before conflict",
+        "existing": "target row",
+    }
