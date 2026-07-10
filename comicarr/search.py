@@ -37,7 +37,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import feedparser
 import requests
 from requests.adapters import HTTPAdapter
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from urllib3.util.retry import Retry
 
 import comicarr
@@ -87,6 +87,16 @@ def get_search_executor():
         # overwhelming providers, but enough to see parallelization benefit
         _search_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="search_worker")
     return _search_executor
+
+
+def _wanted_candidate_rows(table, statuses, *extra_conditions):
+    """Load candidate and series state together for bulk eligibility checks."""
+    stmt = (
+        select(table, comics.c.Status.label("SeriesStatus"))
+        .select_from(table.outerjoin(comics, comics.c.ComicID == table.c.ComicID))
+        .where(table.c.Status.in_(statuses), *extra_conditions)
+    )
+    return db.select_all(stmt)
 
 
 def parallel_search_providers(scarios_list, timeout=120):
@@ -1814,9 +1824,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
             while stloop > 0:
                 if stloop == 1:
                     if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                        issues_1 = db.select_all(select(issues).where(issues.c.Status.in_(["Wanted", "Failed"])))
+                        issues_1 = _wanted_candidate_rows(issues, ["Wanted", "Failed"])
                     else:
-                        issues_1 = db.select_all(select(issues).where(issues.c.Status == "Wanted"))
+                        issues_1 = _wanted_candidate_rows(issues, ["Wanted"])
                     for iss in issues_1:
                         checkit = searchforissue_checker(
                             iss["IssueID"],
@@ -1827,6 +1837,11 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 "ComicName": iss["ComicName"],
                                 "Issue_Number": iss["Issue_Number"],
                                 "ComicID": iss["ComicID"],
+                                "candidate": {
+                                    "LegacyStatus": iss["Status"],
+                                    "AcquisitionIntent": iss.get("AcquisitionIntent"),
+                                    "SeriesStatus": iss["SeriesStatus"],
+                                },
                             },
                         )
                         if checkit["status"] is True:
@@ -1866,11 +1881,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                 elif stloop == 2:
                     if comicarr.CONFIG.SEARCH_STORYARCS is True or rsschecker:
                         if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                            issues_2 = db.select_all(
-                                select(storyarcs).where(storyarcs.c.Status.in_(["Wanted", "Failed"]))
-                            )
+                            issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted", "Failed"])
                         else:
-                            issues_2 = db.select_all(select(storyarcs).where(storyarcs.c.Status == "Wanted"))
+                            issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted"])
                         cnt = 0
                         for iss in issues_2:
                             checkit = searchforissue_checker(
@@ -1882,6 +1895,11 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                     "ComicName": iss["ComicName"],
                                     "Issue_Number": iss["IssueNumber"],
                                     "ComicID": iss["ComicID"],
+                                    "candidate": {
+                                        "LegacyStatus": iss["Status"],
+                                        "AcquisitionIntent": None,
+                                        "SeriesStatus": iss["SeriesStatus"],
+                                    },
                                 },
                             )
                             if checkit["status"] is True:
@@ -1922,12 +1940,16 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                         logger.info("Issues that belong to part of a Story Arc to be searched for : %s" % cnt)
                 elif stloop == 3:
                     if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                        issues_3 = db.select_all(
-                            select(annuals).where(annuals.c.Status.in_(["Wanted", "Failed"]) & (annuals.c.Deleted != 1))
+                        issues_3 = _wanted_candidate_rows(
+                            annuals,
+                            ["Wanted", "Failed"],
+                            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
                         )
                     else:
-                        issues_3 = db.select_all(
-                            select(annuals).where((annuals.c.Status == "Wanted") & (annuals.c.Deleted != 1))
+                        issues_3 = _wanted_candidate_rows(
+                            annuals,
+                            ["Wanted"],
+                            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
                         )
                     for iss in issues_3:
                         checkit = searchforissue_checker(
@@ -1939,6 +1961,11 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 "ComicName": iss["ComicName"],
                                 "Issue_Number": iss["Issue_Number"],
                                 "ComicID": iss["ComicID"],
+                                "candidate": {
+                                    "LegacyStatus": iss["Status"],
+                                    "AcquisitionIntent": iss.get("AcquisitionIntent"),
+                                    "SeriesStatus": iss["SeriesStatus"],
+                                },
                             },
                         )
                         if checkit["status"] is True:
@@ -2121,7 +2148,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 comicarr.SEARCH_TIER_DATE,
                             )
                         )
-                        comicarr.SEARCH_QUEUE.put(
+                        from comicarr.app.search.commands import enqueue_search_command
+
+                        enqueue_search_command(
                             {
                                 "comicname": comicname,
                                 "seriesyear": SeriesYear,
@@ -2129,7 +2158,8 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 "issueid": result["IssueID"],
                                 "comicid": result["ComicID"],
                                 "booktype": booktype,
-                            }
+                            },
+                            trigger="wanted_scan",
                         )
                         continue
                     elif rsschecker:
@@ -2792,7 +2822,9 @@ def searchIssueIDList(issuelist):
                 if comic["Corrected_Type"] is not None and comic["Type"] != comic["Corrected_Type"]:
                     booktype = comic["Corrected_Type"]
 
-            comicarr.SEARCH_QUEUE.put(
+            from comicarr.app.search.commands import enqueue_search_command
+
+            enqueue_search_command(
                 {
                     "comicname": comicname,
                     "seriesyear": seriesyear,
@@ -2800,7 +2832,8 @@ def searchIssueIDList(issuelist):
                     "issueid": issue["IssueID"],  # issueid,
                     "comicid": issue["ComicID"],
                     "booktype": booktype,
-                }
+                },
+                trigger="issue_list",
             )
 
         logger.info("Completed queuing of search request.")
@@ -4402,6 +4435,18 @@ def searchforissue_checker(issueid, storedate, issuedate, digitaldate, info):
     # status issue check - check status to see if it's Downloaded / Snatched
     # already due to concurrent searches possibly.
     if issueid is not None:
+        from comicarr.app.search.commands import evaluate_search_candidate
+        from comicarr.app.series import queries as series_queries
+
+        candidate = info.get("candidate") or series_queries.get_search_candidate_state(issueid)
+        if candidate is not None:
+            return evaluate_search_candidate(
+                candidate,
+                release_date=storedate,
+                digital_date=digitaldate,
+                issue_date=issuedate,
+            )
+
         isscheck = helpers.issue_status(issueid)
         # isscheck will return True if already Downloaded / Snatched,
         # False if it's still in a Wanted status.

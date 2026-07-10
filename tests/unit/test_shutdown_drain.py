@@ -113,6 +113,7 @@ def _make_ctx(scheduler=None):
         pp_queue=_q.Queue(),
         search_queue=_q.Queue(),
         ddl_queue=_q.Queue(),
+        refresh_queue=_q.Queue(),
     )
     ctx.ai_async_client = None
     ctx.cv_session = None
@@ -264,6 +265,7 @@ class TestHappyPath:
         assert snpool.join_calls, "the bounded pool.join must have run"
         assert "dispose" in order
         assert order.index("sched") < order.index("dispose")
+        assert ctx.refresh_queue.get_nowait() == "exit"
         # Idle-queue happy path leaves SIGNAL defaulting to shutdown.
         assert comicarr.SIGNAL == "shutdown"
 

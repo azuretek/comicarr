@@ -25,6 +25,8 @@ import requests
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.acquisition.models import ItemOutcome
+from comicarr.app.search.commands import SearchCommand, SearchCommandError
 from comicarr.tables import issues, ref32p
 
 
@@ -646,8 +648,86 @@ def ignored_publisher_check(publisher):
     return False
 
 
-def search_queue(queue):
+def _process_search_command(command):
+    """Process one validated command or raise to the queue owner."""
+    if command.issueid in comicarr.PACK_ISSUEIDS_DONT_QUEUE:
+        if comicarr.PACK_ISSUEIDS_DONT_QUEUE[command.issueid] in comicarr.DDL_QUEUED:
+            logger.fdebug(
+                "[SEARCH-QUEUE-PACK-DETECTION] %s already queued to download via pack...Ignoring" % command.issueid
+            )
+            return {"status": "BLOCKED", "reason": "already queued by pack"}
+
+    logger.fdebug("[SEARCH-QUEUE] Now loading item from search queue: %s" % command.to_mapping())
+    arcid = None
+    comicid = command.comicid
+    issueid = command.issueid
+    if "_" in issueid:
+        arcid = issueid
+        comicid = None  # required for storyarcs to work
+        issueid = None  # required for storyarcs to work
+
+    mofo = comicarr.filers.FileHandlers(ComicID=comicid, IssueID=issueid, arcID=arcid)
+    local_check = mofo.walk_the_walk()
+
+    if local_check["status"]:
+        from comicarr.helpers import check_file_condition
+
+        fullpath = Path(local_check["filepath"]) / local_check["filename"]
+        filecondition = check_file_condition(fullpath)
+        if not filecondition["status"]:
+            logger.warn(f"CRC Check: File {fullpath} failed condition check ({filecondition['quality']}).  Ignoring.")
+            local_check["status"] = False
+
+    if local_check["status"] is True:
+        comicarr.PP_QUEUE.put(
+            {
+                "nzb_name": local_check["filename"],
+                "nzb_folder": local_check["filepath"],
+                "failed": False,
+                "issueid": command.issueid,
+                "comicid": command.comicid,
+                "apicall": True,
+                "ddl": False,
+                "download_info": None,
+            }
+        )
+        return {"status": True, "source": "local"}
+    return comicarr.search.searchforissue(command.issueid, manual=command.manual)
+
+
+def _search_outcome(result):
+    if isinstance(result, dict):
+        status = result.get("status")
+        if isinstance(status, str) and status.strip().upper() == "IN PROGRESS":
+            return None, "search already in progress"
+        if isinstance(status, str) and status.strip().upper() == "BLOCKED":
+            return ItemOutcome.BLOCKED, str(result.get("reason") or "search blocked")
+        if status is True:
+            return ItemOutcome.SUCCEEDED, None
+        if status is False:
+            return ItemOutcome.NO_MATCH, str(result.get("reason") or "provider returned no match")
+    return ItemOutcome.FAILED, "search returned no explicit outcome"
+
+
+def _safe_task_done(queue):
+    try:
+        queue.task_done()
+    except (AttributeError, ValueError):
+        pass
+
+
+def _requeue_search_command(queue, command, ledger, reason):
+    if ledger and command.run_id:
+        ledger.record_requeue(command.run_id, "issue", command.issueid, reason=reason)
+    queue.put(command.to_mapping())
+
+
+def search_queue(queue, ledger=None, maintenance=None):
     import queue as queue_module
+
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+
+    worker_maintenance = maintenance
 
     while True:
         try:
@@ -655,70 +735,84 @@ def search_queue(queue):
         except queue_module.Empty:
             continue
 
-        if item == "exit":
-            logger.info("[SEARCH-QUEUE] Cleaning up workers for shutdown")
-            break
+        try:
+            if item == "exit":
+                logger.info("[SEARCH-QUEUE] Cleaning up workers for shutdown")
+                break
 
-        if comicarr.SEARCHLOCK.locked():
-            queue.put(item)  # re-enqueue
-            time.sleep(1)
-            continue
+            command = SearchCommand.from_mapping(item)
+            command_ledger = ledger
+            if command.run_id:
+                from comicarr.app.acquisition.runs import RunLedger
 
-            gumbo_line = True
-            if item["issueid"] in comicarr.PACK_ISSUEIDS_DONT_QUEUE:
-                if comicarr.PACK_ISSUEIDS_DONT_QUEUE[item["issueid"]] in comicarr.DDL_QUEUED:
-                    logger.fdebug(
-                        "[SEARCH-QUEUE-PACK-DETECTION] %s already queued to download via pack...Ignoring"
-                        % item["issueid"]
-                    )
-                    gumbo_line = False
-
-            if gumbo_line:
-                logger.fdebug("[SEARCH-QUEUE] Now loading item from search queue: %s" % item)
-                if not comicarr.SEARCHLOCK.locked():
-                    arcid = None
-                    comicid = item["comicid"]
-                    issueid = item["issueid"]
-                    if issueid is not None:
-                        if "_" in issueid:
-                            arcid = issueid
-                            comicid = None  # required for storyarcs to work
-                            issueid = None  # required for storyarcs to work
-                    mofo = comicarr.filers.FileHandlers(ComicID=comicid, IssueID=issueid, arcID=arcid)
-                    local_check = mofo.walk_the_walk()
-
-                    if local_check["status"]:
-                        from comicarr.helpers import check_file_condition
-
-                        fullpath = Path(local_check["filepath"]) / local_check["filename"]
-                        filecondition = check_file_condition(fullpath)
-                        if not filecondition["status"]:
-                            logger.warn(
-                                f"CRC Check: File {fullpath} failed condition check ({filecondition['quality']}).  Ignoring."
-                            )
-                            local_check["status"] = False
-
-                    if local_check["status"] is True:
-                        comicarr.PP_QUEUE.put(
-                            {
-                                "nzb_name": local_check["filename"],
-                                "nzb_folder": local_check["filepath"],
-                                "failed": False,
-                                "issueid": item["issueid"],
-                                "comicid": item["comicid"],
-                                "apicall": True,
-                                "ddl": False,
-                                "download_info": None,
-                            }
-                        )
-                    else:
-                        try:
-                            manual = item["manual"]
-                        except Exception:
-                            manual = False
-                        comicarr.search.searchforissue(item["issueid"], manual=manual)
-                    time.sleep(5)
+                command_ledger = command_ledger or RunLedger()
 
             if comicarr.SEARCHLOCK.locked():
-                logger.fdebug("[SEARCH-QUEUE] Another item is currently being searched....")
-                time.sleep(15)
+                _requeue_search_command(queue, command, command_ledger, "search lock held")
+                logger.fdebug("[SEARCH-QUEUE] Search lock held; deliberately requeued %s" % command.issueid)
+                time.sleep(1)
+                continue
+
+            if command_ledger and command.run_id:
+                item_state = command_ledger.get_item(command.run_id, "issue", command.issueid)
+                if item_state is None:
+                    raise SearchCommandError("Search command references an unknown durable obligation")
+                if ItemOutcome(item_state["state"]).terminal:
+                    continue
+                if item_state["state"] == ItemOutcome.RUNNING.value:
+                    command_ledger.record_requeue(
+                        command.run_id,
+                        "issue",
+                        command.issueid,
+                        reason="recovered running queue item",
+                    )
+                if not command_ledger.claim_item(command.run_id, "issue", command.issueid):
+                    continue
+
+            try:
+                if worker_maintenance is None:
+                    worker_maintenance = MaintenanceController()
+                with worker_maintenance.lease(
+                    "search-worker",
+                    work_kind="provider_search",
+                    entity_type="issue",
+                    entity_id=command.issueid,
+                ) as lease:
+                    worker_maintenance.assert_lease_current(lease)
+                    result = _process_search_command(command)
+            except Exception as e:
+                if not isinstance(e, MaintenanceBlocked):
+                    if command_ledger and command.run_id:
+                        command_ledger.record_outcome(
+                            command.run_id,
+                            "issue",
+                            command.issueid,
+                            ItemOutcome.FAILED,
+                            reason=str(e),
+                        )
+                    logger.error("[SEARCH-QUEUE] Search command %s failed: %s" % (command.issueid, e))
+                    continue
+                _requeue_search_command(queue, command, command_ledger, str(e))
+                time.sleep(1)
+                continue
+
+            outcome, outcome_reason = _search_outcome(result)
+            if outcome is None:
+                _requeue_search_command(queue, command, command_ledger, outcome_reason)
+                time.sleep(1)
+                continue
+            if command_ledger and command.run_id:
+                command_ledger.record_outcome(
+                    command.run_id,
+                    "issue",
+                    command.issueid,
+                    outcome,
+                    reason=outcome_reason,
+                )
+            time.sleep(5)
+        except SearchCommandError as e:
+            logger.error("[SEARCH-QUEUE] Rejected malformed command: %s" % e)
+        except Exception as e:
+            logger.error("[SEARCH-QUEUE] Queue ownership failure; continuing worker: %s" % e)
+        finally:
+            _safe_task_done(queue)

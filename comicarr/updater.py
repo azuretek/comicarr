@@ -20,10 +20,12 @@ import calendar
 import datetime
 import operator
 import os
+import queue as queue_module
 import re
 import shlex
 import sys
 import time
+from collections.abc import Mapping
 
 from sqlalchemy import bindparam, func, select, text, update
 
@@ -43,75 +45,145 @@ from comicarr.tables import (
 )
 
 
-def addvialist(queue):
+def addvialist(queue, ledger=None, maintenance=None):
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+    from comicarr.app.acquisition.models import ItemOutcome
+    from comicarr.app.acquisition.runs import RunLedger
+
+    worker_maintenance = maintenance
     while True:
-        if queue.qsize() >= 1:
-            time.sleep(3)
-            item = queue.get(True)
-            # logger.fdebug('addvialist - item: %s' % (item,))
+        try:
+            item = queue.get(timeout=1)
+        except queue_module.Empty:
+            from comicarr import importer
+
+            if importer.refresh_worker_should_retire(queue):
+                break
+            continue
+
+        command_ledger = None
+        run_id = None
+        comicid = None
+        try:
             if item == "exit":
                 break
-            try:
-                r_mode = item["r_mode"]
-            except Exception:
-                r_mode = None
+            if not isinstance(item, Mapping):
+                raise ValueError("refresh command must be an object")
 
-            if r_mode == "updateissuedata":
-                logger.info(
-                    "[MASS-REFRESH][WEEKLY-UPDATER] Now updating series data for %s (%s) [%s] "
-                    % (item["comicname"], item["seriesyear"], item["comicid"])
-                )
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "success",
-                    "comicname": item["comicname"],
-                    "seriesyear": item["seriesyear"],
-                    "comicid": item["comicid"],
-                    "tables": "both",
-                    "message": "Now refreshing %s (%s)" % (item["comicname"], item["seriesyear"]),
-                }
-                comicarr.importer.updateissuedata(
-                    item["comicid"],
-                    item["comicname"],
-                    calledfrom=item["calledfrom"],
-                    serieslast_updated=item["serieslast_updated"],
-                )
-            elif r_mode == "manualannual":
-                logger.info(
-                    "[MASS-REFRESH][WEEKLY-UPDATER][AnnualID:%s] Now updating series data for %s (%s) [%s] "
-                    % (item["manual_comicid"], item["comicname"], item["seriesyear"], item["comicid"])
-                )
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "success",
-                    "comicname": item["comicname"],
-                    "seriesyear": item["seriesyear"],
-                    "comicid": item["comicid"],
-                    "tables": "both",
-                    "message": "Now refreshing %s (%s)" % (item["comicname"], item["seriesyear"]),
-                }
-                comicarr.importer.manualAnnual(
-                    item["manual_comicid"],
-                    item["comicname"],
-                    comicyear=item["seriesyear"],
-                    comicid=item["comicid"],
-                    forceadd=True,
-                    serieslast_updated=item["serieslast_updated"],
-                )
-            else:
-                logger.info(
-                    "[MASS-REFRESH][1/%s] Now refreshing %s (%s) [%s] "
-                    % (queue.qsize() + 1, item["comicname"], item["seriesyear"], item["comicid"])
-                )
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "success",
-                    "comicname": item["comicname"],
-                    "seriesyear": item["seriesyear"],
-                    "comicid": item["comicid"],
-                    "tables": "both",
-                    "message": "Now refreshing %s (%s)" % (item["comicname"], item["seriesyear"]),
-                }
-                dbUpdate([item["comicid"]], calledfrom="refresh")
-        else:
-            comicarr.REFRESH_QUEUE.put("exit")
+            values = {str(key).lower(): value for key, value in item.items()}
+            comicid = values.get("comicid")
+            if comicid in (None, ""):
+                raise ValueError("refresh command is missing comicid")
+            comicname = values.get("comicname")
+            seriesyear = values.get("seriesyear")
+            display_year = seriesyear if seriesyear not in (None, "") else "Unknown"
+            r_mode = values.get("r_mode")
+            run_id = values.get("run_id")
+
+            if run_id:
+                command_ledger = ledger or RunLedger()
+                ledger_item = command_ledger.get_item(run_id, "series", comicid)
+                if ledger_item is None:
+                    raise ValueError("refresh command references an unknown durable obligation")
+                if ItemOutcome(ledger_item["state"]).terminal:
+                    continue
+                if ledger_item["state"] == ItemOutcome.RUNNING.value:
+                    command_ledger.record_requeue(run_id, "series", comicid, reason="recovered running queue item")
+
+            if r_mode is None and comicarr.IMPORTLOCK:
+                queue.put(item)
+                logger.info("[MASS-REFRESH] Import is active; deliberately requeued %s before claim" % comicid)
+                time.sleep(1)
+                continue
+
+            if command_ledger and run_id:
+                if not command_ledger.claim_item(run_id, "series", comicid):
+                    continue
+
+            if worker_maintenance is None:
+                worker_maintenance = MaintenanceController()
+            lease_context = worker_maintenance.lease(
+                "refresh-worker",
+                work_kind="metadata_refresh",
+                entity_type="series",
+                entity_id=comicid,
+            )
+            with lease_context as lease:
+                time.sleep(3)
+                if r_mode == "updateissuedata":
+                    logger.info(
+                        "[MASS-REFRESH][WEEKLY-UPDATER] Now updating series data for %s (%s) [%s] "
+                        % (comicname, display_year, comicid)
+                    )
+                    comicarr.GLOBAL_MESSAGES = {
+                        "status": "success",
+                        "comicname": comicname,
+                        "seriesyear": seriesyear,
+                        "comicid": comicid,
+                        "tables": "both",
+                        "message": "Now refreshing %s (%s)" % (comicname, display_year),
+                    }
+                    worker_maintenance.assert_lease_current(lease)
+                    comicarr.importer.updateissuedata(
+                        comicid,
+                        comicname,
+                        calledfrom=values["calledfrom"],
+                        serieslast_updated=values["serieslast_updated"],
+                    )
+                elif r_mode == "manualannual":
+                    logger.info(
+                        "[MASS-REFRESH][WEEKLY-UPDATER][AnnualID:%s] Now updating series data for %s (%s) [%s] "
+                        % (values["manual_comicid"], comicname, display_year, comicid)
+                    )
+                    comicarr.GLOBAL_MESSAGES = {
+                        "status": "success",
+                        "comicname": comicname,
+                        "seriesyear": seriesyear,
+                        "comicid": comicid,
+                        "tables": "both",
+                        "message": "Now refreshing %s (%s)" % (comicname, display_year),
+                    }
+                    worker_maintenance.assert_lease_current(lease)
+                    comicarr.importer.manualAnnual(
+                        values["manual_comicid"],
+                        comicname,
+                        comicyear=seriesyear,
+                        comicid=comicid,
+                        forceadd=True,
+                        serieslast_updated=values["serieslast_updated"],
+                    )
+                else:
+                    logger.info(
+                        "[MASS-REFRESH][1/%s] Now refreshing %s (%s) [%s] "
+                        % (queue.qsize() + 1, comicname, display_year, comicid)
+                    )
+                    comicarr.GLOBAL_MESSAGES = {
+                        "status": "success",
+                        "comicname": comicname,
+                        "seriesyear": seriesyear,
+                        "comicid": comicid,
+                        "tables": "both",
+                        "message": "Now refreshing %s (%s)" % (comicname, display_year),
+                    }
+                    worker_maintenance.assert_lease_current(lease)
+                    dbUpdate([comicid], calledfrom="refresh")
+            if command_ledger and run_id:
+                command_ledger.record_outcome(run_id, "series", comicid, ItemOutcome.SUCCEEDED)
+        except Exception as e:
+            if isinstance(e, MaintenanceBlocked):
+                if command_ledger and run_id and comicid is not None:
+                    command_ledger.record_requeue(run_id, "series", comicid, reason=str(e))
+                queue.put(item)
+                time.sleep(1)
+                continue
+            if command_ledger and run_id and comicid is not None:
+                command_ledger.record_outcome(run_id, "series", comicid, ItemOutcome.FAILED, reason=str(e))
+            logger.error("[MASS-REFRESH] Refresh command failed; continuing worker: %s" % e)
+        finally:
+            try:
+                queue.task_done()
+            except (AttributeError, ValueError):
+                pass
     return False
 
 

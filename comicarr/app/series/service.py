@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import threading
+from collections.abc import Mapping
 
 import sqlalchemy
 
@@ -226,6 +227,26 @@ def resume_comic(ctx, comic_id):
     return {"success": True}
 
 
+def _refresh_queue_contains(comic_id):
+    refresh_queue = comicarr.REFRESH_QUEUE
+    mutex = getattr(refresh_queue, "mutex", None)
+    if mutex is not None:
+        with mutex:
+            pending = list(refresh_queue.queue)
+    else:
+        pending = list(getattr(refresh_queue, "queue", ()))
+
+    expected = str(comic_id)
+    for item in pending:
+        if isinstance(item, Mapping):
+            values = {str(key).lower(): value for key, value in item.items()}
+            if str(values.get("comicid")) == expected:
+                return True
+        elif str(item) == expected:
+            return True
+    return False
+
+
 def refresh_comic(ctx, comic_id):
     """Refresh comic metadata in the background."""
     from comicarr import importer
@@ -244,10 +265,16 @@ def refresh_comic(ctx, comic_id):
         chkdb = series_queries.get_comic_for_refresh(cid)
         if not chkdb:
             notfound.append({"comicid": cid})
-        elif cid in comicarr.REFRESH_QUEUE.queue:
+        elif _refresh_queue_contains(cid):
             already_added.append({"comicid": cid, "comicname": chkdb["ComicName"]})
         else:
-            watch.append({"comicid": cid, "comicname": chkdb["ComicName"]})
+            watch.append(
+                {
+                    "comicid": cid,
+                    "comicname": chkdb["ComicName"],
+                    "seriesyear": chkdb["ComicYear"],
+                }
+            )
 
     if notfound:
         return {"success": False, "error": "Unable to locate IDs for Refreshing: %s" % notfound}
@@ -271,18 +298,18 @@ def refresh_comic(ctx, comic_id):
 # ---------------------------------------------------------------------------
 
 
-def queue_issue(ctx, issue_id):
+def queue_issue(ctx, issue_id, audit_identity):
     """Mark an issue as Wanted and trigger search."""
-    from comicarr import search
+    from comicarr.app.search.commands import enqueue_search_command
 
-    series_queries.queue_issue(issue_id)
-    search.searchforissue(issue_id)
-    return {"success": True}
+    series_queries.queue_issue(issue_id, audit_identity)
+    command = enqueue_search_command({"issueid": issue_id}, trigger="issue_wanted")
+    return {"success": True, "run_id": command.run_id}
 
 
-def unqueue_issue(ctx, issue_id):
+def unqueue_issue(ctx, issue_id, audit_identity):
     """Mark an issue as Skipped."""
-    series_queries.unqueue_issue(issue_id)
+    series_queries.unqueue_issue(issue_id, audit_identity)
     return {"success": True}
 
 

@@ -41,10 +41,11 @@ from comicarr.app.core.security import generate_ephemeral_key, load_or_create_jw
 # hard-kill backstop in comicarr.shutdown() guarantees the process exits.
 SHUTDOWN_DRAIN_TIMEOUT = 30.0
 
-# The five pipeline worker pools, in (comicarr module attr, queue ctx attr)
-# pairs. The bounded join below is RELOCATED here from queue_schedule()'s
-# shutdown branch so the FastAPI lifespan is the single authoritative drain.
-_WORKER_POOLS = ("SNPOOL", "NZBPOOL", "SEARCHPOOL", "PPPOOL", "DDLPOOL")
+# All pipeline worker pools. The bounded join below is RELOCATED here from
+# queue_schedule()'s shutdown branch so the FastAPI lifespan is the single
+# authoritative drain. MASS_REFRESH is on-demand but still owns database work
+# and must not outlive engine disposal.
+_WORKER_POOLS = ("SNPOOL", "NZBPOOL", "SEARCHPOOL", "PPPOOL", "DDLPOOL", "MASS_REFRESH")
 
 
 def _drain_worker_pools(timeout):
@@ -267,9 +268,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("[SHUTDOWN] Error stopping scheduler: %s" % e)
 
-    # 2. Signal every worker to finish its current item then exit (stop
-    #    intake). Workers exit their loop on the 'exit' sentinel.
-    for q in [ctx.snatched_queue, ctx.nzb_queue, ctx.pp_queue, ctx.search_queue, ctx.ddl_queue]:
+    # 2. Signal every worker queue to stop intake. Workers finish their current
+    #    item, then exit on the sentinel.
+    for q in [
+        ctx.snatched_queue,
+        ctx.nzb_queue,
+        ctx.pp_queue,
+        ctx.search_queue,
+        ctx.ddl_queue,
+        ctx.refresh_queue,
+    ]:
         try:
             q.put("exit")
         except Exception:

@@ -10,12 +10,16 @@
 """Tests for the series domain service."""
 
 import os
+import queue
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+import comicarr
 from comicarr.app.core.context import AppContext
+from comicarr.app.search import commands as search_commands
+from comicarr.app.series import queries as series_queries
 from comicarr.app.series import service as series_service
 
 
@@ -48,6 +52,76 @@ def _delete(ctx, location, delete_side_effect=None):
         delete_from_db.side_effect = delete_side_effect
         result = series_service.delete_comic(ctx, "123", delete_directory=True)
     return result, delete_from_db
+
+
+def test_refresh_comic_includes_canonical_series_year(monkeypatch):
+    refresh_thread = MagicMock()
+    monkeypatch.setattr(comicarr, "REFRESH_QUEUE", SimpleNamespace(queue=[]))
+    monkeypatch.setattr(comicarr, "importer", SimpleNamespace(refresh_thread=refresh_thread))
+    monkeypatch.setattr(
+        series_service.series_queries,
+        "get_comic_for_refresh",
+        lambda _comic_id: {"ComicName": "Absolute Batman", "ComicYear": "2024"},
+    )
+
+    result = series_service.refresh_comic(_make_ctx(), "160294")
+
+    assert result["success"] is True
+    refresh_thread.assert_called_once_with(
+        [{"comicid": "160294", "comicname": "Absolute Batman", "seriesyear": "2024"}]
+    )
+
+
+def test_refresh_comic_coalesces_existing_mapping_command(monkeypatch):
+    refresh_thread = MagicMock()
+    refresh_queue = queue.Queue()
+    refresh_queue.put({"comicid": "160294", "comicname": "Absolute Batman", "seriesyear": "2024"})
+    monkeypatch.setattr(comicarr, "REFRESH_QUEUE", refresh_queue)
+    monkeypatch.setattr(comicarr, "importer", SimpleNamespace(refresh_thread=refresh_thread))
+    monkeypatch.setattr(
+        series_service.series_queries,
+        "get_comic_for_refresh",
+        lambda _comic_id: {"ComicName": "Absolute Batman", "ComicYear": "2024"},
+    )
+
+    result = series_service.refresh_comic(_make_ctx(), "160294")
+
+    assert result == {"success": True, "message": "Already queued for refresh"}
+    refresh_thread.assert_not_called()
+
+
+def test_queue_issue_persists_search_before_async_handoff(monkeypatch):
+    mark_wanted = MagicMock()
+    enqueue = MagicMock(return_value=SimpleNamespace(run_id="search-run"))
+    monkeypatch.setattr(series_service.series_queries, "queue_issue", mark_wanted)
+    monkeypatch.setattr(search_commands, "enqueue_search_command", enqueue)
+
+    result = series_service.queue_issue(_make_ctx(), "issue-1", audit_identity="frankie")
+
+    mark_wanted.assert_called_once_with("issue-1", "frankie")
+    enqueue.assert_called_once_with({"issueid": "issue-1"}, trigger="issue_wanted")
+    assert result == {"success": True, "run_id": "search-run"}
+
+
+def test_explicit_issue_actions_dual_write_canonical_intent(monkeypatch):
+    upsert = MagicMock()
+    monkeypatch.setattr(series_queries.db, "upsert", upsert)
+
+    series_queries.queue_issue("issue-1", "frankie")
+    series_queries.unqueue_issue("issue-2", "frankie")
+
+    assert upsert.call_args_list == [
+        call(
+            "issues",
+            {"AcquisitionIntent": "wanted", "Status": "Wanted"},
+            {"IssueID": "issue-1"},
+        ),
+        call(
+            "issues",
+            {"AcquisitionIntent": "skipped", "Status": "Skipped"},
+            {"IssueID": "issue-2"},
+        ),
+    ]
 
 
 class TestDeleteComicDirectory:

@@ -34,7 +34,17 @@ PAYLOAD_FIELDS = {
             "storyarc",
         }
     ),
-    "refresh": frozenset({"comicid", "comicname", "seriesyear"}),
+    "refresh": frozenset(
+        {
+            "comicid",
+            "comicname",
+            "seriesyear",
+            "r_mode",
+            "calledfrom",
+            "serieslast_updated",
+            "manual_comicid",
+        }
+    ),
 }
 
 

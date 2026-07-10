@@ -183,16 +183,24 @@ def refresh_series(comic_id: str, ctx: AppContext = Depends(get_context)):
 # ---------------------------------------------------------------------------
 
 
-@router.put("/series/issues/{issue_id}/queue", dependencies=[Depends(require_session)])
-def queue_issue(issue_id: str, ctx: AppContext = Depends(get_context)):
+@router.put("/series/issues/{issue_id}/queue")
+def queue_issue(
+    issue_id: str,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
     """Mark an issue as Wanted and trigger search."""
-    return series_service.queue_issue(ctx, issue_id)
+    return series_service.queue_issue(ctx, issue_id, audit_identity=username)
 
 
-@router.put("/series/issues/{issue_id}/unqueue", dependencies=[Depends(require_session)])
-def unqueue_issue(issue_id: str, ctx: AppContext = Depends(get_context)):
+@router.put("/series/issues/{issue_id}/unqueue")
+def unqueue_issue(
+    issue_id: str,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
     """Mark an issue as Skipped."""
-    return series_service.unqueue_issue(ctx, issue_id)
+    return series_service.unqueue_issue(ctx, issue_id, audit_identity=username)
 
 
 @router.get("/wanted", dependencies=[Depends(require_session)])

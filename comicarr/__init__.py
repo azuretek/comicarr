@@ -835,6 +835,18 @@ def launch_browser(host, port, root):
         logger.error("Could not launch browser: %s" % e)
 
 
+def replay_acquisition_obligations():
+    """Restore durable search and refresh commands before workers start."""
+    from comicarr import importer as importer_module
+    from comicarr.app.search.commands import replay_search_obligations
+
+    search_count = replay_search_obligations(work_queue=SEARCH_QUEUE)
+    refresh_count = importer_module.replay_refresh_obligations(start_worker=True)
+    if search_count or refresh_count:
+        logger.info("[ACQUISITION] Replayed %s search and %s refresh obligations" % (search_count, refresh_count))
+    return {"search": search_count, "refresh": refresh_count}
+
+
 def start():
 
     global _INITIALIZED, started
@@ -937,6 +949,19 @@ def start():
                     SCHED.start()
                 except Exception as e:
                     logger.error("[ACQUISITION] Unable to start diagnostics scheduler: %s" % e)
+                started = True
+                return
+
+            try:
+                replay_acquisition_obligations()
+            except Exception as e:
+                comicarr.ACQUISITION_WORKERS_BLOCKED = True
+                comicarr.ACQUISITION_BLOCK_REASON = "obligation_replay_failed"
+                logger.error("[ACQUISITION] Durable obligation replay failed; workers remain blocked: %s" % e)
+                try:
+                    SCHED.start()
+                except Exception as scheduler_error:
+                    logger.error("[ACQUISITION] Unable to start diagnostics scheduler: %s" % scheduler_error)
                 started = True
                 return
 
