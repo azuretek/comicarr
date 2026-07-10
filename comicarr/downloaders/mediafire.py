@@ -21,11 +21,17 @@
 
 import os
 import re
+from email.message import Message
 
 import requests
 
 import comicarr
 from comicarr import db, helpers, logger
+from comicarr.app.common.remote_artifacts import (
+    resolve_remote_artifact_path,
+    safe_remote_filename,
+    write_chunks_atomically,
+)
 
 
 class MediaFire(object):
@@ -59,12 +65,22 @@ class MediaFire(object):
                 # link no longer valid
                 return {"success": False, "filename": None, "path": None, "link_type_failure": "GC-Media"}
 
-        m = re.search('filename="(.*)"', t.headers["Content-Disposition"])
-        filename = m.groups()[0]
-        filename = filename.encode("iso8859").decode("utf-8")
+        content_disposition = Message()
+        content_disposition["Content-Disposition"] = t.headers["Content-Disposition"]
+        filename = content_disposition.get_filename()
+        if filename is None:
+            return {"success": False, "filename": None, "path": None, "link_type_failure": "GC-Media"}
+        try:
+            filename = filename.encode("iso8859").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
 
         file, ext = os.path.splitext(filename)
-        filename = "%s[__%s__]%s" % (file, issueid, ext)
+        try:
+            filename = safe_remote_filename("%s[__%s__]%s" % (file, issueid, ext))
+        except ValueError as e:
+            logger.warn("[MediaFire] Refusing unsafe remote filename: %s" % e)
+            return {"success": False, "filename": None, "path": None, "link_type_failure": "GC-Media"}
 
         try:
             filesize = int(t.headers["Content-Length"])
@@ -88,7 +104,14 @@ class MediaFire(object):
         return self.mediafire_dl(url, id, fileinfo, issueid)
 
     def mediafire_dl(self, url, id, fileinfo, issueid):
-        filepath = os.path.join(self.dl_location, fileinfo["filename"])
+        try:
+            filename = safe_remote_filename(fileinfo["filename"])
+            filepath = resolve_remote_artifact_path(self.dl_location, filename)
+        except ValueError as e:
+            logger.warn("[MediaFire] Refusing unsafe download path: %s" % e)
+            return {"success": False, "filename": None, "path": None, "link_type_failure": "GC-Media"}
+        fileinfo = dict(fileinfo)
+        fileinfo["filename"] = filename
 
         db.upsert(
             "ddl_info",
@@ -102,11 +125,7 @@ class MediaFire(object):
             response = self.session.get(url, verify=True, headers=self.headers, stream=True, timeout=(30, 30))
 
             logger.fdebug("[MediaFire] now writing....")
-            with open(filepath, "wb") as f:
-                for chunk in response.iter_content(chunk_size=4096):
-                    if chunk:
-                        f.write(chunk)
-                        f.flush()
+            write_chunks_atomically(filepath, response.iter_content(chunk_size=4096))
 
         except Exception as e:
             logger.fdebug("[MediaFire][ERROR] %s" % e)
@@ -117,7 +136,7 @@ class MediaFire(object):
         try:
             filesize = os.stat(filepath).st_size
         except FileNotFoundError:
-            return {"success": false, "filenme": None, "path": None}
+            return {"success": False, "filename": None, "path": None}
         else:
             logger.fdebug("[MediaFire] download completed - downloaded %s / %s" % (filesize, fileinfo["filesize"]))
 
