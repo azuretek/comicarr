@@ -188,6 +188,24 @@ async def lifespan(app: FastAPI):
 
     app.state.ctx = ctx
 
+    # Re-read the durable acquisition fence in the serving process. This never
+    # prevents FastAPI startup: authenticated diagnostics need to explain a
+    # fail-closed schema or interrupted repair while workers remain stopped.
+    try:
+        from comicarr.app.acquisition.maintenance import refresh_runtime_state
+
+        app.state.acquisition_maintenance = refresh_runtime_state(ctx.config).as_dict()
+    except Exception:
+        import comicarr
+
+        comicarr.ACQUISITION_WORKERS_BLOCKED = True
+        comicarr.ACQUISITION_BLOCK_REASON = "maintenance_gate_unavailable"
+        app.state.acquisition_maintenance = {
+            "blocked": True,
+            "reason": "maintenance_gate_unavailable",
+            "schema_ready": bool(getattr(comicarr, "ACQUISITION_SCHEMA_READY", False)),
+        }
+
     # Initialize AI client if configured
     from comicarr import logger
     from comicarr.app.ai.circuit_breaker import CircuitBreaker

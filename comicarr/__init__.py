@@ -124,6 +124,13 @@ PROG_DIR = None
 DATA_DIR = None
 FULL_PATH = None
 MAINTENANCE = False
+# Acquisition-specific fail-closed state. Unlike legacy MAINTENANCE this
+# leaves the authenticated web/diagnostics process available.
+ACQUISITION_SCHEMA_READY = False
+ACQUISITION_SCHEMA_VERSION = 0
+ACQUISITION_SCHEMA_ERROR = "acquisition schema has not been verified"
+ACQUISITION_WORKERS_BLOCKED = True
+ACQUISITION_BLOCK_REASON = "schema_unavailable"
 LOG_DIR = None
 LOGTYPE = "log"
 LOG_LANG = "en"
@@ -517,6 +524,18 @@ def initialize(config_file):
             # check to see if any db updates are required / new.
             chk.db_update_check()
 
+        # Keep the web process available for authenticated diagnostics even
+        # when only the acquisition schema/gate is unhealthy. Background
+        # acquisition startup remains fail-closed until this projection clears.
+        try:
+            from comicarr.app.acquisition.maintenance import refresh_runtime_state
+
+            refresh_runtime_state(comicarr.CONFIG)
+        except Exception as e:
+            comicarr.ACQUISITION_WORKERS_BLOCKED = True
+            comicarr.ACQUISITION_BLOCK_REASON = "maintenance_gate_unavailable"
+            logger.error("[ACQUISITION] Maintenance gate unavailable; workers remain blocked: %s" % e)
+
         # set the flag here whether to start it up in maintenance mode or not.
         # usually it will be based on if a field is present in the db or not.
         if comicarr.MAINTENANCE_UPDATE:
@@ -891,6 +910,35 @@ def start():
                 trigger=IntervalTrigger(hours=0, minutes=int(CONFIG.IMPORT_SCAN_INTERVAL), timezone="UTC"),
             )
             IMPORTINBOX_SCHEDULER.pause()
+
+            # A schema failure, persistent repair fence, or explicit operator
+            # override suppresses every producer/consumer that can claim or
+            # hand off acquisition work. The scheduler itself still starts so
+            # authenticated job diagnostics remain available; the harmless
+            # version job may continue.
+            try:
+                from comicarr.app.acquisition.maintenance import refresh_runtime_state
+
+                acquisition_gate = refresh_runtime_state(comicarr.CONFIG)
+            except Exception as e:
+                acquisition_gate = None
+                comicarr.ACQUISITION_WORKERS_BLOCKED = True
+                comicarr.ACQUISITION_BLOCK_REASON = "maintenance_gate_unavailable"
+                logger.error("[ACQUISITION] Refusing worker startup because gate refresh failed: %s" % e)
+
+            if comicarr.ACQUISITION_WORKERS_BLOCKED:
+                if VERSION_STATUS != "Paused":
+                    VERSION_SCHEDULER.resume()
+                logger.warn(
+                    "[ACQUISITION] Background acquisition is blocked (%s); diagnostics remain available"
+                    % (acquisition_gate.reason if acquisition_gate else comicarr.ACQUISITION_BLOCK_REASON)
+                )
+                try:
+                    SCHED.start()
+                except Exception as e:
+                    logger.error("[ACQUISITION] Unable to start diagnostics scheduler: %s" % e)
+                started = True
+                return
 
             # load up the previous runs from the job sql table so we know stuff...
             monitors = helpers.job_management(startup=True)
@@ -1676,6 +1724,18 @@ def dbcheck():
 
     # --- Deduplicate and add UNIQUE constraints for upsert tables ---
     _migrate_unique_constraints(engine)
+
+    # Acquisition schema changes have their own forward-only version ledger.
+    # A failed verification blocks acquisition startup but deliberately does
+    # not prevent the authenticated FastAPI diagnostics surface from starting.
+    from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
+
+    acquisition_schema = ensure_acquisition_schema(engine)
+    if not acquisition_schema.ready:
+        logger.error(
+            "[ACQUISITION] Schema verification failed; acquisition workers will remain blocked: %s",
+            acquisition_schema.error,
+        )
 
     if dynamic_upgrade is True:
         logger.info("Updating db to include some important changes.")

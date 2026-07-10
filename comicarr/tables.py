@@ -120,6 +120,9 @@ issues = Table(
     Column("Issue_Number", Text),
     Column("DateAdded", Text),
     Column("Status", Text),
+    # Nullable by design. A NULL value means no auditable explicit intent is
+    # known; compatibility reads derive policy intent without mutating rows.
+    Column("AcquisitionIntent", Text),
     Column("Type", Text),
     Column("ComicID", Text),
     Column("ArtworkURL", Text),
@@ -151,6 +154,7 @@ annuals = Table(
     Column("IssueName", Text),
     Column("IssueDate", Text),
     Column("Status", Text),
+    Column("AcquisitionIntent", Text),
     Column("ComicID", Text),
     Column("GCDComicID", Text),
     Column("Location", Text),
@@ -690,6 +694,107 @@ pipeline_journal = Table(
 )
 
 # ---------------------------------------------------------------------------
+# acquisition schema + durable command ledgers
+# ---------------------------------------------------------------------------
+
+acquisition_schema_versions = Table(
+    "acquisition_schema_versions",
+    metadata,
+    Column("component", Text, nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("applied_at", Text, nullable=False),
+    UniqueConstraint("component", "version", name="uq_acquisition_schema_component_version"),
+)
+
+acquisition_runs = Table(
+    "acquisition_runs",
+    metadata,
+    Column("run_id", Text, primary_key=True),
+    Column("command_kind", Text, nullable=False),
+    Column("trigger", Text, nullable=False),
+    Column("scope_type", Text),
+    Column("scope_id", Text),
+    Column("dispatch_state", Text, nullable=False),
+    Column("completion_state", Text, nullable=False),
+    Column("accepted_count", Integer, nullable=False, server_default="0"),
+    Column("terminal_count", Integer, nullable=False, server_default="0"),
+    Column("succeeded_count", Integer, nullable=False, server_default="0"),
+    Column("no_match_count", Integer, nullable=False, server_default="0"),
+    Column("blocked_count", Integer, nullable=False, server_default="0"),
+    Column("failed_count", Integer, nullable=False, server_default="0"),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("completed_at", Text),
+)
+
+acquisition_run_items = Table(
+    "acquisition_run_items",
+    metadata,
+    Column("item_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", Text, nullable=False),
+    Column("command_kind", Text, nullable=False),
+    Column("entity_type", Text, nullable=False),
+    Column("entity_id", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    # Validated, bounded JSON containing only the command-kind allowlist. It
+    # must never contain provider credentials or downloader secrets.
+    Column("payload_json", Text),
+    Column("attempt_count", Integer, nullable=False, server_default="0"),
+    Column("next_attempt_at", Text),
+    Column("reason", Text),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("completed_at", Text),
+    UniqueConstraint(
+        "run_id",
+        "command_kind",
+        "entity_type",
+        "entity_id",
+        name="uq_acquisition_run_item_identity",
+    ),
+)
+
+acquisition_maintenance = Table(
+    "acquisition_maintenance",
+    metadata,
+    Column("control_id", Text, primary_key=True),
+    Column("epoch", Integer, nullable=False, server_default="0"),
+    Column("active", Integer, nullable=False, server_default="0"),
+    Column("owner", Text),
+    Column("run_id", Text),
+    Column("reason", Text),
+    Column("acquired_at", Text),
+    Column("heartbeat_at", Text),
+    Column("released_at", Text),
+)
+
+acquisition_maintenance_leases = Table(
+    "acquisition_maintenance_leases",
+    metadata,
+    Column("lease_id", Text, primary_key=True),
+    Column("epoch", Integer, nullable=False),
+    Column("owner", Text, nullable=False),
+    Column("work_kind", Text, nullable=False),
+    Column("entity_type", Text),
+    Column("entity_id", Text),
+    Column("acquired_at", Text, nullable=False),
+    Column("heartbeat_at", Text, nullable=False),
+    Column("released_at", Text),
+)
+
+acquisition_maintenance_events = Table(
+    "acquisition_maintenance_events",
+    metadata,
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column("epoch", Integer, nullable=False),
+    Column("action", Text, nullable=False),
+    Column("actor", Text, nullable=False),
+    Column("run_id", Text),
+    Column("reason", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+)
+
+# ---------------------------------------------------------------------------
 # Indexes
 # ---------------------------------------------------------------------------
 
@@ -709,6 +814,22 @@ Index("failed_issueid", failed.c.IssueID)
 Index("upcoming_issuedate", upcoming.c.IssueDate)
 Index("upcoming_issueid", upcoming.c.IssueID)
 Index("pipeline_journal_stage", pipeline_journal.c.stage)
+Index("issues_acquisition_intent", issues.c.AcquisitionIntent)
+Index("annuals_acquisition_intent", annuals.c.AcquisitionIntent)
+Index("acquisition_runs_state", acquisition_runs.c.completion_state)
+Index("acquisition_run_items_run_state", acquisition_run_items.c.run_id, acquisition_run_items.c.state)
+Index(
+    "acquisition_run_items_entity",
+    acquisition_run_items.c.command_kind,
+    acquisition_run_items.c.entity_type,
+    acquisition_run_items.c.entity_id,
+)
+Index(
+    "acquisition_maintenance_leases_active",
+    acquisition_maintenance_leases.c.released_at,
+    acquisition_maintenance_leases.c.epoch,
+)
+Index("acquisition_maintenance_events_epoch", acquisition_maintenance_events.c.epoch)
 ddl_info_status_updated = Index("ddl_info_status_updated", ddl_info.c.status, ddl_info.c.updated_date)
 
 # Case-insensitive indexes (SQLite uses COLLATE NOCASE on column definition;
@@ -753,6 +874,12 @@ TABLE_MAP = {
     "ai_metadata_history": ai_metadata_history,
     "ai_cache": ai_cache,
     "pipeline_journal": pipeline_journal,
+    "acquisition_schema_versions": acquisition_schema_versions,
+    "acquisition_runs": acquisition_runs,
+    "acquisition_run_items": acquisition_run_items,
+    "acquisition_maintenance": acquisition_maintenance,
+    "acquisition_maintenance_leases": acquisition_maintenance_leases,
+    "acquisition_maintenance_events": acquisition_maintenance_events,
 }
 
 
