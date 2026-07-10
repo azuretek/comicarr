@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Search, RefreshCw } from "lucide-react";
 import {
@@ -7,11 +7,12 @@ import {
   useBulkQueueIssues,
   useBulkUnqueueIssues,
 } from "@/hooks/useQueue";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { useAiStatus } from "@/hooks/useAiStatus";
 import { AiSuggestions } from "@/components/weekly/AiSuggestions";
 import { useToast } from "@/components/ui/toast";
+import { useScheduledJobs, useWeeklyRefresh } from "@/hooks/useWeekly";
 import { Skeleton } from "@/components/ui/skeleton";
 import UpcomingTable from "@/components/queue/UpcomingTable";
 import BulkActionBar from "@/components/queue/BulkActionBar";
@@ -104,15 +105,83 @@ export default function ReleasesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const viewParam = searchParams.get("view");
   const currentView: ReleasesView = viewParam === "all" ? "all" : "mine";
+  const weeklyRefresh = useWeeklyRefresh();
+  const queryClient = useQueryClient();
+  const [refreshRequestedAt, setRefreshRequestedAt] = useState<number | null>(null);
+  const refreshRequested = refreshRequestedAt !== null;
+  const { data: jobs } = useScheduledJobs(refreshRequested);
+  const { addToast } = useToast();
+  const weeklyJob = jobs?.jobs.find((job) => job.id === "weekly");
+  const weeklyStatus = weeklyJob?.status?.toLowerCase();
+  const refreshMessage = !refreshRequested
+    ? null
+    : weeklyStatus === "queued"
+      ? "Refresh queued — it will start shortly."
+      : weeklyStatus === "running"
+      ? "Refreshing releases…"
+      : weeklyStatus === "error"
+        ? weeklyJob?.last_error || "Refresh failed. Check the pull source, then retry."
+        : weeklyJob?.last_success_timestamp &&
+            weeklyJob.last_success_timestamp >= refreshRequestedAt
+          ? "Releases refreshed."
+          : "Refresh queued — it will start shortly.";
+
+  useEffect(() => {
+    if (
+      !refreshRequestedAt ||
+      weeklyStatus !== "waiting" ||
+      !weeklyJob?.last_success_timestamp ||
+      weeklyJob.last_success_timestamp < refreshRequestedAt
+    ) {
+      return;
+    }
+    queryClient.invalidateQueries({ queryKey: ["weekly"] });
+    queryClient.invalidateQueries({ queryKey: ["upcoming"] });
+    queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+  }, [
+    queryClient,
+    refreshRequestedAt,
+    weeklyJob?.last_success_timestamp,
+    weeklyStatus,
+  ]);
 
   const setView = (view: ReleasesView) => {
     setSearchParams({ view });
   };
 
+  const handleWeeklyRefresh = async () => {
+    const requestStartedAt = Date.now() / 1_000;
+    try {
+      const result = await weeklyRefresh.mutateAsync();
+      if (result.state === "paused" || (!result.accepted && result.error)) {
+        addToast({
+          type: "error",
+          message:
+            result.error || "Weekly refresh is paused. Resume it in Settings, then retry.",
+        });
+        return;
+      }
+      setRefreshRequestedAt(requestStartedAt);
+      addToast({
+        type: "info",
+        message:
+          result.message ||
+          (result.state === "running"
+            ? "Release refresh is already running."
+            : "Release refresh queued."),
+      });
+    } catch (error) {
+      addToast({
+        type: "error",
+        message: `Unable to refresh releases: ${error instanceof Error ? error.message : "Unknown error"}`,
+      });
+    }
+  };
+
   return (
     <div className="page-transition">
       {/* Header */}
-      <div className="px-5 py-3.5 border-b border-border flex items-center gap-3">
+      <div className="px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
         <div>
           <div className="text-[18px] font-semibold tracking-tight leading-none">
             Releases
@@ -123,7 +192,46 @@ export default function ReleasesPage() {
               : "this week · industry-wide"}
           </div>
         </div>
+        <button
+          type="button"
+          onClick={() => void handleWeeklyRefresh()}
+          disabled={
+            weeklyRefresh.isPending ||
+            weeklyStatus === "running" ||
+            weeklyStatus === "queued"
+          }
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] border text-[12px] font-medium disabled:opacity-50"
+          style={{ borderColor: "var(--border)" }}
+        >
+          <RefreshCw
+            className={`w-3.5 h-3.5 ${weeklyRefresh.isPending || weeklyStatus === "running" || weeklyStatus === "queued" ? "animate-spin" : ""}`}
+          />
+          {weeklyStatus === "running"
+            ? "Refreshing…"
+            : weeklyStatus === "queued"
+              ? "Queued…"
+              : "Refresh releases"}
+        </button>
       </div>
+
+      {refreshMessage && (
+        <div
+          role={weeklyStatus === "error" ? "alert" : "status"}
+          aria-live={weeklyStatus === "error" ? "assertive" : "polite"}
+          className="px-5 py-2 border-b border-border font-mono text-[11px]"
+          style={{
+            color:
+              weeklyStatus === "error"
+                ? "var(--status-error)"
+                : weeklyStatus === "running"
+                  ? "var(--status-active)"
+                  : "var(--muted-foreground)",
+          }}
+        >
+          {refreshMessage}
+          {weeklyStatus === "error" && " Retry after fixing the pull source connection."}
+        </div>
+      )}
 
       {/* Tab row */}
       <div className="px-5 pt-3 border-b border-border flex items-end gap-6">

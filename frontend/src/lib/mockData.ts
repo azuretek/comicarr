@@ -446,6 +446,7 @@ function dashboardPayload() {
   const totalExpected = SERIES.reduce((sum, s) => sum + (s.Total || 0), 0);
   return {
     recently_downloaded: recentDownloads(),
+    active_queue: [],
     upcoming_releases: upcomingReleases(),
     stats: {
       total_series: totalSeries,

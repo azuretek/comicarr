@@ -40,6 +40,30 @@ _LIBRARY_ROOT_CONFIG_KEYS = (
     "NEWCOM_DIR",
 )
 
+# Reserve a scanner before its background thread gets CPU time. The scanners
+# also own process-wide locks while they run; these short-lived locks close the
+# gap between accepting an API request and the worker acquiring that lock.
+_COMIC_SCAN_START_LOCK = threading.Lock()
+_MANGA_SCAN_START_LOCK = threading.Lock()
+
+
+def _start_library_scan(scanner, status_attr, worker, start_lock, scan_label, scan_dir, thread_name):
+    """Reserve and launch a scanner without allowing a second hand-off worker."""
+    with start_lock:
+        if getattr(scanner, status_attr) == "scanning" or scanner._SCAN_LOCK.locked():
+            return {"success": False, "error": "A library scan is already in progress"}
+
+        previous_status = getattr(scanner, status_attr)
+        setattr(scanner, status_attr, "scanning")
+        try:
+            logger.info("[%s-SCAN] Starting %s library scan for: %s" % (scan_label.upper(), scan_label, scan_dir))
+            threading.Thread(target=worker, name=thread_name).start()
+            return {"success": True, "message": "%s scan started for: %s" % (scan_label.capitalize(), scan_dir)}
+        except Exception as e:
+            setattr(scanner, status_attr, previous_status)
+            logger.error("[%s-SCAN] Error: %s" % (scan_label.upper(), e))
+            return {"success": False, "error": "Failed to start %s scan: %s" % (scan_label, str(e))}
+
 
 def _configured_library_roots(config):
     """Return explicit, non-empty roots that can contain series directories."""
@@ -694,13 +718,15 @@ def manga_library_scan(ctx):
     if not os.path.isdir(manga_dir):
         return {"success": False, "error": "Manga directory not found: %s" % manga_dir}
 
-    try:
-        logger.info("[MANGA-SCAN] Starting manga library scan for: %s" % manga_dir)
-        threading.Thread(target=mangasync.mangaScan, name="API-MangaScan").start()
-        return {"success": True, "message": "Manga scan started for: %s" % manga_dir}
-    except Exception as e:
-        logger.error("[MANGA-SCAN] Error: %s" % e)
-        return {"success": False, "error": "Failed to start manga scan: %s" % str(e)}
+    return _start_library_scan(
+        mangasync,
+        "MANGA_SCAN_STATUS",
+        mangasync.mangaScan,
+        _MANGA_SCAN_START_LOCK,
+        "manga",
+        manga_dir,
+        "API-MangaScan",
+    )
 
 
 def manga_scan_confirm(ctx, selected_ids, scan_id):
@@ -726,13 +752,15 @@ def comic_library_scan(ctx):
     if not os.path.isdir(comic_dir):
         return {"success": False, "error": "Comic directory not found: %s" % comic_dir}
 
-    try:
-        logger.info("[COMIC-SCAN] Starting comic library scan for: %s" % comic_dir)
-        threading.Thread(target=comicsync.comicScan, name="API-ComicScan").start()
-        return {"success": True, "message": "Comic scan started for: %s" % comic_dir}
-    except Exception as e:
-        logger.error("[COMIC-SCAN] Error: %s" % e)
-        return {"success": False, "error": "Failed to start comic scan: %s" % str(e)}
+    return _start_library_scan(
+        comicsync,
+        "COMIC_SCAN_STATUS",
+        comicsync.comicScan,
+        _COMIC_SCAN_START_LOCK,
+        "comic",
+        comic_dir,
+        "API-ComicScan",
+    )
 
 
 def comic_scan_confirm(ctx, selected_ids, scan_id):

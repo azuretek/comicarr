@@ -43,19 +43,26 @@ describe("DashboardPage", () => {
     expect(screen.getByText("250")).toBeTruthy();
   });
 
-  it("renders queue & recent activity section", async () => {
+  it("renders separate active queue and recent activity previews", async () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Queue & recent activity")).toBeTruthy();
+      expect(screen.getByText("Active queue")).toBeTruthy();
+      expect(screen.getByText("Recent activity")).toBeTruthy();
     });
 
-    // Activity row title is "<ComicName> #<Issue_Number>" inside a Link.
     await waitFor(() => {
+      expect(screen.getByText("Downloading")).toBeTruthy();
+      expect(screen.getByText("Spider-Man 001.cbz")).toBeTruthy();
       expect(screen.getByText("Spider-Man #1")).toBeTruthy();
     });
-    expect(screen.getByText(/ago$/)).toBeTruthy();
-    expect(screen.getByRole("link", { name: "view all →" })).toBeTruthy();
+    expect(screen.getAllByText(/ago$/).length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("link", { name: "open queue →" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "open history →" }),
+    ).toBeTruthy();
   });
 
   it("starts scans for each configured library from the dashboard", async () => {
@@ -153,6 +160,7 @@ describe("DashboardPage", () => {
       http.get("/api/dashboard", () => {
         return HttpResponse.json({
           recently_downloaded: [],
+          active_queue: [],
           upcoming_releases: [],
           stats: {
             total_series: 0,
@@ -169,7 +177,8 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("no recent activity")).toBeTruthy();
+      expect(screen.getByText("queue is clear")).toBeTruthy();
+      expect(screen.getByText(/no activity in the last 30 days/)).toBeTruthy();
       expect(screen.getByText("nothing upcoming this week")).toBeTruthy();
     });
     expect(
@@ -177,6 +186,34 @@ describe("DashboardPage", () => {
         .getByRole("button", { name: "Scan libraries" })
         .hasAttribute("disabled"),
     ).toBe(true);
+  });
+
+  it("links the recent empty state to the full history", async () => {
+    server.use(
+      http.get("/api/dashboard", () =>
+        HttpResponse.json({
+          recently_downloaded: [],
+          active_queue: [],
+          upcoming_releases: [],
+          stats: {
+            total_series: 1,
+            total_issues: 1,
+            total_expected: 1,
+            completion_pct: 100,
+            queue_count: 0,
+          },
+          ai_activity: [],
+          ai_configured: false,
+          scan_targets: { comic: false, manga: false },
+        }),
+      ),
+    );
+
+    render(<DashboardPage />);
+
+    expect(
+      await screen.findByRole("link", { name: "open full history" }),
+    ).toBeTruthy();
   });
 
   it("renders command hint card", async () => {

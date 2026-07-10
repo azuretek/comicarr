@@ -161,6 +161,7 @@ IMPORTINBOX_STATUS = "Waiting"
 SEARCH_STATUS = "Waiting"
 RSS_STATUS = "Waiting"
 WEEKLY_STATUS = "Waiting"
+WEEKLY_MANUAL_NEXT_RUN = None
 VERSION_STATUS = "Waiting"
 UPDATER_STATUS = "Waiting"
 FORCE_STATUS = {}
@@ -1572,7 +1573,16 @@ def dbcheck():
     _ensure_columns(engine, "ref32p", [("Updated", "TEXT")])
 
     # -- Jobhistory Table --
-    _ensure_columns(engine, "jobhistory", [("status", "TEXT")])
+    _ensure_columns(
+        engine,
+        "jobhistory",
+        [
+            ("status", "TEXT"),
+            ("last_success_timestamp", "FLOAT"),
+            ("last_failure_timestamp", "FLOAT"),
+            ("last_error", "TEXT"),
+        ],
+    )
 
     # last date — used by db Updater for staggering requests
     jobhistory_existing = {c["name"] for c in inspect(engine).get_columns("jobhistory")}

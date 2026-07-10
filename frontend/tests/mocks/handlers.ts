@@ -157,6 +157,17 @@ export const handlers = [
           ComicImage: "https://example.com/spiderman.jpg",
         },
       ],
+      active_queue: [
+        {
+          ID: "queue-1",
+          series: "Spider-Man",
+          filename: "Spider-Man 001.cbz",
+          status: "Downloading",
+          updated_date: "2026-04-05T12:00:00",
+          site: "DDL(GetComics)",
+          comicid: "1",
+        },
+      ],
       upcoming_releases: [
         {
           ComicName: "Batman",
@@ -179,6 +190,31 @@ export const handlers = [
       scan_targets: { comic: true, manga: true },
     });
   }),
+
+  http.post("/api/weekly/refresh", () =>
+    HttpResponse.json({
+      accepted: true,
+      state: "queued",
+      message: "Weekly refresh queued.",
+    }),
+  ),
+
+  http.get("/api/system/jobs", () =>
+    HttpResponse.json({
+      jobs: [
+        {
+          id: "weekly",
+          name: "Weekly Pullist",
+          next_run_time: null,
+          trigger: "cron",
+          status: "Waiting",
+          last_success_timestamp: null,
+          last_failure_timestamp: null,
+          last_error: null,
+        },
+      ],
+    }),
+  ),
 
   // -------------------------------------------------------------------------
   // Series endpoints

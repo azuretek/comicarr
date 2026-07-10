@@ -94,6 +94,9 @@ def test_queue_excludes_completed_rows_and_supports_search_sort_pagination(activ
     assert queued_only["total"] == 1
     assert queued_only["results"][0]["ID"] == "queued-old"
 
+    preview = queries.get_active_ddl_preview()
+    assert [row["ID"] for row in preview] == ["unknown", "queued-new", "failed", "queued-old"]
+
 
 def test_history_supports_filtering_and_oldest_first_sort(activity_db):
     with activity_db.begin() as conn:

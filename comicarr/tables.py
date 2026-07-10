@@ -453,6 +453,9 @@ jobhistory = Table(
     Column("successful_completions", Text),
     Column("failed_completions", Text),
     Column("status", Text),
+    Column("last_success_timestamp", Float),
+    Column("last_failure_timestamp", Float),
+    Column("last_error", Text),
     Column("last_date", Text),
     UniqueConstraint("JobName", name="uq_jobhistory_jobname"),
 )

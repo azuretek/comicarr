@@ -4,7 +4,7 @@ import { RefreshCw } from "lucide-react";
 import ErrorDisplay from "@/components/ui/ErrorDisplay";
 import RelativeTime from "@/components/ui/RelativeTime";
 import { useToast } from "@/components/ui/toast";
-import { useDashboard } from "@/hooks/useDashboard";
+import { useDashboard, type DashboardQueueItem } from "@/hooks/useDashboard";
 import {
   useComicScan,
   useComicScanProgress,
@@ -30,6 +30,21 @@ function Kpi({
         </div>
       </div>
     </div>
+  );
+}
+
+function QueueStatus({ status }: { status: DashboardQueueItem["status"] }) {
+  const normalized = (status || "queued").toLowerCase();
+  const color = normalized.includes("fail")
+    ? "var(--status-error)"
+    : normalized.includes("download")
+      ? "var(--status-active)"
+      : "var(--status-paused)";
+
+  return (
+    <span className="uppercase truncate" style={{ color }}>
+      {status || "Queued"}
+    </span>
   );
 }
 
@@ -105,6 +120,7 @@ export default function DashboardPage() {
 
   const stats = data?.stats;
   const downloads = data?.recently_downloaded || [];
+  const activeQueue = data?.active_queue || [];
   const upcoming = data?.upcoming_releases || [];
 
   const activeSeries = stats?.total_series ?? 0;
@@ -214,41 +230,100 @@ export default function DashboardPage() {
         <Kpi label="Queue" value={String(queueCount)} borderLeft />
       </div>
 
-      {/* Two-column body */}
+      {/* Operational summaries */}
       <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]">
-        {/* Queue & recent activity */}
+        {/* Active queue and recent history */}
         <section className="px-5 py-4 lg:border-r lg:border-border">
           <div className="flex items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2.5">
+              <div className="text-[13px] font-semibold">Active queue</div>
+              <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                {queueCount} item{queueCount === 1 ? "" : "s"}
+              </div>
+            </div>
+            <Link
+              to="/activity"
+              className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+            >
+              open queue →
+            </Link>
+          </div>
+
+          {isLoading && (
+            <div className="font-mono text-[11px] text-muted-foreground py-3">
+              loading queue…
+            </div>
+          )}
+
+          {!isLoading && activeQueue.length === 0 && (
+            <div className="font-mono text-[11px] text-muted-foreground py-3">
+              queue is clear
+            </div>
+          )}
+
+          <div className="font-mono text-[11px]">
+            {activeQueue.map((item, index) => (
+              <div
+                key={item.ID}
+                className="grid items-center gap-2 py-1.5"
+                style={{
+                  gridTemplateColumns: "minmax(140px, 1fr) 100px 120px",
+                  borderTop:
+                    index > 0
+                      ? "1px solid var(--border-soft, var(--border))"
+                      : "none",
+                }}
+              >
+                <div className="min-w-0">
+                  <div className="font-sans text-foreground truncate">
+                    {item.series || item.filename || "Unnamed download"}
+                  </div>
+                  {item.filename && item.filename !== item.series && (
+                    <div className="text-muted-foreground truncate">
+                      {item.filename}
+                    </div>
+                  )}
+                </div>
+                <QueueStatus status={item.status} />
+                <span className="text-muted-foreground truncate text-right">
+                  {item.updated_date ? <RelativeTime value={item.updated_date} /> : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-border">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2.5">
               <div className="text-[13px] font-semibold">
-                Queue & recent activity
+                Recent activity
               </div>
               <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
-                {downloads.length} events
+                {downloads.length} event{downloads.length === 1 ? "" : "s"} · 30 days
               </div>
             </div>
             <Link
               to="/activity?view=history"
               className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
             >
-              view all →
+              open history →
             </Link>
           </div>
 
           {isLoading && (
             <div className="font-mono text-[11px] text-muted-foreground py-4">
-              loading activity…
+              loading recent activity…
             </div>
           )}
 
           {!isLoading && downloads.length === 0 && (
             <div className="font-mono text-[11px] text-muted-foreground py-4">
-              no recent activity
+              no activity in the last 30 days — <Link to="/activity?view=history" className="hover:text-foreground">open full history</Link>
             </div>
           )}
 
           <div className="font-mono text-[11px]">
-            {downloads.slice(0, 8).map((d, i) => {
+            {downloads.slice(0, 5).map((d, i) => {
               const action = d.Status?.toLowerCase() || "—";
               const color = action.includes("down")
                 ? "var(--chart-4)"
@@ -298,15 +373,24 @@ export default function DashboardPage() {
               );
             })}
           </div>
+          </div>
         </section>
 
         {/* This week */}
         <section className="px-5 py-4">
-          <div className="flex items-center gap-2.5 mb-3">
-            <div className="text-[13px] font-semibold">This week</div>
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="text-[13px] font-semibold">This week</div>
             <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
               {upcoming.length} releases
             </div>
+            </div>
+            <Link
+              to="/releases?view=mine"
+              className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+            >
+              view mine →
+            </Link>
           </div>
 
           {isLoading && (

@@ -21,6 +21,16 @@ interface DashboardUpcoming {
   Status: string;
 }
 
+export interface DashboardQueueItem {
+  ID: string;
+  series: string;
+  filename: string;
+  status: string | null;
+  updated_date: string | null;
+  site: string | null;
+  comicid: string | null;
+}
+
 interface DashboardStats {
   total_series: number;
   total_issues: number;
@@ -40,6 +50,7 @@ interface DashboardAiActivity {
 
 export interface DashboardData {
   recently_downloaded: DashboardDownload[];
+  active_queue: DashboardQueueItem[];
   upcoming_releases: DashboardUpcoming[];
   stats: DashboardStats;
   ai_activity: DashboardAiActivity[];
