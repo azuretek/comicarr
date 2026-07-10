@@ -1288,7 +1288,6 @@ class GC(object):
                         logger.fdebug("%s already exists - replacing it after the download completes" % dst_path)
 
                     write_chunks_atomically(dst_path, t.iter_content(chunk_size=1024))
-
             return self.zip_zip(id, dst_path, filename)
 
         except requests.exceptions.Timeout as e:
