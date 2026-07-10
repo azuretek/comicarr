@@ -511,6 +511,10 @@ ddl_info = Table(
     Column("pack", Integer),
     Column("link_type", Text),
     Column("tmp_filename", Text),
+    Column("oneoff", Integer),
+    Column("resume", Integer),
+    Column("comicinfo", Text),
+    Column("packinfo", Text),
 )
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ from sqlalchemy import and_, delete, or_, select
 import comicarr
 from comicarr import db, logger
 from comicarr.app.downloads import journal, recovery_classify
+from comicarr.app.downloads.ddl_commands import DDLCommand, DDLCommandError
 from comicarr.tables import nzblog, snatched, storyarcs
 
 # Small inter-enqueue pause so the replay burst does not contend the SQLite
@@ -363,6 +364,14 @@ def _resume_item_from_row(row, payload):
     )
     if is_ddl:
         ddl_id = payload.get("id") or di.get("id") or row.get("ddl_id")
+        try:
+            return "ddl", DDLCommand.from_mapping(payload).to_queue_item()
+        except DDLCommandError:
+            # Older journal rows predate the canonical command payload. Keep
+            # their best-effort shape so startup replay remains backwards
+            # compatible; the worker now rejects it deterministically if it
+            # cannot actually be run.
+            pass
         return "ddl", {
             "id": ddl_id,
             "issueid": payload.get("issueid") or row.get("issueid"),

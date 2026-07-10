@@ -63,7 +63,7 @@ class MegaNZ(object):
                         "remote_filesize": str(filesize),
                         "size": helpers.human_size(str(filesize)),
                     },
-                    {"id": self.id},
+                    {"ID": self.id},
                 )
 
             if filename is None:
@@ -111,7 +111,7 @@ class MegaNZ(object):
                     "tmp_filename": str(data["tmp_filename"])
                 },  # tmp_filename should be all that's needed to be updated at this point...
                 # {'filename': str(data['name']), 'tmp_filename': str(data['tmp_filename']), 'remote_filesize': str(data['total'])},
-                {"id": self.id},
+                {"ID": self.id},
             )
             self.wrote_tmp = True
 

@@ -125,7 +125,15 @@ def requeue_ddl_item(item_id: str):
     """Requeue a failed DDL download."""
     result = dl_service.requeue_ddl_item(item_id)
     if not result["success"]:
-        return JSONResponse(status_code=404, content={"detail": result.get("error")})
+        if result.get("not_found"):
+            status_code = 404
+        elif result.get("validation_error"):
+            status_code = 400
+        elif result.get("handoff_error"):
+            status_code = 503
+        else:
+            status_code = 500
+        return JSONResponse(status_code=status_code, content={"detail": result.get("error")})
     return result
 
 
@@ -137,20 +145,15 @@ def queue_ddl_download(
     if request_body is None:
         request_body = {}
 
-    item_id = request_body.get("id")
-    link = request_body.get("link")
-    site = request_body.get("site")
-
-    if not item_id:
-        return JSONResponse(status_code=400, content={"detail": "Missing id"})
-    if not link:
-        return JSONResponse(status_code=400, content={"detail": "Missing link"})
-    if not site:
-        return JSONResponse(status_code=400, content={"detail": "Missing site"})
-
-    result = dl_service.queue_ddl_download(item_id, link, site)
+    result = dl_service.queue_ddl_download(request_body)
     if not result["success"]:
-        return JSONResponse(status_code=500, content={"detail": result.get("error")})
+        if result.get("validation_error"):
+            status_code = 400
+        elif result.get("handoff_error"):
+            status_code = 503
+        else:
+            status_code = 500
+        return JSONResponse(status_code=status_code, content={"detail": result.get("error")})
     return result
 
 

@@ -99,7 +99,7 @@ class MediaFire(object):
         db.upsert(
             "ddl_info",
             {"filename": str(filename), "remote_filesize": str(filesize), "size": helpers.human_size(filesize)},
-            {"id": id},
+            {"ID": id},
         )
         return self.mediafire_dl(url, id, fileinfo, issueid)
 
@@ -118,7 +118,7 @@ class MediaFire(object):
             {
                 "tmp_filename": fileinfo["filename"]
             },  # tmp_filename should be all that's needed to be updated at this point...
-            {"id": id},
+            {"ID": id},
         )
 
         try:
