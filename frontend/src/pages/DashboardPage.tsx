@@ -286,93 +286,103 @@ export default function DashboardPage() {
                 </div>
                 <QueueStatus status={item.status} />
                 <span className="text-muted-foreground truncate text-right">
-                  {item.updated_date ? <RelativeTime value={item.updated_date} /> : "—"}
+                  {item.updated_date ? (
+                    <RelativeTime value={item.updated_date} />
+                  ) : (
+                    "—"
+                  )}
                 </span>
               </div>
             ))}
           </div>
 
           <div className="mt-5 pt-4 border-t border-border">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="text-[13px] font-semibold">
-                Recent activity
-              </div>
-              <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
-                {downloads.length} event{downloads.length === 1 ? "" : "s"} · 30 days
-              </div>
-            </div>
-            <Link
-              to="/activity?view=history"
-              className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
-            >
-              open history →
-            </Link>
-          </div>
-
-          {isLoading && (
-            <div className="font-mono text-[11px] text-muted-foreground py-4">
-              loading recent activity…
-            </div>
-          )}
-
-          {!isLoading && downloads.length === 0 && (
-            <div className="font-mono text-[11px] text-muted-foreground py-4">
-              no activity in the last 30 days — <Link to="/activity?view=history" className="hover:text-foreground">open full history</Link>
-            </div>
-          )}
-
-          <div className="font-mono text-[11px]">
-            {downloads.slice(0, 5).map((d, i) => {
-              const action = d.Status?.toLowerCase() || "—";
-              const color = action.includes("down")
-                ? "var(--chart-4)"
-                : action.includes("post") || action.includes("import")
-                  ? "var(--status-active)"
-                  : action.includes("snatch") || action.includes("queue")
-                    ? "var(--status-paused)"
-                    : "var(--muted-foreground)";
-              return (
-                <div
-                  key={`${d.ComicID}-${d.IssueID}-${i}`}
-                  className="grid items-center gap-2 py-1.5"
-                  style={{
-                    gridTemplateColumns: "120px 90px minmax(180px, 1fr) 140px",
-                    borderTop:
-                      i > 0
-                        ? "1px solid var(--border-soft, var(--border))"
-                        : "none",
-                  }}
-                >
-                  <RelativeTime value={d.DateAdded} />
-                  <span className="uppercase truncate" style={{ color }}>
-                    {action}
-                  </span>
-                  <div className="flex items-center gap-2 min-w-0">
-                    {d.ComicID && (
-                      <img
-                        src={`/api/metadata/art/${d.ComicID}`}
-                        alt=""
-                        className="w-4 h-6 object-cover rounded-[1px] shrink-0"
-                        onError={(e) => {
-                          e.currentTarget.style.visibility = "hidden";
-                        }}
-                      />
-                    )}
-                    <Link
-                      to={`/library/${d.ComicID}`}
-                      className="font-sans text-foreground truncate hover:text-[var(--primary)]"
-                    >
-                      {d.ComicName} #{d.Issue_Number}
-                    </Link>
-                  </div>
-                  <span className="text-muted-foreground truncate">
-                    {d.Provider || "—"}
-                  </span>
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="text-[13px] font-semibold">Recent activity</div>
+                <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                  {downloads.length} event{downloads.length === 1 ? "" : "s"} ·
+                  30 days
                 </div>
-              );
-            })}
-          </div>
+              </div>
+              <Link
+                to="/activity?view=history"
+                className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                open history →
+              </Link>
+            </div>
+
+            {isLoading && (
+              <div className="font-mono text-[11px] text-muted-foreground py-4">
+                loading recent activity…
+              </div>
+            )}
+
+            {!isLoading && downloads.length === 0 && (
+              <div className="font-mono text-[11px] text-muted-foreground py-4">
+                no activity in the last 30 days —{" "}
+                <Link
+                  to="/activity?view=history"
+                  className="hover:text-foreground"
+                >
+                  open full history
+                </Link>
+              </div>
+            )}
+
+            <div className="font-mono text-[11px]">
+              {downloads.slice(0, 5).map((d, i) => {
+                const action = d.Status?.toLowerCase() || "—";
+                const color = action.includes("down")
+                  ? "var(--chart-4)"
+                  : action.includes("post") || action.includes("import")
+                    ? "var(--status-active)"
+                    : action.includes("snatch") || action.includes("queue")
+                      ? "var(--status-paused)"
+                      : "var(--muted-foreground)";
+                return (
+                  <div
+                    key={`${d.ComicID}-${d.IssueID}-${i}`}
+                    className="grid items-center gap-2 py-1.5"
+                    style={{
+                      gridTemplateColumns:
+                        "120px 90px minmax(180px, 1fr) 140px",
+                      borderTop:
+                        i > 0
+                          ? "1px solid var(--border-soft, var(--border))"
+                          : "none",
+                    }}
+                  >
+                    <RelativeTime value={d.DateAdded} />
+                    <span className="uppercase truncate" style={{ color }}>
+                      {action}
+                    </span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      {d.ComicID && (
+                        <img
+                          src={`/api/metadata/art/${d.ComicID}`}
+                          alt=""
+                          className="w-4 h-6 object-cover rounded-[1px] shrink-0"
+                          onError={(e) => {
+                            e.currentTarget.style.visibility = "hidden";
+                          }}
+                        />
+                      )}
+                      <Link
+                        to={`/library/${d.ComicID}`}
+                        className="font-sans text-foreground truncate hover:text-[var(--primary)]"
+                      >
+                        {d.ComicName} #{d.Issue_Number}
+                      </Link>
+                    </div>
+                    <span className="text-muted-foreground truncate">
+                      {d.Provider || "—"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </section>
 
@@ -381,9 +391,9 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2.5">
               <div className="text-[13px] font-semibold">This week</div>
-            <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
-              {upcoming.length} releases
-            </div>
+              <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                {upcoming.length} releases
+              </div>
             </div>
             <Link
               to="/releases?view=mine"

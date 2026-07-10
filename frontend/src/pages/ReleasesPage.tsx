@@ -107,7 +107,9 @@ export default function ReleasesPage() {
   const currentView: ReleasesView = viewParam === "all" ? "all" : "mine";
   const weeklyRefresh = useWeeklyRefresh();
   const queryClient = useQueryClient();
-  const [refreshRequestedAt, setRefreshRequestedAt] = useState<number | null>(null);
+  const [refreshRequestedAt, setRefreshRequestedAt] = useState<number | null>(
+    null,
+  );
   const refreshRequested = refreshRequestedAt !== null;
   const { data: jobs } = useScheduledJobs(refreshRequested);
   const { addToast } = useToast();
@@ -118,13 +120,14 @@ export default function ReleasesPage() {
     : weeklyStatus === "queued"
       ? "Refresh queued — it will start shortly."
       : weeklyStatus === "running"
-      ? "Refreshing releases…"
-      : weeklyStatus === "error"
-        ? weeklyJob?.last_error || "Refresh failed. Check the pull source, then retry."
-        : weeklyJob?.last_success_timestamp &&
-            weeklyJob.last_success_timestamp >= refreshRequestedAt
-          ? "Releases refreshed."
-          : "Refresh queued — it will start shortly.";
+        ? "Refreshing releases…"
+        : weeklyStatus === "error"
+          ? weeklyJob?.last_error ||
+            "Refresh failed. Check the pull source, then retry."
+          : weeklyJob?.last_success_timestamp &&
+              weeklyJob.last_success_timestamp >= refreshRequestedAt
+            ? "Releases refreshed."
+            : "Refresh queued — it will start shortly.";
 
   useEffect(() => {
     if (
@@ -157,7 +160,8 @@ export default function ReleasesPage() {
         addToast({
           type: "error",
           message:
-            result.error || "Weekly refresh is paused. Resume it in Settings, then retry.",
+            result.error ||
+            "Weekly refresh is paused. Resume it in Settings, then retry.",
         });
         return;
       }
@@ -229,7 +233,8 @@ export default function ReleasesPage() {
           }}
         >
           {refreshMessage}
-          {weeklyStatus === "error" && " Retry after fixing the pull source connection."}
+          {weeklyStatus === "error" &&
+            " Retry after fixing the pull source connection."}
         </div>
       )}
 
