@@ -172,9 +172,11 @@ export const handlers = [
         total_issues: 250,
         total_expected: 500,
         completion_pct: 50.0,
+        queue_count: 2,
       },
       ai_activity: [],
       ai_configured: false,
+      scan_targets: { comic: true, manga: true },
     });
   }),
 
@@ -207,10 +209,7 @@ export const handlers = [
     if (comic) {
       return HttpResponse.json({ comic, issues: mockIssues });
     }
-    return HttpResponse.json(
-      { error: "Comic not found" },
-      { status: 404 },
-    );
+    return HttpResponse.json({ error: "Comic not found" }, { status: 404 });
   }),
 
   http.delete("/api/series/:comicId", () => {
@@ -301,7 +300,10 @@ export const handlers = [
   }),
 
   http.put("/api/config", () => {
-    return HttpResponse.json({ success: true, message: "Configuration updated" });
+    return HttpResponse.json({
+      success: true,
+      message: "Configuration updated",
+    });
   }),
 
   // -------------------------------------------------------------------------
@@ -399,10 +401,7 @@ export function createErrorHandler(
   errorMessage: string,
 ) {
   return http[method](path, () => {
-    return HttpResponse.json(
-      { error: errorMessage },
-      { status: 500 },
-    );
+    return HttpResponse.json({ error: errorMessage }, { status: 500 });
   });
 }
 

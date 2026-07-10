@@ -706,6 +706,7 @@ Index("failed_issueid", failed.c.IssueID)
 Index("upcoming_issuedate", upcoming.c.IssueDate)
 Index("upcoming_issueid", upcoming.c.IssueID)
 Index("pipeline_journal_stage", pipeline_journal.c.stage)
+ddl_info_status_updated = Index("ddl_info_status_updated", ddl_info.c.status, ddl_info.c.updated_date)
 
 # Case-insensitive indexes (SQLite uses COLLATE NOCASE on column definition;
 # PostgreSQL functional indexes are created separately in db.py)

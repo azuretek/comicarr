@@ -26,6 +26,7 @@ interface DashboardStats {
   total_issues: number;
   total_expected: number;
   completion_pct: number;
+  queue_count: number;
 }
 
 interface DashboardAiActivity {
@@ -43,6 +44,10 @@ export interface DashboardData {
   stats: DashboardStats;
   ai_activity: DashboardAiActivity[];
   ai_configured: boolean;
+  scan_targets: {
+    comic: boolean;
+    manga: boolean;
+  };
 }
 
 export function useDashboard() {

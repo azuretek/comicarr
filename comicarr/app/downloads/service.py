@@ -44,20 +44,38 @@ _DDL_JOURNAL_REQUEUE_CAP = 3
 # ---------------------------------------------------------------------------
 
 
-def get_history(limit=None, offset=None):
-    """Get download history, optionally paginated."""
+def _paginated_activity_response(key, query, **options):
+    paginated = query(**options)
+    return {
+        key: paginated["results"],
+        "pagination": {
+            "total": paginated["total"],
+            "limit": paginated["limit"],
+            "offset": paginated["offset"],
+            "has_more": paginated["has_more"],
+        },
+    }
+
+
+def get_history(limit=None, offset=None, search=None, status=None, sort=None, order="desc"):
+    """Get searchable, sortable download history, optionally paginated."""
     if limit is not None:
-        paginated = dl_queries.get_history(limit=limit, offset=offset)
-        return {
-            "history": paginated["results"],
-            "pagination": {
-                "total": paginated["total"],
-                "limit": paginated["limit"],
-                "offset": paginated["offset"],
-                "has_more": paginated["has_more"],
-            },
-        }
-    return dl_queries.get_history()
+        return _paginated_activity_response(
+            "history",
+            dl_queries.get_history,
+            limit=limit,
+            offset=offset,
+            search=search,
+            status=status,
+            sort=sort,
+            order=order,
+        )
+    return dl_queries.get_history(
+        search=search,
+        status=status,
+        sort=sort,
+        order=order,
+    )
 
 
 def clear_history(status_type=None):
@@ -147,9 +165,25 @@ def process_issue(comicid, folder, issueid=None):
 # ---------------------------------------------------------------------------
 
 
-def get_ddl_queue():
-    """Get current DDL download queue."""
-    return dl_queries.get_ddl_queue()
+def get_ddl_queue(limit=None, offset=None, search=None, status=None, sort=None, order="desc"):
+    """Get the active DDL download queue."""
+    if limit is not None:
+        return _paginated_activity_response(
+            "queue",
+            dl_queries.get_ddl_queue,
+            limit=limit,
+            offset=offset,
+            search=search,
+            status=status,
+            sort=sort,
+            order=order,
+        )
+    return dl_queries.get_ddl_queue(
+        search=search,
+        status=status,
+        sort=sort,
+        order=order,
+    )
 
 
 def delete_ddl_item(item_id):

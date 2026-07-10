@@ -691,6 +691,8 @@ def manga_library_scan(ctx):
     manga_dir = getattr(comicarr.CONFIG, "MANGA_DIR", None) if comicarr.CONFIG else None
     if not manga_dir:
         return {"success": False, "error": "Manga directory not configured"}
+    if not os.path.isdir(manga_dir):
+        return {"success": False, "error": "Manga directory not found: %s" % manga_dir}
 
     try:
         logger.info("[MANGA-SCAN] Starting manga library scan for: %s" % manga_dir)
@@ -721,6 +723,8 @@ def comic_library_scan(ctx):
     comic_dir = getattr(comicarr.CONFIG, "COMIC_DIR", None) if comicarr.CONFIG else None
     if not comic_dir:
         return {"success": False, "error": "Comic directory not configured"}
+    if not os.path.isdir(comic_dir):
+        return {"success": False, "error": "Comic directory not found: %s" % comic_dir}
 
     try:
         logger.info("[COMIC-SCAN] Starting comic library scan for: %s" % comic_dir)

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.downloads import queries as dl_queries
 
 
 def get_dashboard_data(ctx):
@@ -30,6 +31,10 @@ def get_dashboard_data(ctx):
         "stats": {},
         "ai_activity": [],
         "ai_configured": False,
+        "scan_targets": {
+            "comic": isinstance(getattr(comicarr.CONFIG, "COMIC_DIR", None), str) and bool(comicarr.CONFIG.COMIC_DIR),
+            "manga": isinstance(getattr(comicarr.CONFIG, "MANGA_DIR", None), str) and bool(comicarr.CONFIG.MANGA_DIR),
+        },
     }
 
     # Recently downloaded: last 10 from snatched, sorted by DateAdded DESC
@@ -75,6 +80,12 @@ def get_dashboard_data(ctx):
                 "total_expected": total_expected,
                 "completion_pct": round(total_issues / total_expected * 100, 1) if total_expected > 0 else 0,
             }
+
+        try:
+            result["stats"].setdefault("queue_count", dl_queries.count_active_ddl_items())
+        except Exception as e:
+            logger.error("[DASHBOARD] Error fetching active queue count: %s" % e)
+            result["stats"].setdefault("queue_count", 0)
 
         # Manga-specific stats
         manga_stats = db.DBConnection().selectone(
