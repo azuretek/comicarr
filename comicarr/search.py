@@ -56,6 +56,11 @@ from comicarr import (
     search_filer,
     updater,
 )
+from comicarr.app.common.remote_artifacts import (
+    resolve_remote_artifact_path,
+    safe_remote_filename,
+    write_chunks_atomically,
+)
 from comicarr.downloaders import external_server as exs
 from comicarr.tables import (
     annuals,
@@ -2910,11 +2915,11 @@ def nzbname_create(provider, title=None, info=None):
 
     elif any([provider == "32P", provider == "WWT", provider == "DEM", "DDL" in provider]):
         # filesafe the name cause people are idiots when they post sometimes.
-        nzbname = re.sub(r"\s{2,}", " ", helpers.filesafe(title)).strip()
+        nzbname = re.sub(r"\s{2,}", " ", safe_remote_filename(title)).strip()
         # let's change all space to decimals for simplicity
         nzbname = re.sub(" ", ".", nzbname)
         # gotta replace & or escape it
-        nzbname = re.sub(r"\&amp;|(amp;)|amp;|\&", "and", title)
+        nzbname = re.sub(r"\&amp;|(amp;)|amp;|\&", "and", nzbname)
         nzbname = re.sub(r"[\,\:\?\']", "", nzbname)
         if nzbname.lower().endswith(".torrent"):
             nzbname = re.sub(".torrent", "", nzbname)
@@ -2943,8 +2948,18 @@ def nzbname_create(provider, title=None, info=None):
     if nzbname is None:
         return None
     else:
+        try:
+            nzbname = safe_remote_filename(nzbname)
+        except ValueError as e:
+            logger.warn("[SEARCHER] Refusing unsafe remote artifact name: %s" % e)
+            return None
         logger.fdebug("nzbname used for post-processing: %s" % nzbname)
         return nzbname
+
+
+def _nzb_cache_path(cache_dir, nzbname):
+    """Return the cache path as a legacy-compatible string for client APIs."""
+    return str(resolve_remote_artifact_path(cache_dir, nzbname))
 
 
 def searcher(
@@ -3265,13 +3280,8 @@ def searcher(
             # save the nzb grabbed, so we can bypass all the 'send-url' crap.
             if not nzbname.endswith(".nzb"):
                 nzbname = nzbname + ".nzb"
-            nzbpath = os.path.join(comicarr.CONFIG.CACHE_DIR, nzbname)
-
-            with open(nzbpath, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024):
-                    if chunk:  # filter out keep-alive new chunks
-                        f.write(chunk)
-                        f.flush()
+            nzbpath = _nzb_cache_path(comicarr.CONFIG.CACHE_DIR, nzbname)
+            write_chunks_atomically(nzbpath, r.iter_content(chunk_size=1024))
 
     # blackhole
     sent_to = None

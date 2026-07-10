@@ -28,7 +28,6 @@ import sys
 import time
 import traceback
 import urllib.parse
-import zipfile
 from operator import itemgetter
 
 import requests
@@ -36,6 +35,13 @@ from bs4 import BeautifulSoup
 
 import comicarr
 from comicarr import db, helpers, logger, search_filer
+from comicarr.app.common.remote_artifacts import (
+    ensure_path_within_directory,
+    extract_zip_atomically,
+    resolve_remote_artifact_path,
+    safe_remote_filename,
+    write_chunks_atomically,
+)
 
 
 class GC(object):
@@ -1179,7 +1185,7 @@ class GC(object):
 
                 if filename is not None:
                     file, ext = os.path.splitext(filename)
-                    filename = "%s[__%s__]%s" % (file, issueid, ext)
+                    filename = safe_remote_filename("%s[__%s__]%s" % (file, issueid, ext))
 
                 logger.fdebug("filename: %s" % filename)
 
@@ -1195,6 +1201,7 @@ class GC(object):
                             filename = os.path.basename(urllib.parse.unquote(t.url))
                             if "GetComics.INFO" in filename:
                                 filename = re.sub("GetComics.INFO", "", filename, re.I).strip()
+                            filename = safe_remote_filename(filename)
                             try:
                                 remote_filesize = int(t.headers["Content-length"])
                                 logger.fdebug("remote filesize: %s" % remote_filesize)
@@ -1246,7 +1253,7 @@ class GC(object):
                         )
                         return {"success": False, "filename": filename, "path": None, "link_type": link_type}
 
-                dst_path = os.path.join(comicarr.CONFIG.DDL_LOCATION, filename)
+                dst_path = resolve_remote_artifact_path(comicarr.CONFIG.DDL_LOCATION, filename)
 
                 t.headers["Accept-encoding"] = "gzip"
                 if resume is not None:
@@ -1258,23 +1265,9 @@ class GC(object):
 
                 else:
                     if os.path.exists(dst_path):
-                        logger.fdebug("%s already exists - resume not enabled - let us hammer thine" % dst_path)
-                        try:
-                            os.remove(dst_path)
-                        except Exception as e:
-                            file, ext = os.path.splitext(filename)
-                            filename = "%s.1%s" % (file, ext)
-                            dst_path = os.path.join(comicarr.CONFIG.DDL_LOCATION, filename)
-                            logger.warn(
-                                "[ERROR: %s] Unable to remove already existing file."
-                                " Creating tmp file @%s so it can download." % (e, filename)
-                            )
+                        logger.fdebug("%s already exists - replacing it after the download completes" % dst_path)
 
-                    with open(dst_path, "wb") as f:
-                        for chunk in t.iter_content(chunk_size=1024):
-                            if chunk:
-                                f.write(chunk)
-                                f.flush()
+                    write_chunks_atomically(dst_path, t.iter_content(chunk_size=1024))
 
         except requests.exceptions.Timeout as e:
             logger.error("[ERROR] download has timed out due to inactivity...: %s", e)
@@ -1290,14 +1283,24 @@ class GC(object):
             return self.zip_zip(id, dst_path, filename)
 
     def zip_zip(self, id, dst_path, filename):
+        try:
+            dst_path = ensure_path_within_directory(comicarr.CONFIG.DDL_LOCATION, dst_path)
+        except ValueError as e:
+            logger.warn("[ERROR: %s] Refusing archive outside the DDL download directory." % e)
+            return {"success": False, "filename": filename, "path": None}
+
         if os.path.isfile(dst_path):
-            if dst_path.endswith(".zip"):
-                new_path = os.path.join(comicarr.CONFIG.DDL_LOCATION, re.sub(".zip", "", filename).strip())
+            if str(dst_path).lower().endswith(".zip"):
+                try:
+                    archive_name = safe_remote_filename(filename)
+                    extraction_name = os.path.splitext(archive_name)[0]
+                    new_path = resolve_remote_artifact_path(comicarr.CONFIG.DDL_LOCATION, extraction_name)
+                except ValueError as e:
+                    logger.warn("[ERROR: %s] Refusing unsafe archive filename." % e)
+                    return {"success": False, "filename": filename, "path": None}
                 logger.info("Zip file detected. Unzipping into new modified path location: %s" % new_path)
                 try:
-                    zip_f = zipfile.ZipFile(dst_path, "r")
-                    zip_f.extractall(new_path)
-                    zip_f.close()
+                    extract_zip_atomically(dst_path, new_path)
                 except Exception as e:
                     logger.warn("[ERROR: %s] Unable to extract zip file: %s" % (e, new_path))
                     return {"success": False, "filename": filename, "path": None}
@@ -1308,8 +1311,8 @@ class GC(object):
                         logger.warn("[ERROR: %s] Unable to remove zip file from %s after extraction." % (e, dst_path))
                     filename = None
             else:
-                new_path = dst_path
-            return {"success": True, "filename": filename, "path": new_path}
+                new_path = str(dst_path)
+            return {"success": True, "filename": filename, "path": str(new_path)}
 
         comicarr.DDL_LOCK.release()
         return {"success": False, "filename": filename, "path": None}
