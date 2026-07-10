@@ -1,6 +1,16 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { RefreshCw } from "lucide-react";
 import ErrorDisplay from "@/components/ui/ErrorDisplay";
+import RelativeTime from "@/components/ui/RelativeTime";
+import { useToast } from "@/components/ui/toast";
 import { useDashboard } from "@/hooks/useDashboard";
+import {
+  useComicScan,
+  useComicScanProgress,
+  useMangaScan,
+  useMangaScanProgress,
+} from "@/hooks/useImport";
 
 function Kpi({
   label,
@@ -25,6 +35,61 @@ function Kpi({
 
 export default function DashboardPage() {
   const { data, isLoading, error } = useDashboard();
+  const comicScan = useComicScan();
+  const mangaScan = useMangaScan();
+  const [comicScanning, setComicScanning] = useState(false);
+  const [mangaScanning, setMangaScanning] = useState(false);
+  const { data: comicScanProgress, error: comicProgressError } =
+    useComicScanProgress(comicScanning);
+  const { data: mangaScanProgress, error: mangaProgressError } =
+    useMangaScanProgress(mangaScanning);
+  const { addToast } = useToast();
+
+  useEffect(() => {
+    if (
+      !comicScanning ||
+      !["completed", "error"].includes(comicScanProgress?.status || "")
+    )
+      return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync the dashboard action with server scan state
+    setComicScanning(false);
+    if (comicScanProgress?.status === "error") {
+      addToast({ type: "error", message: "Comic library scan failed." });
+    }
+  }, [comicScanning, comicScanProgress?.status, addToast]);
+
+  useEffect(() => {
+    if (
+      !mangaScanning ||
+      !["completed", "error"].includes(mangaScanProgress?.status || "")
+    )
+      return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync the dashboard action with server scan state
+    setMangaScanning(false);
+    if (mangaScanProgress?.status === "error") {
+      addToast({ type: "error", message: "Manga library scan failed." });
+    }
+  }, [mangaScanning, mangaScanProgress?.status, addToast]);
+
+  useEffect(() => {
+    if (!comicScanning || !comicProgressError) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Release a dashboard action whose progress request failed
+    setComicScanning(false);
+    addToast({
+      type: "error",
+      message: "Unable to monitor comic library scan.",
+    });
+  }, [comicScanning, comicProgressError, addToast]);
+
+  useEffect(() => {
+    if (!mangaScanning || !mangaProgressError) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Release a dashboard action whose progress request failed
+    setMangaScanning(false);
+    addToast({
+      type: "error",
+      message: "Unable to monitor manga library scan.",
+    });
+  }, [mangaScanning, mangaProgressError, addToast]);
 
   if (error) {
     return (
@@ -45,14 +110,62 @@ export default function DashboardPage() {
   const activeSeries = stats?.total_series ?? 0;
   const totalIssues = stats?.total_issues ?? 0;
   const completion = stats?.completion_pct ?? 0;
-  const queueCount = downloads.filter((d) =>
-    /snatch|queue|wanted/i.test(d.Status),
-  ).length;
+  const queueCount = stats?.queue_count ?? 0;
+  const scanPending =
+    comicScan.isPending ||
+    mangaScan.isPending ||
+    comicScanning ||
+    mangaScanning;
+  const canScan = Boolean(
+    data?.scan_targets?.comic || data?.scan_targets?.manga,
+  );
+
+  const handleLibraryScan = async () => {
+    const scans: { type: "comic" | "manga"; request: Promise<unknown> }[] = [];
+    if (data?.scan_targets?.comic) {
+      scans.push({ type: "comic", request: comicScan.mutateAsync() });
+    }
+    if (data?.scan_targets?.manga) {
+      scans.push({ type: "manga", request: mangaScan.mutateAsync() });
+    }
+
+    if (scans.length === 0) {
+      addToast({
+        type: "error",
+        message:
+          "Configure a comic or manga library directory before scanning.",
+      });
+      return;
+    }
+
+    const results = await Promise.allSettled(scans.map((scan) => scan.request));
+    results.forEach((result, index) => {
+      if (result.status !== "fulfilled") return;
+      if (scans[index].type === "comic") setComicScanning(true);
+      else setMangaScanning(true);
+    });
+    const started = results.filter(
+      (result) => result.status === "fulfilled",
+    ).length;
+    if (started === scans.length) {
+      addToast({
+        type: "success",
+        message: `${started === 2 ? "Comic and manga library scans" : "Library scan"} started.`,
+      });
+    } else if (started > 0) {
+      addToast({
+        type: "error",
+        message: "One library scan started, but another failed to start.",
+      });
+    } else {
+      addToast({ type: "error", message: "Failed to start library scans." });
+    }
+  };
 
   return (
     <div className="h-full flex flex-col page-transition">
       {/* Page header */}
-      <div className="px-5 py-4 border-b border-border flex items-center gap-3">
+      <div className="px-5 py-4 border-b border-border flex items-center justify-between gap-3">
         <div>
           <div className="text-[18px] font-semibold tracking-tight">
             Dashboard
@@ -63,6 +176,23 @@ export default function DashboardPage() {
               : `${activeSeries} series · ${totalIssues} issues · ${queueCount} in queue`}
           </div>
         </div>
+        <button
+          type="button"
+          onClick={() => void handleLibraryScan()}
+          disabled={!canScan || scanPending}
+          title={
+            canScan
+              ? "Scan configured comic and manga libraries"
+              : "Configure a library directory first"
+          }
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] border text-[12px] font-medium disabled:opacity-50"
+          style={{ borderColor: "var(--border)" }}
+        >
+          <RefreshCw
+            className={`w-3.5 h-3.5 ${scanPending ? "animate-spin" : ""}`}
+          />
+          {scanPending ? "Scanning…" : "Scan libraries"}
+        </button>
       </div>
 
       {/* KPI strip */}
@@ -88,13 +218,21 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]">
         {/* Queue & recent activity */}
         <section className="px-5 py-4 lg:border-r lg:border-border">
-          <div className="flex items-center gap-2.5 mb-3">
-            <div className="text-[13px] font-semibold">
-              Queue & recent activity
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="text-[13px] font-semibold">
+                Queue & recent activity
+              </div>
+              <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                {downloads.length} events
+              </div>
             </div>
-            <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
-              {downloads.length} events
-            </div>
+            <Link
+              to="/activity?view=history"
+              className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+            >
+              view all →
+            </Link>
           </div>
 
           {isLoading && (
@@ -124,16 +262,14 @@ export default function DashboardPage() {
                   key={`${d.ComicID}-${d.IssueID}-${i}`}
                   className="grid items-center gap-2 py-1.5"
                   style={{
-                    gridTemplateColumns: "60px 90px 1fr 140px 60px 20px",
+                    gridTemplateColumns: "120px 90px minmax(180px, 1fr) 140px",
                     borderTop:
                       i > 0
                         ? "1px solid var(--border-soft, var(--border))"
                         : "none",
                   }}
                 >
-                  <span className="text-[var(--text-muted)]">
-                    {d.DateAdded?.slice(11, 16) || "—"}
-                  </span>
+                  <RelativeTime value={d.DateAdded} />
                   <span className="uppercase truncate" style={{ color }}>
                     {action}
                   </span>
@@ -157,10 +293,6 @@ export default function DashboardPage() {
                   </div>
                   <span className="text-muted-foreground truncate">
                     {d.Provider || "—"}
-                  </span>
-                  <span className="text-[var(--text-muted)] text-right">—</span>
-                  <span className="text-[var(--text-muted)] text-right">
-                    ···
                   </span>
                 </div>
               );

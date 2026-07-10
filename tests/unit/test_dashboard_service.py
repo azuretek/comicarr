@@ -14,6 +14,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _default_queue_count(monkeypatch):
+    monkeypatch.setattr("comicarr.app.dashboard.service.dl_queries.count_active_ddl_items", lambda: 0)
+
+
 class _FakeDBConnection:
     """Minimal DB stub for testing dashboard queries."""
 
@@ -43,9 +48,16 @@ class TestGetDashboardData:
     def test_returns_recently_downloaded(self, mock_comicarr, mock_db):
         mock_comicarr.AI_CLIENT = None
         recent = [
-            {"ComicName": "Spider-Man", "Issue_Number": "1", "DateAdded": "2026-04-01",
-             "Status": "Snatched", "Provider": "nzb", "ComicID": "100", "IssueID": "200",
-             "ComicImage": "http://img/1.jpg"},
+            {
+                "ComicName": "Spider-Man",
+                "Issue_Number": "1",
+                "DateAdded": "2026-04-01",
+                "Status": "Snatched",
+                "Provider": "nzb",
+                "ComicID": "100",
+                "IssueID": "200",
+                "ComicImage": "http://img/1.jpg",
+            },
         ]
         fake_db = _FakeDBConnection(select_results={"snatched": recent, "futureupcoming": []})
         mock_db.DBConnection.return_value = fake_db
@@ -62,8 +74,14 @@ class TestGetDashboardData:
     def test_returns_upcoming_releases(self, mock_comicarr, mock_db):
         mock_comicarr.AI_CLIENT = None
         upcoming = [
-            {"ComicName": "Batman", "IssueNumber": "5", "IssueDate": "2026-04-06",
-             "Publisher": "DC Comics", "ComicID": "300", "Status": "Wanted"},
+            {
+                "ComicName": "Batman",
+                "IssueNumber": "5",
+                "IssueDate": "2026-04-06",
+                "Publisher": "DC Comics",
+                "ComicID": "300",
+                "Status": "Wanted",
+            },
         ]
         fake_db = _FakeDBConnection(select_results={"futureupcoming": upcoming, "snatched": []})
         mock_db.DBConnection.return_value = fake_db
@@ -97,12 +115,62 @@ class TestGetDashboardData:
 
     @patch("comicarr.app.dashboard.service.db")
     @patch("comicarr.app.dashboard.service.comicarr")
+    def test_returns_active_queue_count(self, mock_comicarr, mock_db, monkeypatch):
+        mock_comicarr.AI_CLIENT = None
+        mock_comicarr.CONFIG.COMIC_DIR = "/comics"
+        mock_comicarr.CONFIG.MANGA_DIR = "/manga"
+        monkeypatch.setattr(
+            "comicarr.app.dashboard.service.dl_queries.count_active_ddl_items",
+            lambda: 3,
+        )
+        fake_db = _FakeDBConnection(
+            select_results={"snatched": [], "futureupcoming": []},
+            selectone_result={"total_series": 1, "total_issues": 1, "total_expected": 1},
+        )
+        mock_db.DBConnection.return_value = fake_db
+
+        from comicarr.app.dashboard.service import get_dashboard_data
+
+        result = get_dashboard_data(None)
+
+        assert result["stats"]["queue_count"] == 3
+        assert result["scan_targets"] == {"comic": True, "manga": True}
+
+    @patch("comicarr.app.dashboard.service.db")
+    @patch("comicarr.app.dashboard.service.comicarr")
+    def test_queue_count_failure_preserves_other_stats(self, mock_comicarr, mock_db, monkeypatch):
+        mock_comicarr.AI_CLIENT = None
+        monkeypatch.setattr(
+            "comicarr.app.dashboard.service.dl_queries.count_active_ddl_items",
+            MagicMock(side_effect=RuntimeError("count failed")),
+        )
+        fake_db = _FakeDBConnection(
+            select_results={"snatched": [], "futureupcoming": []},
+            selectone_result={"total_series": 1, "total_issues": 1, "total_expected": 1},
+        )
+        mock_db.DBConnection.return_value = fake_db
+
+        from comicarr.app.dashboard.service import get_dashboard_data
+
+        result = get_dashboard_data(None)
+
+        assert result["stats"]["queue_count"] == 0
+        assert result["stats"]["total_series"] == 1
+        assert result["stats"]["total_issues"] == 1
+
+    @patch("comicarr.app.dashboard.service.db")
+    @patch("comicarr.app.dashboard.service.comicarr")
     def test_returns_ai_activity_when_configured(self, mock_comicarr, mock_db):
         mock_comicarr.AI_CLIENT = MagicMock()
         activity = [
-            {"timestamp": "2026-04-05T12:00:00", "feature_type": "search",
-             "action_description": "Expanded search query", "prompt_tokens": 100,
-             "completion_tokens": 50, "success": True},
+            {
+                "timestamp": "2026-04-05T12:00:00",
+                "feature_type": "search",
+                "action_description": "Expanded search query",
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "success": True,
+            },
         ]
         fake_db = _FakeDBConnection(
             select_results={"snatched": [], "futureupcoming": [], "ai_activity_log": activity},
@@ -149,7 +217,7 @@ class TestGetDashboardData:
 
         assert result["recently_downloaded"] == []
         assert result["upcoming_releases"] == []
-        assert result["stats"] == {}
+        assert result["stats"] == {"queue_count": 0}
         assert result["ai_activity"] == []
         assert result["ai_configured"] is False
 

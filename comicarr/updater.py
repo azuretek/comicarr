@@ -2997,6 +2997,14 @@ def watchlist_updater(calledfrom=None, sched=False):
     prev_failed_updates = []
     popthecheck = []
     for row in list_rows:
+        try:
+            comicvine_id = int(row["ComicID"])
+        except (TypeError, ValueError):
+            logger.fdebug(
+                "[BACKFILL-UPDATE] Skipping non-ComicVine series id %s during ComicVine update" % row["ComicID"]
+            )
+            continue
+
         if row["ComicName"] is None and comicarr.CONFIG.ANNUALS_ON:
             logger.fdebug("Popping the check for: %s" % row["ComicID"])
             popthecheck.append(
@@ -3007,7 +3015,7 @@ def watchlist_updater(calledfrom=None, sched=False):
             ["ComicID" not in row["ComicName"], row["Status"] != "Loading", row["ComicName"] is not None]
         ):
             prev_failed_updates.append(
-                {"comicid": int(row["ComicID"]), "comicname": row["ComicName"], "seriesyear": row["ComicYear"]}
+                {"comicid": comicvine_id, "comicname": row["ComicName"], "seriesyear": row["ComicYear"]}
             )
         else:
             try:
@@ -3015,10 +3023,10 @@ def watchlist_updater(calledfrom=None, sched=False):
             except Exception:
                 # if the lastupdated date is NULL, but the other values filled in partially - this will make sure to get the ID so it can be refeshed properly
                 prev_failed_updates.append(
-                    {"comicid": int(row["ComicID"]), "comicname": row["ComicName"], "seriesyear": row["ComicYear"]}
+                    {"comicid": comicvine_id, "comicname": row["ComicName"], "seriesyear": row["ComicYear"]}
                 )
             else:
-                library[int(row["ComicID"])] = {
+                library[comicvine_id] = {
                     "comicid": row["ComicID"],
                     "status": row["Status"],
                     "comicname": row["ComicName"],

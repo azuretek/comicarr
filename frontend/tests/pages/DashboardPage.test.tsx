@@ -7,9 +7,10 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { server } from "../mocks/server";
 import { http, HttpResponse } from "msw";
-import { render, screen } from "../test-utils";
+import { createTestQueryClient, render, screen } from "../test-utils";
 import DashboardPage from "@/pages/DashboardPage";
 
 describe("DashboardPage", () => {
@@ -53,6 +54,86 @@ describe("DashboardPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Spider-Man #1")).toBeTruthy();
     });
+    expect(screen.getByText(/ago$/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "view all →" })).toBeTruthy();
+  });
+
+  it("starts scans for each configured library from the dashboard", async () => {
+    const queryClient = createTestQueryClient();
+    queryClient.setQueryData(["comicScanProgress"], {
+      status: "completed",
+      progress: {},
+    });
+    queryClient.setQueryData(["mangaScanProgress"], {
+      status: "completed",
+      progress: {},
+    });
+    let comicScans = 0;
+    let mangaScans = 0;
+    server.use(
+      http.post("/api/import/comic/scan", () => {
+        comicScans += 1;
+        return HttpResponse.json({ success: true, message: "started" });
+      }),
+      http.post("/api/import/manga/scan", () => {
+        mangaScans += 1;
+        return HttpResponse.json({ success: true, message: "started" });
+      }),
+      http.get("/api/import/comic/progress", () =>
+        HttpResponse.json({ status: "scanning", progress: {} }),
+      ),
+      http.get("/api/import/manga/progress", () =>
+        HttpResponse.json({ status: "scanning", progress: {} }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    render(<DashboardPage />, { queryClient });
+    const scanButton = await screen.findByRole("button", {
+      name: "Scan libraries",
+    });
+    await waitFor(() =>
+      expect(scanButton.hasAttribute("disabled")).toBe(false),
+    );
+    await user.click(scanButton);
+
+    await waitFor(() => {
+      expect(comicScans).toBe(1);
+      expect(mangaScans).toBe(1);
+    });
+    expect(
+      screen
+        .getByRole("button", { name: "Scanning…" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("reports a partial library scan startup failure", async () => {
+    server.use(
+      http.post("/api/import/comic/scan", () =>
+        HttpResponse.json({ success: true, message: "started" }),
+      ),
+      http.post("/api/import/manga/scan", () =>
+        HttpResponse.json({ detail: "busy" }, { status: 409 }),
+      ),
+      http.get("/api/import/comic/progress", () =>
+        HttpResponse.json({ status: "completed", progress: {} }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    render(<DashboardPage />);
+    await user.click(
+      await screen.findByRole("button", { name: "Scan libraries" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "One library scan started, but another failed to start.",
+        ),
+      ).toBeTruthy();
+    });
   });
 
   it("renders this-week upcoming list", async () => {
@@ -91,6 +172,11 @@ describe("DashboardPage", () => {
       expect(screen.getByText("no recent activity")).toBeTruthy();
       expect(screen.getByText("nothing upcoming this week")).toBeTruthy();
     });
+    expect(
+      screen
+        .getByRole("button", { name: "Scan libraries" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
   });
 
   it("renders command hint card", async () => {

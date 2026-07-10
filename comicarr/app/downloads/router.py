@@ -31,11 +31,22 @@ router = APIRouter(prefix="/api/downloads", tags=["downloads"])
 
 @router.get("/history", dependencies=[Depends(require_session)])
 def get_history(
-    limit: int = Query(None),
-    offset: int = Query(0),
+    limit: int | None = Query(None, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    q: str = Query(None, max_length=200),
+    status: str = Query(None, max_length=50),
+    sort: str = Query("date"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
 ):
-    """Get download history with optional pagination."""
-    return dl_service.get_history(limit=limit, offset=offset)
+    """Get searchable, sortable download history."""
+    return dl_service.get_history(
+        limit=limit,
+        offset=offset,
+        search=q,
+        status=status,
+        sort=sort,
+        order=order,
+    )
 
 
 @router.delete("/history", dependencies=[Depends(require_session)])
@@ -115,9 +126,23 @@ def process_issue(
 
 
 @router.get("/queue", dependencies=[Depends(require_session)])
-def get_ddl_queue():
-    """Get current DDL download queue."""
-    return dl_service.get_ddl_queue()
+def get_ddl_queue(
+    limit: int | None = Query(None, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    q: str = Query(None, max_length=200),
+    status: str = Query(None, max_length=50),
+    sort: str = Query("updated"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+):
+    """Get the searchable, sortable active DDL download queue."""
+    return dl_service.get_ddl_queue(
+        limit=limit,
+        offset=offset,
+        search=q,
+        status=status,
+        sort=sort,
+        order=order,
+    )
 
 
 @router.post("/{item_id}/requeue", dependencies=[Depends(require_session)])

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import {
   flexRender,
   type Row,
@@ -62,9 +62,8 @@ export function DataTable<TData>({
             table.getRowModel().rows.map((row) => {
               const colSpan = table.getAllColumns().length;
               return (
-                <>
+                <Fragment key={row.id}>
                   <TableRow
-                    key={row.id}
                     data-state={row.getIsSelected() && "selected"}
                     className={cn(
                       "border-b border-border/50",
@@ -86,7 +85,7 @@ export function DataTable<TData>({
                   {renderSubRow &&
                     row.getIsExpanded() &&
                     renderSubRow(row, colSpan)}
-                </>
+                </Fragment>
               );
             })
           ) : (

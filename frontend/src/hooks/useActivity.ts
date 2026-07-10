@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
+import type { PaginationMeta } from "@/types";
 
 export interface HistoryItem {
   IssueID: string;
@@ -15,12 +16,7 @@ export interface HistoryItem {
 
 interface HistoryResponse {
   history: HistoryItem[];
-  pagination: {
-    total: number;
-    limit: number;
-    offset: number;
-    has_more: boolean;
-  };
+  pagination: PaginationMeta;
 }
 
 export interface QueueItem {
@@ -39,22 +35,52 @@ export interface QueueItem {
   submit_date: string;
 }
 
-export function useDownloadHistory(limit: number, offset: number) {
+interface QueueResponse {
+  queue: QueueItem[];
+  pagination: PaginationMeta;
+}
+
+interface ActivityQuery {
+  limit: number;
+  offset: number;
+  q?: string;
+  status?: string;
+  sort: string;
+  order: "asc" | "desc";
+}
+
+function activityUrl(path: string, query: ActivityQuery): string {
+  const params = new URLSearchParams({
+    limit: String(query.limit),
+    offset: String(query.offset),
+    sort: query.sort,
+    order: query.order,
+  });
+  if (query.q?.trim()) params.set("q", query.q.trim());
+  if (query.status?.trim()) params.set("status", query.status.trim());
+  return `${path}?${params.toString()}`;
+}
+
+export function useDownloadHistory(query: ActivityQuery) {
   return useQuery<HistoryResponse>({
-    queryKey: ["downloads", "history", limit, offset],
+    queryKey: ["downloads", "history", query],
     queryFn: () =>
       apiRequest<HistoryResponse>(
         "GET",
-        `/api/downloads/history?limit=${limit}&offset=${offset}`,
+        activityUrl("/api/downloads/history", query),
       ),
     staleTime: 30 * 1000, // 30 seconds
   });
 }
 
-export function useDownloadQueue() {
-  return useQuery<QueueItem[]>({
-    queryKey: ["downloads", "queue"],
-    queryFn: () => apiRequest<QueueItem[]>("GET", "/api/downloads/queue"),
+export function useDownloadQueue(query: ActivityQuery) {
+  return useQuery<QueueResponse>({
+    queryKey: ["downloads", "queue", query],
+    queryFn: () =>
+      apiRequest<QueueResponse>(
+        "GET",
+        activityUrl("/api/downloads/queue", query),
+      ),
     staleTime: 10 * 1000, // 10 seconds — queue data is transient
     refetchInterval: 15 * 1000, // Poll every 15 seconds
   });

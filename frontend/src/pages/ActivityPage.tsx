@@ -1,33 +1,56 @@
-import { useState } from "react";
-import { useSearchParams, Link } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import {
+  createColumnHelper,
+  getCoreRowModel,
+  useReactTable,
+  type SortingState,
+  type Table as TanstackTable,
+  type Updater,
+} from "@tanstack/react-table";
+import { RefreshCw } from "lucide-react";
 import {
   useDownloadHistory,
   useDownloadQueue,
   type HistoryItem,
   type QueueItem,
 } from "@/hooks/useActivity";
+import { useDebounce } from "@/hooks/use-debounce";
+import { DataTable } from "@/components/data-table/DataTable";
+import { DataTableServerPagination } from "@/components/data-table/DataTableServerPagination";
+import { DataTableSortHeader } from "@/components/data-table/DataTableSortHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 import ErrorDisplay from "@/components/ui/ErrorDisplay";
 import EmptyState from "@/components/ui/EmptyState";
+import FilterField from "@/components/ui/FilterField";
+import RelativeTime from "@/components/ui/RelativeTime";
 import PageHeader, { Tab, TabRow } from "@/components/layout/PageHeader";
+import type { PaginationMeta } from "@/types";
 
 type ActivityView = "queue" | "history";
+const PAGE_SIZE = 25;
 
 function StatusPill({ status }: { status: string }) {
-  const s = (status || "").toLowerCase();
+  const normalized = (status || "").toLowerCase();
   let color = "var(--muted-foreground)";
   if (
-    s.includes("down") ||
-    s.includes("snatch") ||
-    s === "active" ||
-    s === "completed" ||
-    s === "done"
-  )
+    normalized.includes("down") ||
+    normalized.includes("snatch") ||
+    normalized === "active" ||
+    normalized === "completed" ||
+    normalized === "done"
+  ) {
     color = "var(--status-active)";
-  else if (s.includes("queue") || s.includes("pend") || s === "wanted")
+  } else if (
+    normalized.includes("queue") ||
+    normalized.includes("pend") ||
+    normalized === "wanted"
+  ) {
     color = "var(--status-paused)";
-  else if (s.includes("fail") || s.includes("error"))
+  } else if (normalized.includes("fail") || normalized.includes("error")) {
     color = "var(--status-error)";
+  }
+
   return (
     <span
       className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase"
@@ -44,12 +67,16 @@ function StatusPill({ status }: { status: string }) {
 
 export default function ActivityPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const viewParam = searchParams.get("view");
   const currentView: ActivityView =
-    viewParam === "history" ? "history" : "queue";
+    searchParams.get("view") === "history" ? "history" : "queue";
 
   const setView = (view: ActivityView) => {
-    setSearchParams({ view });
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (view === "history") next.set("view", "history");
+      else next.delete("view");
+      return next;
+    });
   };
 
   return (
@@ -57,9 +84,7 @@ export default function ActivityPage() {
       <PageHeader
         title="Activity"
         meta={
-          currentView === "queue"
-            ? "live download queue"
-            : "completed downloads"
+          currentView === "queue" ? "live download queue" : "download history"
         }
       />
 
@@ -76,243 +101,418 @@ export default function ActivityPage() {
         />
       </TabRow>
 
-      <div className="px-5 py-4">
-        {currentView === "queue" ? <QueueView /> : <HistoryView />}
-      </div>
+      {currentView === "queue" ? <QueueView /> : <HistoryView />}
     </div>
   );
 }
 
-function DenseTable({
-  headers,
-  gridTemplate,
-  children,
+function ActivityToolbar({
+  value,
+  onChange,
+  label,
+  placeholder,
+  isRefreshing,
+  onRefresh,
 }: {
-  headers: string[];
-  gridTemplate: string;
-  children: React.ReactNode;
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+  placeholder: string;
+  isRefreshing: boolean;
+  onRefresh: () => void;
 }) {
   return (
-    <div
-      className="rounded-[6px] border overflow-x-auto"
-      style={{ borderColor: "var(--border)" }}
-    >
-      <div
-        className="grid px-4 py-2 border-b font-mono text-[10px] tracking-[0.1em] uppercase text-muted-foreground"
-        style={{
-          borderColor: "var(--border)",
-          background: "var(--card)",
-          gridTemplateColumns: gridTemplate,
-        }}
-      >
-        {headers.map((h, i) => (
-          <div key={`${h}-${i}`}>{h}</div>
-        ))}
+    <div className="px-5 py-2.5 border-b border-border flex items-center gap-3">
+      <div className="flex-1 max-w-lg">
+        <FilterField
+          placeholder={placeholder}
+          aria-label={label}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          shortcut="/"
+        />
       </div>
-      {children}
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={isRefreshing}
+        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-[5px] border font-mono text-[11px] text-muted-foreground disabled:opacity-60"
+        style={{ borderColor: "var(--border)" }}
+      >
+        <RefreshCw
+          className={`w-3 h-3 ${isRefreshing ? "animate-spin" : ""}`}
+        />
+        refresh
+      </button>
     </div>
   );
 }
 
-function QueueView() {
-  const { data: queue, isLoading, error, refetch } = useDownloadQueue();
-
-  if (isLoading) {
-    return (
-      <div className="space-y-2">
-        {[0, 1, 2].map((i) => (
-          <Skeleton key={i} className="h-10" />
-        ))}
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <ErrorDisplay
-        error={error}
-        title="Unable to load download queue"
-        onRetry={() => refetch()}
-      />
-    );
-  }
-
-  if (!queue || queue.length === 0) {
-    return (
-      <EmptyState
-        variant="custom"
-        eyebrow="QUEUE · EMPTY"
-        title="No active downloads"
-        description="Downloads will appear here while items are being processed."
-      />
-    );
-  }
-
-  const gridTpl = "1.5fr 2fr 100px 110px 110px";
-
+function LoadingRows() {
   return (
-    <DenseTable
-      headers={["series", "file", "site", "status", "updated"]}
-      gridTemplate={gridTpl}
-    >
-      {queue.map((item: QueueItem) => (
-        <div
-          key={item.ID}
-          className="grid items-center px-4 py-2 text-[12px] border-b last:border-b-0"
-          style={{
-            borderColor: "var(--border-soft, var(--border))",
-            gridTemplateColumns: gridTpl,
-          }}
-        >
-          <div className="font-medium truncate">
-            {item.comicid ? (
-              <Link
-                to={`/library/${item.comicid}`}
-                className="hover:text-[var(--primary)]"
-              >
-                {item.series}
-                {item.year && (
-                  <span className="text-muted-foreground"> ({item.year})</span>
-                )}
-              </Link>
-            ) : (
-              <>
-                {item.series}
-                {item.year && (
-                  <span className="text-muted-foreground"> ({item.year})</span>
-                )}
-              </>
-            )}
-          </div>
-          <div className="font-mono text-[11px] text-muted-foreground truncate">
-            {item.filename || "—"}
-          </div>
-          <div className="text-muted-foreground truncate">
-            {item.site || "—"}
-          </div>
-          <StatusPill status={item.status} />
-          <div className="font-mono text-[11px] text-muted-foreground">
-            {item.updated_date || "—"}
-          </div>
-        </div>
+    <div className="px-5 py-4 space-y-2">
+      {[0, 1, 2].map((index) => (
+        <Skeleton key={index} className="h-11" />
       ))}
-    </DenseTable>
+    </div>
   );
 }
 
-function HistoryView() {
+function useActivityTableState(defaultSortId: string) {
   const [page, setPage] = useState(0);
-  const limit = 50;
-  const offset = page * limit;
-  const { data, isLoading, error, refetch } = useDownloadHistory(limit, offset);
-  const history = data?.history || [];
-  const pagination = data?.pagination;
+  const [search, setSearchState] = useState("");
+  const debouncedSearch = useDebounce(search, 400);
+  const [sorting, setSorting] = useState<SortingState>([
+    { id: defaultSortId, desc: true },
+  ]);
+  const activeSort = sorting[0] ?? { id: defaultSortId, desc: true };
 
-  if (isLoading) {
-    return (
-      <div className="space-y-2">
-        {[0, 1, 2].map((i) => (
-          <Skeleton key={i} className="h-10" />
-        ))}
-      </div>
+  const setSearch = (value: string) => {
+    setSearchState(value);
+    setPage(0);
+  };
+  const handleSortingChange = (updater: Updater<SortingState>) => {
+    setSorting((current) =>
+      typeof updater === "function" ? updater(current) : updater,
     );
-  }
+    setPage(0);
+  };
 
-  if (error) {
-    return (
-      <ErrorDisplay
-        error={error}
-        title="Unable to load download history"
-        onRetry={() => refetch()}
-      />
-    );
-  }
+  return {
+    page,
+    setPage,
+    search,
+    setSearch,
+    debouncedSearch,
+    sorting,
+    activeSort,
+    handleSortingChange,
+  };
+}
 
-  if (history.length === 0) {
-    return (
-      <EmptyState
-        variant="custom"
-        eyebrow="HISTORY · EMPTY"
-        title="No download history"
-        description="Completed downloads will appear here."
-      />
-    );
-  }
-
-  const gridTpl = "2fr 80px 160px 120px 120px";
-
+function ActivityTableView<TData>({
+  table,
+  rows,
+  pagination,
+  search,
+  onSearchChange,
+  filterLabel,
+  filterPlaceholder,
+  isLoading,
+  isFetching,
+  error,
+  errorTitle,
+  emptyEyebrow,
+  emptyTitle,
+  emptyDescription,
+  filteredTitle,
+  onRefresh,
+  onNextPage,
+  onPrevPage,
+}: {
+  table: TanstackTable<TData>;
+  rows: TData[];
+  pagination?: PaginationMeta;
+  search: string;
+  onSearchChange: (value: string) => void;
+  filterLabel: string;
+  filterPlaceholder: string;
+  isLoading: boolean;
+  isFetching: boolean;
+  error: Error | null;
+  errorTitle: string;
+  emptyEyebrow: string;
+  emptyTitle: string;
+  emptyDescription: string;
+  filteredTitle: string;
+  onRefresh: () => void;
+  onNextPage: () => void;
+  onPrevPage: () => void;
+}) {
   return (
-    <div className="space-y-3">
-      <div className="font-mono text-[11px] text-muted-foreground">
-        {pagination?.total || history.length} entries
-      </div>
-      <DenseTable
-        headers={["comic", "issue", "provider", "status", "date"]}
-        gridTemplate={gridTpl}
-      >
-        {history.map((item: HistoryItem, index: number) => (
-          <div
-            key={`${item.IssueID}-${item.Status}-${index}`}
-            className="grid items-center px-4 py-2 text-[12px] border-b last:border-b-0"
-            style={{
-              borderColor: "var(--border-soft, var(--border))",
-              gridTemplateColumns: gridTpl,
-            }}
-          >
-            <div className="font-medium truncate">
-              {item.ComicID ? (
-                <Link
-                  to={`/library/${item.ComicID}`}
-                  className="hover:text-[var(--primary)]"
-                >
-                  {item.ComicName}
-                </Link>
-              ) : (
-                item.ComicName
-              )}
-            </div>
-            <div className="font-mono text-[11px] text-muted-foreground">
-              {item.Issue_Number ? `#${item.Issue_Number}` : "—"}
-            </div>
-            <div className="text-muted-foreground truncate">
-              {item.Provider || "—"}
-            </div>
-            <StatusPill status={item.Status} />
-            <div className="font-mono text-[11px] text-muted-foreground">
-              {item.DateAdded || "—"}
-            </div>
-          </div>
-        ))}
-      </DenseTable>
-
-      {pagination && pagination.total > limit && (
-        <div
-          className="flex items-center justify-between pt-3 border-t font-mono text-[11px] text-muted-foreground"
-          style={{ borderColor: "var(--border)" }}
-        >
-          <button
-            type="button"
-            className="px-2.5 py-1 rounded border disabled:opacity-50"
-            style={{ borderColor: "var(--border)" }}
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            disabled={page === 0}
-          >
-            ← prev
-          </button>
-          <span>
-            page {page + 1} / {Math.ceil(pagination.total / limit)}
-          </span>
-          <button
-            type="button"
-            className="px-2.5 py-1 rounded border disabled:opacity-50"
-            style={{ borderColor: "var(--border)" }}
-            onClick={() => setPage((p) => p + 1)}
-            disabled={!pagination.has_more}
-          >
-            next →
-          </button>
+    <>
+      <ActivityToolbar
+        value={search}
+        onChange={onSearchChange}
+        label={filterLabel}
+        placeholder={filterPlaceholder}
+        isRefreshing={isFetching}
+        onRefresh={onRefresh}
+      />
+      {isLoading && <LoadingRows />}
+      {error && (
+        <div className="px-5 py-4">
+          <ErrorDisplay error={error} title={errorTitle} onRetry={onRefresh} />
         </div>
       )}
-    </div>
+      {!isLoading && !error && rows.length === 0 && (
+        <div className="px-5 py-4">
+          <EmptyState
+            variant="custom"
+            eyebrow={
+              search ? `${emptyEyebrow} · FILTERED` : `${emptyEyebrow} · EMPTY`
+            }
+            title={search ? filteredTitle : emptyTitle}
+            description={search ? "Try a different filter." : emptyDescription}
+            action={
+              pagination && pagination.offset > 0
+                ? {
+                    label: "Previous",
+                    onClick: onPrevPage,
+                    variant: "outline",
+                  }
+                : undefined
+            }
+          />
+        </div>
+      )}
+      {!isLoading && !error && pagination && rows.length > 0 && (
+        <div className="overflow-hidden border-b border-border">
+          <DataTable table={table} />
+          <DataTableServerPagination
+            pagination={pagination}
+            onNextPage={onNextPage}
+            onPrevPage={onPrevPage}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+const queueColumnHelper = createColumnHelper<QueueItem>();
+
+function QueueView() {
+  const {
+    page,
+    setPage,
+    search,
+    setSearch,
+    debouncedSearch,
+    sorting,
+    activeSort,
+    handleSortingChange,
+  } = useActivityTableState("updated");
+  const { data, isLoading, isFetching, error, refetch } = useDownloadQueue({
+    limit: PAGE_SIZE,
+    offset: page * PAGE_SIZE,
+    q: debouncedSearch,
+    sort: activeSort.id,
+    order: activeSort.desc ? "desc" : "asc",
+  });
+  const queue = data?.queue ?? [];
+
+  const columns = useMemo(
+    () => [
+      queueColumnHelper.accessor("series", {
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Series" />
+        ),
+        cell: ({ row }) => {
+          const content = (
+            <>
+              {row.original.series || "—"}
+              {row.original.year && (
+                <span className="text-muted-foreground">
+                  {" "}
+                  ({row.original.year})
+                </span>
+              )}
+            </>
+          );
+          return row.original.comicid ? (
+            <Link
+              to={`/library/${row.original.comicid}`}
+              className="font-medium hover:text-[var(--primary)]"
+            >
+              {content}
+            </Link>
+          ) : (
+            <span className="font-medium">{content}</span>
+          );
+        },
+      }),
+      queueColumnHelper.accessor("filename", {
+        id: "file",
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="File" />
+        ),
+        cell: ({ getValue }) => (
+          <span className="font-mono text-[11px] text-muted-foreground">
+            {getValue() || "—"}
+          </span>
+        ),
+      }),
+      queueColumnHelper.accessor("site", {
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Site" />
+        ),
+        cell: ({ getValue }) => (
+          <span className="text-muted-foreground">{getValue() || "—"}</span>
+        ),
+      }),
+      queueColumnHelper.accessor("status", {
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Status" />
+        ),
+        cell: ({ getValue }) => <StatusPill status={getValue()} />,
+      }),
+      queueColumnHelper.accessor("updated_date", {
+        id: "updated",
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Updated" />
+        ),
+        cell: ({ getValue }) => <RelativeTime value={getValue()} />,
+      }),
+    ],
+    [],
+  );
+
+  const table = useReactTable({
+    data: queue,
+    columns,
+    state: { sorting },
+    onSortingChange: handleSortingChange,
+    getCoreRowModel: getCoreRowModel(),
+    manualSorting: true,
+    enableSortingRemoval: false,
+    getRowId: (row) => row.ID,
+  });
+
+  return (
+    <ActivityTableView
+      table={table}
+      rows={queue}
+      pagination={data?.pagination}
+      search={search}
+      onSearchChange={setSearch}
+      filterLabel="Filter queue activity"
+      filterPlaceholder="Filter by series, file, site, or status…"
+      isLoading={isLoading}
+      isFetching={isFetching}
+      error={error}
+      errorTitle="Unable to load download queue"
+      emptyEyebrow="QUEUE"
+      emptyTitle="No active downloads"
+      emptyDescription="Queued, downloading, and failed items will appear here."
+      filteredTitle="No matching queue items"
+      onRefresh={() => void refetch()}
+      onNextPage={() => setPage((current) => current + 1)}
+      onPrevPage={() => setPage((current) => Math.max(0, current - 1))}
+    />
+  );
+}
+
+const historyColumnHelper = createColumnHelper<HistoryItem>();
+
+function HistoryView() {
+  const {
+    page,
+    setPage,
+    search,
+    setSearch,
+    debouncedSearch,
+    sorting,
+    activeSort,
+    handleSortingChange,
+  } = useActivityTableState("date");
+  const { data, isLoading, isFetching, error, refetch } = useDownloadHistory({
+    limit: PAGE_SIZE,
+    offset: page * PAGE_SIZE,
+    q: debouncedSearch,
+    sort: activeSort.id,
+    order: activeSort.desc ? "desc" : "asc",
+  });
+  const history = data?.history ?? [];
+
+  const columns = useMemo(
+    () => [
+      historyColumnHelper.accessor("ComicName", {
+        id: "series",
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Series" />
+        ),
+        cell: ({ row }) =>
+          row.original.ComicID ? (
+            <Link
+              to={`/library/${row.original.ComicID}`}
+              className="font-medium hover:text-[var(--primary)]"
+            >
+              {row.original.ComicName || "—"}
+            </Link>
+          ) : (
+            <span className="font-medium">{row.original.ComicName || "—"}</span>
+          ),
+      }),
+      historyColumnHelper.accessor("Issue_Number", {
+        id: "issue",
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Issue" />
+        ),
+        cell: ({ getValue }) => (
+          <span className="font-mono text-[11px] text-muted-foreground">
+            {getValue() ? `#${getValue()}` : "—"}
+          </span>
+        ),
+      }),
+      historyColumnHelper.accessor("Provider", {
+        id: "provider",
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Provider" />
+        ),
+        cell: ({ getValue }) => (
+          <span className="text-muted-foreground">{getValue() || "—"}</span>
+        ),
+      }),
+      historyColumnHelper.accessor("Status", {
+        id: "status",
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Status" />
+        ),
+        cell: ({ getValue }) => <StatusPill status={getValue()} />,
+      }),
+      historyColumnHelper.accessor("DateAdded", {
+        id: "date",
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} title="Date" />
+        ),
+        cell: ({ getValue }) => <RelativeTime value={getValue()} />,
+      }),
+    ],
+    [],
+  );
+
+  const table = useReactTable({
+    data: history,
+    columns,
+    state: { sorting },
+    onSortingChange: handleSortingChange,
+    getCoreRowModel: getCoreRowModel(),
+    manualSorting: true,
+    enableSortingRemoval: false,
+    getRowId: (row, index) => `${row.IssueID}-${row.Status}-${index}`,
+  });
+
+  return (
+    <ActivityTableView
+      table={table}
+      rows={history}
+      pagination={data?.pagination}
+      search={search}
+      onSearchChange={setSearch}
+      filterLabel="Filter download history"
+      filterPlaceholder="Filter by series, issue, provider, status, or file…"
+      isLoading={isLoading}
+      isFetching={isFetching}
+      error={error}
+      errorTitle="Unable to load download history"
+      emptyEyebrow="HISTORY"
+      emptyTitle="No download history"
+      emptyDescription="Download events will appear here."
+      filteredTitle="No matching history"
+      onRefresh={() => void refetch()}
+      onNextPage={() => setPage((current) => current + 1)}
+      onPrevPage={() => setPage((current) => Math.max(0, current - 1))}
+    />
   );
 }

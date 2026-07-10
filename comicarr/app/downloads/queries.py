@@ -13,7 +13,7 @@ Downloads domain queries — snatched history, DDL queue, nzblog, failed.
 Uses SQLAlchemy Core via the existing db module.
 """
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 
 from comicarr import db
 from comicarr.app.core.database import paginated_query as _paginated_query
@@ -28,9 +28,50 @@ from comicarr.tables import snatched as t_snatched
 # ---------------------------------------------------------------------------
 
 
-def get_history(limit=None, offset=None):
-    """Get download history ordered by date, optionally paginated."""
-    stmt = select(t_snatched).order_by(t_snatched.c.DateAdded.desc())
+def _apply_activity_filters(stmt, status_column, search=None, status=None, search_columns=()):
+    if search:
+        pattern = "%%%s%%" % search.strip().lower()
+        stmt = stmt.where(or_(*[column.ilike(pattern) for column in search_columns]))
+    if status:
+        stmt = stmt.where(func.lower(func.coalesce(status_column, "")) == status.strip().lower())
+    return stmt
+
+
+def _apply_activity_sort(stmt, sort, order, allowed_columns, default_column, tie_breaker):
+    sort_column = allowed_columns.get(sort, default_column)
+    direction = sort_column.asc() if str(order).lower() == "asc" else sort_column.desc()
+    return stmt.order_by(direction, tie_breaker.desc())
+
+
+def get_history(limit=None, offset=None, search=None, status=None, sort=None, order="desc"):
+    """Get searchable, sortable download history, optionally paginated."""
+    stmt = _apply_activity_filters(
+        select(t_snatched),
+        t_snatched.c.Status,
+        search=search,
+        status=status,
+        search_columns=(
+            t_snatched.c.ComicName,
+            t_snatched.c.Issue_Number,
+            t_snatched.c.Provider,
+            t_snatched.c.Status,
+            t_snatched.c.FolderName,
+        ),
+    )
+    stmt = _apply_activity_sort(
+        stmt,
+        sort,
+        order,
+        {
+            "series": t_snatched.c.ComicName,
+            "issue": t_snatched.c.Issue_Number,
+            "provider": t_snatched.c.Provider,
+            "status": t_snatched.c.Status,
+            "date": t_snatched.c.DateAdded,
+        },
+        t_snatched.c.DateAdded,
+        t_snatched.c.IssueID,
+    )
     if limit is not None:
         return _paginated_query(stmt, limit=limit, offset=offset)
     return db.select_all(stmt)
@@ -48,10 +89,55 @@ def clear_history(status_type=None):
 # DDL queue
 # ---------------------------------------------------------------------------
 
+ACTIVE_DDL_STATUSES = ("Queued", "Downloading", "Failed")
 
-def get_ddl_queue():
-    """Get all DDL queue items ordered by submit date."""
-    stmt = select(t_ddl_info).order_by(t_ddl_info.c.submit_date.desc())
+
+def active_ddl_condition():
+    """Return the shared predicate for queue rows that still need attention."""
+    return or_(
+        t_ddl_info.c.status.is_(None),
+        t_ddl_info.c.status.in_(ACTIVE_DDL_STATUSES),
+    )
+
+
+def count_active_ddl_items():
+    stmt = select(func.count().label("queue_count")).select_from(t_ddl_info).where(active_ddl_condition())
+    row = db.select_one(stmt)
+    return (row or {}).get("queue_count", 0) or 0
+
+
+def get_ddl_queue(limit=None, offset=None, search=None, status=None, sort=None, order="desc"):
+    """Get active DDL queue items with search, sorting, and pagination."""
+    stmt = select(t_ddl_info).where(active_ddl_condition())
+    stmt = _apply_activity_filters(
+        stmt,
+        t_ddl_info.c.status,
+        search=search,
+        status=status,
+        search_columns=(
+            t_ddl_info.c.series,
+            t_ddl_info.c.filename,
+            t_ddl_info.c.site,
+            t_ddl_info.c.status,
+        ),
+    )
+    stmt = _apply_activity_sort(
+        stmt,
+        sort,
+        order,
+        {
+            "series": t_ddl_info.c.series,
+            "file": t_ddl_info.c.filename,
+            "site": t_ddl_info.c.site,
+            "status": t_ddl_info.c.status,
+            "updated": t_ddl_info.c.updated_date,
+            "submitted": t_ddl_info.c.submit_date,
+        },
+        t_ddl_info.c.updated_date,
+        t_ddl_info.c.ID,
+    )
+    if limit is not None:
+        return _paginated_query(stmt, limit=limit, offset=offset)
     return db.select_all(stmt)
 
 

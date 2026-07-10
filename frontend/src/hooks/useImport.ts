@@ -175,6 +175,9 @@ export function useMangaScan(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    onMutate: () => {
+      queryClient.removeQueries({ queryKey: ["mangaScanProgress"] });
+    },
     mutationFn: () =>
       apiRequest<MangaScanResponse>("POST", "/api/import/manga/scan"),
     onSuccess: () => {
@@ -238,6 +241,9 @@ export function useComicScan(): UseMutationResult<
 > {
   const queryClient = useQueryClient();
   return useMutation({
+    onMutate: () => {
+      queryClient.removeQueries({ queryKey: ["comicScanProgress"] });
+    },
     mutationFn: () =>
       apiRequest<ComicScanResponse>("POST", "/api/import/comic/scan"),
     onSuccess: () => {

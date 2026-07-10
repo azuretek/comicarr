@@ -40,7 +40,7 @@ def get_dialect():
 
 def paginated_query(stmt, limit=None, offset=None):
     """Execute a statement with optional pagination. Returns dict with results/total/has_more."""
-    count_stmt = select(func.count()).select_from(stmt.subquery())
+    count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
     with db.get_engine().connect() as conn:
         total = conn.execute(count_stmt).scalar() or 0
 

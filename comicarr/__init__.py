@@ -1302,6 +1302,7 @@ def _ensure_columns(engine, table_name, required_columns):
 
 def dbcheck():
     from comicarr.db import get_engine
+    from comicarr.tables import ddl_info_status_updated
     from comicarr.tables import metadata as sa_metadata
 
     engine = get_engine()
@@ -1602,6 +1603,9 @@ def dbcheck():
         ("packinfo", "TEXT"),
     ]
     _ensure_columns(engine, "ddl_info", ddl_cols)
+    # create_all does not add indexes to existing tables. Create this only
+    # after legacy schemas have the indexed updated_date column.
+    ddl_info_status_updated.create(engine, checkfirst=True)
 
     # -- Provider_searches Table --
     _ensure_columns(engine, "provider_searches", [("id", "INTEGER"), ("hits", "INTEGER DEFAULT 0")])
