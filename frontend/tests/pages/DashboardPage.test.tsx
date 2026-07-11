@@ -8,10 +8,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLocation } from "react-router-dom";
 import { server } from "../mocks/server";
 import { http, HttpResponse } from "msw";
 import { createTestQueryClient, render, screen } from "../test-utils";
 import DashboardPage from "@/pages/DashboardPage";
+
+function LocationProbe() {
+  return <div data-testid="location">{useLocation().pathname}</div>;
+}
 
 describe("DashboardPage", () => {
   beforeEach(() => {
@@ -95,7 +100,13 @@ describe("DashboardPage", () => {
     );
 
     const user = userEvent.setup();
-    render(<DashboardPage />, { queryClient });
+    render(
+      <>
+        <DashboardPage />
+        <LocationProbe />
+      </>,
+      { queryClient, route: "/", useMemoryRouter: true },
+    );
     const scanButton = await screen.findByRole("button", {
       name: "Scan libraries",
     });
@@ -113,6 +124,7 @@ describe("DashboardPage", () => {
         .getByRole("button", { name: "Scanning…" })
         .hasAttribute("disabled"),
     ).toBe(true);
+    expect(screen.getByTestId("location").textContent).toBe("/import");
   });
 
   it("reports a partial library scan startup failure", async () => {

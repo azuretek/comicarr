@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "../mocks/server";
 import { render, screen } from "../test-utils";
@@ -55,6 +56,149 @@ function makeGroup(overrides: Partial<ImportGroup> = {}): ImportGroup {
 }
 
 describe("ImportPage", () => {
+  it("hydrates and displays a comic scan started from another page", async () => {
+    server.use(
+      http.get("/api/import/comic/progress", () =>
+        HttpResponse.json({
+          status: "scanning",
+          progress: {
+            series_found: 12,
+            series_matched: 8,
+            current_series: "Absolute Batman",
+          },
+          scan_id: null,
+          results: null,
+        }),
+      ),
+    );
+
+    render(<ImportPage />);
+
+    expect(await screen.findByText("Absolute Batman")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "scanning" })).toBeTruthy();
+  });
+
+  it("keeps a background comic scan failure visible", async () => {
+    server.use(
+      http.get("/api/import/comic/progress", () =>
+        HttpResponse.json({
+          status: "error",
+          progress: { errors: ["ComicVine is unavailable"] },
+          scan_id: null,
+          results: null,
+        }),
+      ),
+    );
+
+    render(<ImportPage />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Comic library scan failed: ComicVine is unavailable",
+    );
+  });
+
+  it("clears imported manga results and keeps a durable success summary", async () => {
+    let scanStarted = false;
+    let confirmed = false;
+    server.use(
+      http.get("/api/import/manga/progress", () =>
+        HttpResponse.json({
+          status: scanStarted ? "completed" : null,
+          progress: {},
+          scan_id: scanStarted && !confirmed ? "scan-1" : null,
+          results:
+            scanStarted && !confirmed
+              ? [
+                  {
+                    series_name: "Berserk",
+                    file_count: 42,
+                    matched: true,
+                    match: {
+                      comicid: "mal-33",
+                      name: "Berserk",
+                      year: "1989",
+                      confidence: 100,
+                      source: "mal",
+                    },
+                  },
+                ]
+              : null,
+        }),
+      ),
+      http.post("/api/import/manga/scan", () => {
+        scanStarted = true;
+        return HttpResponse.json({ success: true, message: "started" });
+      }),
+      http.post("/api/import/manga/confirm", () => {
+        confirmed = true;
+        return HttpResponse.json({ success: true, imported: 1, errors: [] });
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<ImportPage />);
+
+    const scanButtons = await screen.findAllByRole("button", { name: "scan" });
+    await user.click(scanButtons[1]);
+    await user.click(
+      await screen.findByRole("button", { name: "Import Selected (1)" }),
+    );
+
+    expect((await screen.findByRole("status")).textContent).toContain(
+      "Imported 1 manga series",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Import Selected (1)" }),
+    ).toBeNull();
+  });
+
+  it("clears imported comic results with the comic progress key", async () => {
+    let confirmed = false;
+    server.use(
+      http.get("/api/import/comic/progress", () =>
+        HttpResponse.json({
+          status: "completed",
+          progress: {},
+          scan_id: confirmed ? null : "scan-1",
+          results: confirmed
+            ? null
+            : [
+                {
+                  series_name: "Absolute Batman",
+                  file_count: 22,
+                  matched: true,
+                  match: {
+                    comicid: "160294",
+                    name: "Absolute Batman",
+                    year: "2024",
+                    publisher: "DC Comics",
+                    confidence: 100,
+                  },
+                },
+              ],
+        }),
+      ),
+      http.post("/api/import/comic/confirm", () => {
+        confirmed = true;
+        return HttpResponse.json({ success: true, imported: 1, errors: [] });
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<ImportPage />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Import Selected (1)" }),
+    );
+
+    expect((await screen.findByRole("status")).textContent).toContain(
+      "Imported 1 comic series",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Import Selected (1)" }),
+    ).toBeNull();
+  });
+
   it("puts pending review before sources and scans when imports exist", async () => {
     server.use(
       http.get("/api/import", () =>
