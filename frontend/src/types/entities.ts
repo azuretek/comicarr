@@ -258,6 +258,7 @@ export interface SearchRun {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  queue_priority: "interactive" | "routine" | "recovery";
 }
 
 export interface SearchRunItem {
@@ -268,6 +269,8 @@ export interface SearchRunItem {
   reason: string | null;
   updated_at: string;
   completed_at: string | null;
+  queue_priority: "interactive" | "routine" | "recovery";
+  attempt_status: "queued" | "searching" | SearchRunItemState;
 }
 
 export interface SearchRunResult {

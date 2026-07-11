@@ -804,80 +804,28 @@ def search_init(
 
 
 def provider_order(initial_run=False):
-    torprovider = []
-    torp = 0
-    torznabs = 0
-    torznab_hosts = []
+    from comicarr.app.search.providers import effective_provider_plan, runtime_provider_entry
+
+    plan = effective_provider_plan(comicarr.CONFIG, is_blocked=helpers.block_provider_check)
+    tor_candidates = [
+        candidate for candidate in plan if candidate.kind in {"torznab", "torrent"} and not candidate.blocked
+    ]
+    nzb_candidates = [
+        candidate for candidate in plan if candidate.kind in {"newznab", "experimental"} and not candidate.blocked
+    ]
+    ddl_candidates = [candidate for candidate in plan if candidate.kind == "ddl" and not candidate.blocked]
+
+    torp = sum(1 for candidate in tor_candidates if candidate.kind == "torrent")
+    torznabs = sum(1 for candidate in tor_candidates if candidate.kind == "torznab")
+    nzbp = sum(1 for candidate in nzb_candidates if candidate.kind == "experimental")
+    newznabs = sum(1 for candidate in nzb_candidates if candidate.kind == "newznab")
+    ddls = len(ddl_candidates)
 
     if initial_run:
-        logger.fdebug("Checking for torrent enabled.")
-    if comicarr.CONFIG.ENABLE_TORRENT_SEARCH:
-        if comicarr.CONFIG.ENABLE_32P and not helpers.block_provider_check("32P"):
-            torprovider.append("32p")
-            torp += 1
-        if comicarr.CONFIG.ENABLE_PUBLIC and not helpers.block_provider_check("public torrents"):
-            torprovider.append("public torrents")
-            torp += 1
-        if comicarr.CONFIG.ENABLE_TORZNAB is True:
-            for torznab_host in comicarr.CONFIG.EXTRA_TORZNABS:
-                if any([torznab_host[5] == "1", torznab_host[5] == 1]):
-                    if not helpers.block_provider_check(torznab_host[0]):
-                        torznab_hosts.append(torznab_host)
-                        torprovider.append("torznab: %s" % torznab_host[0])
-                        torznabs += 1
-
-    # nzb provider selection##
-    nzbprovider = []
-    nzbp = 0
-    # --------
-    #  Xperimental
-    if comicarr.CONFIG.EXPERIMENTAL is True and not helpers.block_provider_check("experimental"):
-        nzbprovider.append("experimental")
-        nzbp += 1
-
-    newznabs = 0
-
-    newznab_hosts = []
-
-    if comicarr.CONFIG.NEWZNAB is True:
-        for newznab_host in comicarr.CONFIG.EXTRA_NEWZNABS:
-            if any([newznab_host[5] == "1", newznab_host[5] == 1]):
-                if not helpers.block_provider_check(newznab_host[0]):
-                    newznab_hosts.append(newznab_host)
-                    nzbprovider.append("newznab: %s" % newznab_host[0])
-                    newznabs += 1
-
-    ddls = 0
-    ddlprovider = []
-
-    if comicarr.CONFIG.ENABLE_DDL is True:
-        if all(
-            [
-                comicarr.CONFIG.ENABLE_GETCOMICS is True,
-                not helpers.block_provider_check("DDL(GetComics)"),
-            ]
-        ):
-            ddlprovider.append("DDL(GetComics)")
-            ddls += 1
-
-        if all(
-            [
-                comicarr.CONFIG.ENABLE_EXTERNAL_SERVER is True,
-                not helpers.block_provider_check("DDL(External)"),
-            ]
-        ):
-            ddlprovider.append("DDL(External)")
-            ddls += 1
-
-    if initial_run:
-        logger.fdebug("nzbprovider(s): %s" % nzbprovider)
-    # --------
+        logger.fdebug("nzbprovider(s): %s" % [candidate.execution_name for candidate in nzb_candidates])
     torproviders = torp + torznabs
     if initial_run:
         logger.fdebug("There are %s torrent providers you have selected." % torproviders)
-    torpr = torproviders - 1
-    if torpr < 0:
-        torpr = -1
     providercount = int(nzbp + newznabs)
     if initial_run:
         logger.fdebug("There are : %s nzb providers you have selected" % providercount)
@@ -889,9 +837,18 @@ def provider_order(initial_run=False):
 
     totalproviders = providercount + torproviders + ddls
 
-    prov_order, torznab_info, newznab_info = provider_sequence(
-        nzbprovider, torprovider, newznab_hosts, torznab_hosts, ddlprovider
-    )
+    active_plan = [candidate for candidate in plan if not candidate.blocked]
+    prov_order = [candidate.execution_name for candidate in active_plan]
+    torznab_info = [
+        {"provider": candidate.execution_name, "info": runtime_provider_entry(candidate)}
+        for candidate in active_plan
+        if candidate.kind == "torznab"
+    ]
+    newznab_info = [
+        {"provider": candidate.execution_name, "info": runtime_provider_entry(candidate)}
+        for candidate in active_plan
+        if candidate.kind == "newznab"
+    ]
     # if initial_run:
     #    logger.fdebug('search provider order is %s' % prov_order)
 
@@ -2913,67 +2870,6 @@ def searchIssueIDList(issuelist):
         logger.warn(
             "There are no search providers enabled atm - not performing the requested search for obvious reasons"
         )
-
-
-def provider_sequence(nzbprovider, torprovider, newznab_hosts, torznab_hosts, ddlprovider):
-    # provider order sequencing here.
-    newznab_info = []
-    torznab_info = []
-    prov_order = []
-
-    nzbproviders_lower = [x.lower() for x in nzbprovider]
-    torproviders_lower = [y.lower() for y in torprovider]
-    ddlproviders_lower = [z.lower() for z in ddlprovider]
-
-    if len(comicarr.CONFIG.PROVIDER_ORDER) > 0:
-        for pr_order in sorted(comicarr.CONFIG.PROVIDER_ORDER.items(), key=itemgetter(0), reverse=False):
-            if (
-                any(pr_order[1].lower() in y for y in torproviders_lower)
-                or any(pr_order[1].lower() in x for x in nzbproviders_lower)
-                or any(pr_order[1].lower() == z for z in ddlproviders_lower)
-            ):
-                if any(pr_order[1].lower() in x for x in nzbproviders_lower):
-                    # this is for nzb providers
-                    for np in nzbprovider:
-                        if all(["newznab" in np, pr_order[1].lower() in np.lower()]):
-                            for newznab_host in newznab_hosts:
-                                if newznab_host[0].lower() == pr_order[1].lower():
-                                    prov_order.append(np)
-                                    newznab_info.append({"provider": np, "info": newznab_host})
-                                    break
-                                else:
-                                    if newznab_host[0] == "":
-                                        if newznab_host[1].lower() == pr_order[1].lower():
-                                            prov_order.append(np)
-                                            newznab_info.append({"provider": np, "info": newznab_host})
-                                            break
-                        elif pr_order[1].lower() in np.lower():
-                            prov_order.append(pr_order[1])
-                            break
-                elif any(pr_order[1].lower() in y for y in torproviders_lower):
-                    for tp in torprovider:
-                        if all(["torznab" in tp, pr_order[1].lower() in tp.lower()]):
-                            for torznab_host in torznab_hosts:
-                                if torznab_host[0].lower() == pr_order[1].lower():
-                                    prov_order.append(tp)
-                                    torznab_info.append({"provider": tp, "info": torznab_host})
-                                    break
-                                else:
-                                    if torznab_host[0] == "":
-                                        if torznab_host[1].lower() == pr_order[1].lower():
-                                            prov_order.append(tp)
-                                            torznab_info.append({"provider": tp, "info": torznab_host})
-                                            break
-                        elif pr_order[1].lower() in tp.lower():
-                            prov_order.append(pr_order[1])
-                            break
-                elif any(pr_order[1].lower() == z for z in ddlproviders_lower):
-                    for dd in ddlprovider:
-                        if dd.lower() == pr_order[1].lower():
-                            prov_order.append(pr_order[1])
-                            break
-
-    return prov_order, torznab_info, newznab_info
 
 
 def nzbname_create(provider, title=None, info=None):

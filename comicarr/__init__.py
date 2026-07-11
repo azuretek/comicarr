@@ -60,6 +60,7 @@ from comicarr import (
     versioncheckit,
     weeklypullit,
 )
+from comicarr.app.search.queue import FairSearchQueue
 
 
 class ThreadSafeLock:
@@ -245,7 +246,7 @@ DDLPOOL = None
 SNATCHED_QUEUE = queue.Queue()
 NZB_QUEUE = queue.Queue()
 PP_QUEUE = queue.Queue()
-SEARCH_QUEUE = queue.Queue()
+SEARCH_QUEUE = FairSearchQueue()
 DDL_QUEUE = queue.Queue()
 RETURN_THE_NZBQUEUE = queue.Queue()
 MASS_ADD = None

@@ -41,7 +41,7 @@ from comicarr.tables import (
 )
 
 SCHEMA_COMPONENT = "acquisition"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 CONTROL_ID = "acquisition"
 RECONCILIATION_CONTROL_ID = "migration-reconciliation"
 
@@ -230,6 +230,19 @@ def _add_item_dispatch_state_column(engine):
         )
 
 
+def _add_item_queue_priority_column(engine):
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("acquisition_run_items")}
+    if "queue_priority" in columns:
+        return
+    quoted_table = engine.dialect.identifier_preparer.quote("acquisition_run_items")
+    quoted_column = engine.dialect.identifier_preparer.quote("queue_priority")
+    with engine.begin() as conn:
+        conn.execute(
+            text("ALTER TABLE %s ADD COLUMN %s VARCHAR(16) NOT NULL DEFAULT 'routine'" % (quoted_table, quoted_column))
+        )
+
+
 def _ensure_control_row(engine):
     with engine.begin() as conn:
         existing = conn.execute(
@@ -366,6 +379,10 @@ def _apply_schema_v5(engine):
     _add_item_dispatch_state_column(engine)
 
 
+def _apply_schema_v6(engine):
+    _add_item_queue_priority_column(engine)
+
+
 def _version_tables(target_version):
     tables = list(_BASE_SCHEMA_TABLES)
     if target_version >= 2:
@@ -404,6 +421,8 @@ def _verify_schema(engine, target_version=SCHEMA_VERSION):
     }
     if target_version < 5:
         required_columns["acquisition_run_items"].discard("dispatch_state")
+    if target_version < 6:
+        required_columns["acquisition_run_items"].discard("queue_priority")
     missing_columns = []
     for table_name, expected in required_columns.items():
         actual = {column["name"] for column in inspector.get_columns(table_name)}
@@ -512,6 +531,16 @@ def ensure_acquisition_schema(engine=None):
                     )
                 )
             version = 5
+        if version < 6:
+            _apply_schema_v6(engine)
+            _verify_schema(engine, target_version=6)
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(acquisition_schema_versions).values(
+                        component=SCHEMA_COMPONENT, version=6, applied_at=_utcnow()
+                    )
+                )
+            version = 6
         _verify_schema(engine, target_version=SCHEMA_VERSION)
         status = SchemaStatus(True, version, None)
     except Exception as e:

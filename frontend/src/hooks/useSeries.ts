@@ -110,10 +110,7 @@ export function useSearchRun(
   return useQuery({
     queryKey: ["search-run", runId],
     queryFn: () =>
-      apiRequest<SearchRunResult>(
-        "GET",
-        `/api/search/runs/${runId}?include_items=false`,
-      ),
+      apiRequest<SearchRunResult>("GET", `/api/search/runs/${runId}`),
     enabled: Boolean(runId),
     refetchInterval: (query) => {
       const completionState = query.state.data?.run.completion_state;

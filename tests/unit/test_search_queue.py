@@ -27,6 +27,7 @@ from comicarr.app.search.commands import (
     evaluate_search_candidate,
     replay_search_obligations,
 )
+from comicarr.app.search.queue import FairSearchQueue
 from comicarr.app.series import queries as series_queries
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import annuals, comics, issues, metadata
@@ -80,6 +81,58 @@ def _configure_worker(monkeypatch):
 
 def _command(issue_id="issue-1"):
     return {"comicid": "comic-1", "issueid": issue_id, "manual": False}
+
+
+def test_fair_search_queue_prioritizes_operator_work_without_starving_recovery():
+    work = FairSearchQueue(interactive_burst=3)
+    work.put({**_command("recovered"), "queue_priority": "recovery"})
+    for issue_id in ("interactive-1", "interactive-2", "interactive-3", "interactive-4"):
+        work.put({**_command(issue_id), "queue_priority": "interactive"})
+
+    assert [work.get_nowait()["issueid"] for _ in range(5)] == [
+        "interactive-1",
+        "interactive-2",
+        "interactive-3",
+        "recovered",
+        "interactive-4",
+    ]
+
+
+def test_fair_search_queue_services_recovery_during_a_routine_backlog():
+    work = FairSearchQueue(interactive_burst=3)
+    work.put({**_command("recovered"), "queue_priority": "recovery"})
+    for issue_id in ("routine-1", "routine-2", "routine-3", "routine-4"):
+        work.put({**_command(issue_id), "queue_priority": "routine"})
+
+    assert [work.get_nowait()["issueid"] for _ in range(4)] == [
+        "routine-1",
+        "routine-2",
+        "routine-3",
+        "recovered",
+    ]
+
+
+def test_fair_search_queue_prioritizes_shutdown_after_current_command():
+    work = FairSearchQueue()
+    work.put({**_command("requeued"), "queue_priority": "interactive"})
+    work.put("exit")
+
+    assert work.get_nowait() == "exit"
+
+
+def test_replayed_search_commands_are_marked_lower_priority(acquisition_ledger):
+    acquisition_ledger.create_run("replay-priority", "search", "wanted_scan")
+    acquisition_ledger.accept_item(
+        "replay-priority",
+        "issue",
+        "issue-1",
+        payload={"comicid": "comic-1", "issueid": "issue-1", "manual": False},
+    )
+    work = FairSearchQueue()
+
+    assert replay_search_obligations(work_queue=work, ledger=acquisition_ledger) == 1
+    assert work.get_nowait()["queue_priority"] == "recovery"
+    assert acquisition_ledger.get_item("replay-priority", "issue", "issue-1")["queue_priority"] == "recovery"
 
 
 def test_unlocked_command_reaches_provider_search_once(monkeypatch):

@@ -135,7 +135,7 @@ class RunLedger:
             raise KeyError("unknown acquisition run %s" % run_id)
         return run
 
-    def accept_item(self, run_id, entity_type, entity_id, payload=None, command_kind=None):
+    def accept_item(self, run_id, entity_type, entity_id, payload=None, command_kind=None, queue_priority="routine"):
         run = self._require_run(run_id)
         if run["completion_state"] not in {RunState.PENDING.value, RunState.RUNNING.value}:
             raise ValueError("terminal acquisition runs cannot accept new items")
@@ -151,6 +151,7 @@ class RunLedger:
             "entity_id": str(entity_id),
             "state": ItemOutcome.ACCEPTED.value,
             "dispatch_state": DispatchState.PENDING.value,
+            "queue_priority": str(queue_priority),
             "payload_json": encoded,
             "attempt_count": 0,
             "next_attempt_at": None,
@@ -179,6 +180,19 @@ class RunLedger:
                         .values(payload_json=encoded, updated_at=now)
                     )
         self.reconcile(run_id)
+        return self.get_item(run_id, entity_type, entity_id)
+
+    def set_item_queue_priority(self, run_id, entity_type, entity_id, queue_priority):
+        item = self.get_item(run_id, entity_type, entity_id)
+        if item is None:
+            raise KeyError("unknown acquisition item")
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(acquisition_run_items)
+                .where(acquisition_run_items.c.item_id == item["item_id"])
+                .where(acquisition_run_items.c.state.in_([ItemOutcome.ACCEPTED.value, ItemOutcome.RUNNING.value]))
+                .values(queue_priority=str(queue_priority), updated_at=_utcnow())
+            )
         return self.get_item(run_id, entity_type, entity_id)
 
     def get_item(self, run_id, entity_type, entity_id):

@@ -16,6 +16,7 @@ from typing import Any, Mapping
 import comicarr
 from comicarr.app.acquisition.models import DispatchState, ItemOutcome
 from comicarr.app.acquisition.policy import EligibilityInput, evaluate_eligibility, project_legacy_state
+from comicarr.app.search.queue import INTERACTIVE, RECOVERY, ROUTINE
 
 
 class SearchCommandError(ValueError):
@@ -76,6 +77,25 @@ def _entity_type(value: Any) -> str:
     return normalized
 
 
+def _queue_priority(value: Any) -> str:
+    priority = str(value or ROUTINE).strip().lower()
+    if priority not in {INTERACTIVE, ROUTINE, RECOVERY}:
+        raise SearchCommandError("Invalid search queue priority")
+    return priority
+
+
+def queue_priority_for_trigger(trigger: str, *, manual: bool = False) -> str:
+    """Map durable intent to the in-memory fairness class."""
+    if manual or str(trigger).strip().lower() in {
+        "manual_wanted_scan",
+        "search_all_missing",
+        "issue_wanted",
+        "storyarc_wanted",
+    }:
+        return INTERACTIVE
+    return ROUTINE
+
+
 @dataclass(frozen=True)
 class SearchCommand:
     """The stable identity and display context for one issue search."""
@@ -89,6 +109,7 @@ class SearchCommand:
     issuenumber: str | None = None
     booktype: str | None = None
     entity_type: str = "issue"
+    queue_priority: str = ROUTINE
 
     @classmethod
     def from_mapping(cls, raw_values: Mapping[str, Any]) -> "SearchCommand":
@@ -109,6 +130,7 @@ class SearchCommand:
                 values.get("entity_type")
                 or ("annual" if _bool_value(values.get("annual", False), "annual") else "issue")
             ),
+            queue_priority=_queue_priority(values.get("queue_priority")),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -123,6 +145,7 @@ class SearchCommand:
             "issuenumber": self.issuenumber,
             "booktype": self.booktype,
             "entity_type": self.entity_type,
+            "queue_priority": self.queue_priority,
         }
 
     def persisted_payload(self) -> dict[str, Any]:
@@ -153,6 +176,7 @@ def enqueue_search_command(
     from comicarr.app.acquisition.runs import RunLedger
 
     command = SearchCommand.from_mapping(raw_values)
+    command = replace(command, queue_priority=queue_priority_for_trigger(trigger, manual=command.manual))
     effective_run_id = _optional_text(run_id) or command.run_id or str(uuid.uuid4())
     command = replace(command, run_id=effective_run_id)
     ledger = ledger or RunLedger()
@@ -170,6 +194,7 @@ def enqueue_search_command(
         entity_type=command.entity_type,
         entity_id=command.issueid,
         payload=command.persisted_payload(),
+        queue_priority=command.queue_priority,
     )
     try:
         dispatch_persisted_search_command(command, work_queue=work_queue, maintenance=maintenance)
@@ -233,6 +258,9 @@ def dispatch_pending_search_commands(run_id, *, work_queue=None, ledger=None, ma
     from comicarr.app.acquisition.runs import RunLedger
 
     ledger = ledger or RunLedger()
+    run = ledger.get_run(run_id)
+    if run is None:
+        raise KeyError("unknown acquisition run %s" % run_id)
     work_queue = work_queue or comicarr.SEARCH_QUEUE
     dispatched = 0
     errors = []
@@ -245,6 +273,8 @@ def dispatch_pending_search_commands(run_id, *, work_queue=None, ledger=None, ma
             command = SearchCommand.from_mapping(
                 {**(item["payload"] or {}), "run_id": run_id, "entity_type": entity_type}
             )
+            command = replace(command, queue_priority=queue_priority_for_trigger(run["trigger"], manual=command.manual))
+            ledger.set_item_queue_priority(run_id, entity_type, entity_id, command.queue_priority)
         except SearchCommandError as e:
             ledger.record_outcome(run_id, entity_type, entity_id, ItemOutcome.QUARANTINED, reason=str(e))
             errors.append(type(e).__name__)
@@ -282,6 +312,8 @@ def replay_search_obligations(*, work_queue=None, ledger=None, maintenance=None)
             command = SearchCommand.from_mapping(
                 {**(item["payload"] or {}), "run_id": run_id, "entity_type": item["entity_type"]}
             )
+            command = replace(command, queue_priority=RECOVERY)
+            ledger.set_item_queue_priority(run_id, item["entity_type"], entity_id, command.queue_priority)
         except SearchCommandError as e:
             ledger.record_outcome(run_id, item["entity_type"], entity_id, ItemOutcome.QUARANTINED, reason=str(e))
             continue
