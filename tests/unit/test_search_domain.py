@@ -199,5 +199,58 @@ def test_get_run_status_only_skips_item_deserialization(monkeypatch):
     result = search_service.get_run(_ctx(), "search-run", include_items=False)
 
     assert result["success"] is True
+    assert result["run"]["queue_priority"] == "routine"
     assert result["items"] == []
     ledger.list_items.assert_not_called()
+
+
+def test_get_run_exposes_sanitized_item_attempt_status(monkeypatch):
+    ledger = MagicMock()
+    ledger.get_run.return_value = {
+        "run_id": "search-run",
+        "command_kind": "search",
+        "trigger": "search_all_missing",
+        "scope_type": "series",
+        "scope_id": "160294",
+        "dispatch_state": "accepted",
+        "completion_state": "running",
+        "accepted_count": 1,
+        "terminal_count": 0,
+        "succeeded_count": 0,
+        "no_match_count": 0,
+        "blocked_count": 0,
+        "failed_count": 0,
+        "created_at": "t0",
+        "updated_at": "t1",
+        "completed_at": None,
+    }
+    ledger.list_items.return_value = [
+        {
+            "entity_type": "issue",
+            "entity_id": "issue-1",
+            "state": "accepted",
+            "attempt_count": 0,
+            "reason": None,
+            "updated_at": "t1",
+            "completed_at": None,
+            "queue_priority": "recovery",
+        }
+    ]
+    monkeypatch.setattr("comicarr.app.acquisition.runs.RunLedger", lambda: ledger)
+
+    result = search_service.get_run(_ctx(), "search-run")
+
+    assert result["run"]["queue_priority"] == "recovery"
+    assert result["items"] == [
+        {
+            "entity_type": "issue",
+            "entity_id": "issue-1",
+            "state": "accepted",
+            "attempt_count": 0,
+            "reason": None,
+            "updated_at": "t1",
+            "completed_at": None,
+            "queue_priority": "recovery",
+            "attempt_status": "queued",
+        }
+    ]

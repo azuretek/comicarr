@@ -50,6 +50,16 @@ export interface AcquisitionRouteHealth {
   last_success?: number | string | null;
   last_failure?: number | string | null;
   last_error?: string | null;
+  configured_provider_count?: number;
+  executable_provider_count?: number;
+  attempted_provider_count?: number;
+  providers?: Array<{
+    name: string;
+    kind: string;
+    blocked: boolean;
+    attempted: boolean;
+    last_attempt: number | string | null;
+  }>;
 }
 
 export interface AcquisitionWorkerHealth {

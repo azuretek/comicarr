@@ -97,6 +97,32 @@ def test_route_readiness_is_independent_and_never_exposes_credentials(tmp_path):
     assert "token=secret" not in serialized
 
 
+def test_health_explains_configured_but_unattempted_torznab_without_secrets(tmp_path):
+    routes = health.build_route_readiness(
+        _config(tmp_path),
+        provider_stats=[{"provider": "Torrent", "type": "torznab", "active": False, "lastrun": 0, "hits": 0}],
+    )
+
+    torrent = routes["torrent"]
+    assert torrent["configured_provider_count"] == 1
+    assert torrent["executable_provider_count"] == 1
+    assert torrent["attempted_provider_count"] == 0
+    assert torrent["providers"] == [
+        {"name": "Torrent", "kind": "torznab", "blocked": False, "attempted": False, "last_attempt": None}
+    ]
+    assert "top-secret-key" not in str(torrent)
+
+
+def test_disabled_torrent_handoff_is_not_reported_as_executable(tmp_path):
+    routes = health.build_route_readiness(
+        _config(tmp_path, ENABLE_TORRENTS=False),
+        provider_stats=[{"provider": "Torrent", "type": "torznab", "active": False, "lastrun": 0, "hits": 0}],
+    )
+
+    assert routes["torrent"]["configured_provider_count"] == 1
+    assert routes["torrent"]["executable_provider_count"] == 0
+
+
 @pytest.mark.parametrize(
     ("downloader", "config_key"),
     [(0, "LOCAL_WATCHDIR"), (1, "UTORRENT_HOST"), (3, "TRANSMISSION_HOST"), (5, "QBITTORRENT_HOST")],

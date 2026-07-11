@@ -739,6 +739,7 @@ acquisition_run_items = Table(
     # Queue handoff state is independent of the worker lifecycle. A durable
     # item can be accepted but not yet handed to the in-memory worker queue.
     Column("dispatch_state", String(32), nullable=False, server_default="pending"),
+    Column("queue_priority", String(16), nullable=False, server_default="routine"),
     # Validated, bounded JSON containing only the command-kind allowlist. It
     # must never contain provider credentials or downloader secrets.
     Column("payload_json", Text),

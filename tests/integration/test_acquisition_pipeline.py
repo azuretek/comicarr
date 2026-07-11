@@ -146,6 +146,7 @@ def test_bulk_wanted_run_handoff_restart_and_owned_projection(monkeypatch, tmp_p
         "issuenumber": None,
         "booktype": None,
         "entity_type": "issue",
+        "queue_priority": "interactive",
     }
     ledger = RunLedger()
     assert ledger.claim_item(run_id, "issue", "issue-1") is True

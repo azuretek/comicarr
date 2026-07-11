@@ -334,14 +334,30 @@ def get_health(ctx):
     )
 
 
+def _attempt_status(state):
+    if state == ItemOutcome.ACCEPTED.value:
+        return "queued"
+    if state == ItemOutcome.RUNNING.value:
+        return "searching"
+    return state
+
+
 def get_run(ctx, run_id, include_items=True):
     """Return a durable search run without exposing provider request data."""
     from comicarr.app.acquisition.runs import RunLedger
+    from comicarr.app.search.commands import queue_priority_for_trigger
 
     ledger = RunLedger()
     run = ledger.get_run(run_id)
     if run is None or run["command_kind"] != "search":
         return {"success": False, "error": "search run not found", "status_code": 404}
+    items = ledger.list_items(run_id) if include_items else []
+    active_priorities = {
+        item.get("queue_priority", queue_priority_for_trigger(run["trigger"]))
+        for item in items
+        if item["state"] in {"accepted", "running"}
+    }
+    queue_priority = "recovery" if "recovery" in active_priorities else queue_priority_for_trigger(run["trigger"])
     return {
         "success": True,
         "run": {
@@ -364,7 +380,8 @@ def get_run(ctx, run_id, include_items=True):
                 "updated_at",
                 "completed_at",
             )
-        },
+        }
+        | {"queue_priority": queue_priority},
         "items": (
             [
                 {
@@ -375,8 +392,10 @@ def get_run(ctx, run_id, include_items=True):
                     "reason": item["reason"],
                     "updated_at": item["updated_at"],
                     "completed_at": item["completed_at"],
+                    "queue_priority": item.get("queue_priority", queue_priority),
+                    "attempt_status": _attempt_status(item["state"]),
                 }
-                for item in ledger.list_items(run_id)
+                for item in items
             ]
             if include_items
             else []

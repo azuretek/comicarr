@@ -17,6 +17,7 @@ import time
 import comicarr
 from comicarr import db
 from comicarr.app.search import queries
+from comicarr.app.search.providers import effective_provider_plan, enabled_provider_entries, ordered_provider_names
 from comicarr.db import get_engine
 
 WORKER_PREFIX = "Worker: "
@@ -41,22 +42,11 @@ def _sanitize(value, fallback=None):
 
 
 def _provider_names(config):
-    order = getattr(config, "PROVIDER_ORDER", None) or {}
-    if isinstance(order, dict):
-        return [str(value) for _, value in sorted(order.items(), key=lambda item: str(item[0]))]
-    if isinstance(order, (list, tuple)):
-        return [str(value) for value in order]
-    return []
+    return ordered_provider_names(config)
 
 
 def _enabled_extra(entries):
-    for entry in entries or []:
-        try:
-            if str(entry[5]) == "1":
-                return True
-        except (IndexError, TypeError):
-            continue
-    return False
+    return any(enabled_provider_entries(entries))
 
 
 def _route_for_provider(row):
@@ -212,31 +202,66 @@ def build_route_readiness(
     maintenance = maintenance or {}
     now = float(now if now is not None else time.time())
     names = _route_provider_names(config, provider_stats)
+    active_blocks = {}
+    for entry in provider_blocklist:
+        try:
+            active = float(entry.get("resume") or 0) > now
+        except (TypeError, ValueError):
+            active = False
+        site = str(entry.get("site") or "").strip()
+        if active and site:
+            active_blocks[site.casefold()] = site
+
+    def is_active_blocked(name):
+        return str(name).casefold() in active_blocks
+
+    provider_plan = effective_provider_plan(
+        config,
+        is_blocked=is_active_blocked,
+    )
+    planned_by_route = {
+        route: [candidate for candidate in provider_plan if candidate.route == route] for route in _ROUTES
+    }
+    stats_by_route = {route: [row for row in provider_stats if _route_for_provider(row) == route] for route in _ROUTES}
     routes = {}
 
     for route in _ROUTES:
-        route_stats = [row for row in provider_stats if _route_for_provider(row) == route]
+        route_stats = stats_by_route[route]
+        stats_by_name = {str(row.get("provider") or "").casefold(): row for row in route_stats}
+        diagnostics = []
+        for candidate in planned_by_route[route]:
+            stat = stats_by_name.get(candidate.name.casefold()) or {}
+            try:
+                last_attempt = float(stat.get("lastrun") or 0) or None
+            except (TypeError, ValueError):
+                last_attempt = None
+            diagnostics.append(
+                {
+                    "name": candidate.name,
+                    "kind": candidate.kind,
+                    "blocked": candidate.blocked,
+                    "attempted": last_attempt is not None,
+                    "last_attempt": last_attempt,
+                }
+            )
+        if diagnostics:
+            names[route] = list(dict.fromkeys(names[route] + [item["name"] for item in diagnostics]))
         enabled = _route_enabled(config, route)
         client, client_ready, path_ready, restart_safe = _downstream_readiness(config, route)
         downstream_ready = client_ready and path_ready
-        active_blocks = []
+        route_blocks = []
         route_names = {name.lower() for name in names[route]}
-        for entry in provider_blocklist:
-            site = str(entry.get("site") or "")
-            try:
-                active = float(entry.get("resume") or 0) > now
-            except (TypeError, ValueError):
-                active = False
-            if active and site.lower() in route_names:
-                active_blocks.append(site)
-        all_blocked = bool(route_names) and len({name.lower() for name in active_blocks}) >= len(route_names)
+        for site_key, site in active_blocks.items():
+            if site_key in route_names:
+                route_blocks.append(site)
+        all_blocked = bool(route_names) and len({name.lower() for name in route_blocks}) >= len(route_names)
         maintenance_reason = maintenance.get("reason") if maintenance.get("blocked") else None
         history = route_history.get(route, {})
         try:
             blocked_until = float(history.get("next_run_timestamp") or 0)
         except (TypeError, ValueError):
             blocked_until = 0
-        history_blocked = blocked_until > now and not active_blocks
+        history_blocked = blocked_until > now and not route_blocks
         all_blocked = all_blocked or history_blocked
         ready = bool(enabled and downstream_ready and restart_safe and not all_blocked and not maintenance_reason)
         if not enabled:
@@ -268,9 +293,9 @@ def build_route_readiness(
             "enabled": enabled,
             "active": running,
             "running": running,
-            "blocked": bool(active_blocks) or history_blocked or bool(maintenance_reason),
+            "blocked": bool(route_blocks) or history_blocked or bool(maintenance_reason),
             "blocked_until": blocked_until or None,
-            "blocked_provider_count": len(active_blocks),
+            "blocked_provider_count": len(route_blocks),
             "downstream": client,
             "client_ready": client_ready,
             "path_ready": path_ready,
@@ -282,6 +307,10 @@ def build_route_readiness(
             "last_success": last_success,
             "last_failure": last_failure,
             "last_error": _sanitize(history.get("last_error")),
+            "configured_provider_count": len(diagnostics),
+            "executable_provider_count": sum(1 for item in diagnostics if enabled and not item["blocked"]),
+            "attempted_provider_count": sum(1 for item in diagnostics if item["attempted"]),
+            "providers": diagnostics,
         }
     return routes
 
