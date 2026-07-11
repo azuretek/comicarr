@@ -162,8 +162,8 @@ class TestComicScan:
         comicsync.comics.create(engine)
         row = {
             "ComicID": "45678",
-            "ComicName": "Absolute Batman",
-            "ComicSortName": "Absolute Batman",
+            "ComicName": "Different Series",
+            "ComicSortName": "Different Series",
             "DynamicComicName": "absolutebatman",
             "ComicYear": "2024",
             "ComicLocation": "/comics/Absolute Batman (2024)",
@@ -175,7 +175,8 @@ class TestComicScan:
 
         result = comicsync._load_existing_series()
 
-        assert result["absolute batman"][0]["ComicID"] == row["ComicID"]
+        assert result["different series"][0]["ComicID"] == row["ComicID"]
+        assert result["absolutebatman"][0]["ComicID"] == row["ComicID"]
 
     def test_reconciles_existing_series_matched_by_folder_year(self, comicsync):
         existing_series = {
