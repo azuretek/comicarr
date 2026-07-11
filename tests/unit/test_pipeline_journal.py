@@ -146,6 +146,19 @@ def test_transition_against_failed_terminal_is_noop(capture_logs):
     assert "no-op" in capture_logs.text
 
 
+def test_terminal_rows_cannot_advance_to_another_terminal_stage():
+    done = journal.release_key("terminal-done", "prov")
+    journal.record_transition(done, journal.POST_PROCESSED)
+    assert journal.mark_manual_review(done, "must-not-overwrite-success") is False
+    assert journal.mark_failed(done, "must-not-overwrite-success") is False
+    assert _row(done)["stage"] == journal.POST_PROCESSED
+
+    review = journal.release_key("terminal-review", "prov")
+    journal.mark_manual_review(review, "operator-needed")
+    assert journal.mark_failed(review, "must-not-overwrite-review") is False
+    assert _row(review)["stage"] == journal.MANUAL_REVIEW
+
+
 def test_new_stages_advance_and_downloaded_against_moved_is_noop():
     key = journal.release_key("300", "prov")
     journal.record_transition(key, journal.SNATCHED)
@@ -173,7 +186,7 @@ def test_same_stage_rewrite_is_noop():
 # ---------------------------------------------------------------------------
 
 
-def test_resnatch_after_failed_resets_row_and_clears_reason(capture_logs):
+def test_reservation_after_failed_resets_row_and_clears_attempt_identity(capture_logs):
     """A terminal `failed` row at issueid|provider must NOT permanently block
     a legitimate re-snatch of the same issue+provider (search.py re-serves
     Status in ['Wanted','Failed']). A fresh `snatched` write resets the row."""
@@ -184,18 +197,20 @@ def test_resnatch_after_failed_resets_row_and_clears_reason(capture_logs):
     assert _row(key)["stage"] == "failed"
 
     payload = {"issueid": "400", "hash": "newgrab"}
-    won = journal.record_transition(key, journal.SNATCHED, payload=payload)
+    won = journal.record_transition(key, journal.RESERVED, payload=payload)
 
     assert won is True
     r = _row(key)
-    assert r["stage"] == "snatched"
-    assert r["stage_rank"] == journal.STAGE_RANK["snatched"]
+    assert r["stage"] == "reserved"
+    assert r["stage_rank"] == journal.STAGE_RANK["reserved"]
     assert r["fail_reason"] is None
     assert journal.load_payload(r["payload_json"]) == payload
     assert len(_all_rows()) == 1
-    assert "reset from terminal failed -> snatched" in capture_logs.text
+    assert "reset from terminal failed -> reserved" in capture_logs.text
 
-    # The re-snatched row is a normal in-flight obligation: forward advance works.
+    # The newly reserved row is a normal in-flight obligation: acceptance and
+    # forward advance work.
+    assert journal.record_transition(key, journal.SNATCHED, payload={"nzo_id": "new-client-id"}) is True
     assert journal.record_transition(key, journal.DOWNLOADED) is True
     assert _row(key)["stage"] == "downloaded"
 
@@ -247,7 +262,7 @@ def test_two_concurrent_resnatch_writers_vs_one_failed_row_exactly_one_winner():
     def writer():
         try:
             barrier.wait()
-            results.append(journal.record_transition(key, journal.SNATCHED))
+            results.append(journal.record_transition(key, journal.RESERVED))
         except Exception as e:  # noqa: BLE001 - test must observe any leak
             errors.append(e)
 
@@ -261,8 +276,39 @@ def test_two_concurrent_resnatch_writers_vs_one_failed_row_exactly_one_winner():
     assert errors == [], "error leaked from concurrent re-snatch: %s" % errors
     assert sorted(results) == [False, True], "exactly-one-winner broken: %s" % results
     assert len(_all_rows()) == 1
-    assert _row(key)["stage"] == "snatched"
+    assert _row(key)["stage"] == "reserved"
     assert _row(key)["fail_reason"] is None
+
+
+def test_failed_retry_clears_old_acceptance_identity_before_new_acceptance():
+    key = journal.release_key("retry-id", "nzb.su")
+    journal.record_transition(
+        key,
+        journal.RESERVED,
+        payload={"issueid": "retry-id", "provider": "nzb.su", "route": "sabnzbd"},
+    )
+    journal.record_transition(key, journal.SNATCHED, payload={"nzo_id": "old-id"})
+    journal.mark_failed(key, "old attempt failed")
+
+    assert journal.record_transition(
+        key,
+        journal.RESERVED,
+        payload={"issueid": "retry-id", "provider": "nzb.su", "route": "nzbget"},
+    )
+    assert journal.record_transition(key, journal.SNATCHED, payload={"NZBID": "new-id"})
+
+    row = _row(key)
+    payload = journal.load_payload(row["payload_json"])
+    assert row["stage"] == journal.SNATCHED
+    assert payload["route"] == "nzbget"
+    assert payload["NZBID"] == "new-id"
+    assert "nzo_id" not in payload
+
+
+def test_two_ddl_commands_for_same_issue_have_distinct_obligation_keys():
+    first = journal.release_key("same-issue", "DDL", discriminant="ddl-command-1")
+    second = journal.release_key("same-issue", "DDL", discriminant="ddl-command-2")
+    assert first != second
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +383,71 @@ def test_read_open_excludes_terminal_rows():
     keys = {r["release_key"] for r in open_rows}
     assert journal.release_key("5", "p") not in keys
     assert journal.release_key("6", "p") not in keys
+
+
+def test_reserved_payload_is_redacted_and_merged_with_acceptance_identity():
+    key = journal.release_key("safe-1", "nzb.su")
+
+    assert journal.record_transition(
+        key,
+        journal.RESERVED,
+        payload={
+            "issueid": "safe-1",
+            "comicid": "comic-1",
+            "provider": "nzb.su",
+            "nzbname": "Safe.001.cbz",
+            "api_key": "must-not-land",
+            "link": "https://example.invalid/download?token=secret",
+            "download_info": {
+                "provider": "nzb.su",
+                "id": "provider-result-1",
+                "cookie": "must-not-land",
+            },
+            "raw_response": {"authorization": "must-not-land"},
+        },
+        issueid="safe-1",
+        provider="nzb.su",
+        downloader_type="nzb",
+    )
+    assert journal.record_transition(
+        key,
+        journal.SNATCHED,
+        payload={"route": "sabnzbd", "nzo_id": "sab-job-1"},
+    )
+
+    payload = journal.load_payload(_row(key)["payload_json"])
+    assert payload == {
+        "issueid": "safe-1",
+        "comicid": "comic-1",
+        "provider": "nzb.su",
+        "nzbname": "Safe.001.cbz",
+        "download_info": {"provider": "nzb.su", "id": "provider-result-1"},
+        "route": "sabnzbd",
+        "nzo_id": "sab-job-1",
+    }
+
+
+def test_conflicting_immutable_payload_identity_is_quarantined():
+    key = journal.release_key("safe-2", "nzb.su")
+    journal.record_transition(
+        key,
+        journal.RESERVED,
+        payload={"issueid": "safe-2", "provider": "nzb.su", "route": "sabnzbd"},
+        issueid="safe-2",
+        provider="nzb.su",
+    )
+
+    won = journal.record_transition(
+        key,
+        journal.SNATCHED,
+        payload={"issueid": "different-issue", "route": "sabnzbd", "nzo_id": "sab-job-2"},
+    )
+
+    assert won is False
+    row = _row(key)
+    assert row["stage"] == journal.MANUAL_REVIEW
+    assert row["status"] == "manual_review"
+    assert row["fail_reason"] == "immutable_payload_conflict:issueid"
 
 
 def test_read_open_orders_oldest_updated_date_first():

@@ -35,6 +35,7 @@ import pytest
 from sqlalchemy import insert, select
 
 import comicarr
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import journal, service
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.postprocessor import PostProcessor
@@ -59,6 +60,7 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     yield
     shutdown_engine()
 
@@ -296,18 +298,13 @@ def test_ddl_complete_cocommits_ddl_info_and_journal_downloaded(monkeypatch):
     assert order[order.index(("pp_put", None)) - 1] == ("journal", journal.DOWNLOADED)
 
 
-def test_ddl_complete_atomic_rollback_on_journal_failure(monkeypatch):
-    """P1-3 + atomicity: a journal failure inside a DDL atomic begin() block
-    rolls back BOTH the ddl_info write and the journal row (no half-write)
-    AND the ddl_downloader loop SURVIVES (the raise is caught + logged +
-    continue, not propagated to kill the worker). The pre-existing
-    'Downloading' row remains (it was a separate prior txn).
+def test_ddl_complete_journal_failure_quarantines_artifact_without_resubmission(monkeypatch):
+    """A post-download persistence failure is visible for review, never retried.
 
-    Requeue invariant: because the journal write failed inside the atomic
-    block, the loop hits `continue` BEFORE the PP_QUEUE.put handoff — so the
-    item is NEVER put on PP_QUEUE, and is re-put on DDL_QUEUE so it stays
-    genuinely recoverable (the GetComics DDL path has no foundsearch row for
-    replay to rescan)."""
+    The reservation and sender already completed, so replaying the DDL command
+    could duplicate an external download. The durable DDL row therefore moves
+    to Manual Review even if the companion journal quarantine cannot persist.
+    """
     monkeypatch.setattr(comicarr.DDL_LOCK, "locked", lambda: False, raising=False)
     fake_pp_queue = MagicMock()
     monkeypatch.setattr(comicarr, "PP_QUEUE", fake_pp_queue, raising=False)
@@ -318,36 +315,35 @@ def test_ddl_complete_atomic_rollback_on_journal_failure(monkeypatch):
     with get_engine().begin() as conn:
         conn.execute(insert(ddl_info).values(ID="ddl-1", status="Downloading"))
 
-    dd_ok = {"success": True, "filename": "Saga.DDL.001.cbz", "path": "/tmp/dl/Saga.DDL.001.cbz"}
     fake_mega = MagicMock()
-    fake_mega.ddl_download.return_value = dd_ok
+    fake_mega.ddl_download.return_value = {
+        "success": True,
+        "filename": "Saga.DDL.001.cbz",
+        "path": "/tmp/dl/Saga.DDL.001.cbz",
+    }
     monkeypatch.setattr(service.mega, "MegaNZ", lambda *a, **k: fake_mega)
     monkeypatch.setattr(service, "ddl_cleanup", lambda *a, **k: None)
 
-    boom = RuntimeError("journal down inside a ddl atomic begin()")
-    with patch.object(journal, "record_transition", side_effect=boom):
-        # MUST NOT raise out of ddl_downloader (P1-3 — the loop survives).
-        q = queuelib.Queue()
-        q.put(_ddl_item())
-        q.put("exit")
+    real_record = journal.record_transition
+
+    def _fail_downloaded(*args, **kwargs):
+        stage = args[1] if len(args) > 1 else kwargs.get("stage")
+        if stage == journal.DOWNLOADED:
+            raise RuntimeError("journal down inside a ddl atomic begin")
+        return real_record(*args, **kwargs)
+
+    q = queuelib.Queue()
+    q.put(_ddl_item())
+    q.put("exit")
+    with patch.object(journal, "record_transition", side_effect=_fail_downloaded):
         service.ddl_downloader(q)
 
-    # The atomic block's write rolled back with the journal — the row stays
-    # at the pre-existing 'Downloading' (no half-write Completed), and no
-    # journal row landed.
-    ddl_rows = _rows(ddl_info)
-    assert len(ddl_rows) == 1
-    assert ddl_rows[0]["status"] == "Downloading"
-    assert _rows(pipeline_journal) == []
-
-    # Requeue invariant: the PP handoff never happened (continue fires before
-    # the PP_QUEUE.put), and the item was re-put on DDL_QUEUE so it remains
-    # recoverable rather than silently lost.
+    assert _rows(ddl_info)[0]["status"] == "Manual Review"
+    assert _journal_row(journal.release_key("DI1", "DDL", nzbname="Saga.DDL.001.cbz", discriminant="ddl-1"))[
+        "stage"
+    ] == (journal.MANUAL_REVIEW)
     fake_pp_queue.put.assert_not_called()
-    fake_ddl_queue.put.assert_called_once()
-    requeued_item = fake_ddl_queue.put.call_args[0][0]
-    assert requeued_item["id"] == "ddl-1"
-    assert requeued_item["_journal_retry"] == 1
+    fake_ddl_queue.put.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -827,7 +823,10 @@ def test_manga_multichapter_replay_redrives_in_full_after_midloop_crash(tmp_path
     row = journal.read_one(rkey)
     assert row["stage"] == "post_processing"
     fake_proc = MagicMock()
-    with patch("comicarr.process.Process", return_value=fake_proc) as mk:
+    with (
+        patch.object(comicarr, "CONFIG", types.SimpleNamespace(DDL_LOCATION=str(src))),
+        patch("comicarr.process.Process", return_value=fake_proc) as mk,
+    ):
         action = recovery.finalize_post_processing(row)
 
     assert action == "post_processing-redrive"

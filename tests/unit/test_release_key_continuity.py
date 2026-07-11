@@ -34,6 +34,7 @@ from sqlalchemy import insert, select
 
 import comicarr
 from comicarr import updater
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import journal, recovery, service
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import comics, issues, metadata, nzblog, pipeline_journal, snatched
@@ -56,6 +57,7 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(comicarr, "USE_SABNZBD", True, raising=False)
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     yield
     shutdown_engine()
 
@@ -191,9 +193,7 @@ def test_anchor_reconstruction_key_matches_runtime_downloaded_key():
 
     # The runtime downloaded key for the SAME (issueid, provider) must be
     # byte-identical to the reconstructed anchor key.
-    runtime_downloaded_key = journal.release_key(
-        "I1", "nzb.su", nzbname="totally.different.sab.name", hash=None
-    )
+    runtime_downloaded_key = journal.release_key("I1", "nzb.su", nzbname="totally.different.sab.name", hash=None)
     assert anchor_key == runtime_downloaded_key
 
     # And advancing the runtime downloaded seam advances THIS row (no phantom).

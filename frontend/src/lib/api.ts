@@ -13,6 +13,53 @@ const COMMON_HEADERS: Record<string, string> = {
   "X-Requested-With": "ComicarrFrontend",
 };
 
+const SENSITIVE_ERROR_BODY_KEY =
+  /(?:api[_-]?key|authorization|cookie|credential|password|secret|token|url|uri)/i;
+const MAX_ERROR_BODY_DEPTH = 4;
+const MAX_ERROR_BODY_ITEMS = 50;
+const MAX_ERROR_BODY_STRING_LENGTH = 2_000;
+
+export type ApiErrorBody = Record<string, unknown>;
+
+function sanitizeErrorBodyValue(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number")
+    return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string") {
+    return value.slice(0, MAX_ERROR_BODY_STRING_LENGTH);
+  }
+  if (depth >= MAX_ERROR_BODY_DEPTH) return undefined;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, MAX_ERROR_BODY_ITEMS)
+      .map((item) => sanitizeErrorBodyValue(item, depth + 1))
+      .filter((item) => item !== undefined);
+  }
+  if (!value || typeof value !== "object") return undefined;
+
+  const sanitized: ApiErrorBody = {};
+  for (const [key, item] of Object.entries(value).slice(
+    0,
+    MAX_ERROR_BODY_ITEMS,
+  )) {
+    if (SENSITIVE_ERROR_BODY_KEY.test(key)) continue;
+    const sanitizedValue = sanitizeErrorBodyValue(item, depth + 1);
+    if (sanitizedValue !== undefined) sanitized[key] = sanitizedValue;
+  }
+  return sanitized;
+}
+
+/**
+ * Retain useful response metadata for UI recovery without retaining credentials,
+ * transport URLs, or arbitrarily deep/unbounded server payloads.
+ */
+export function sanitizeApiErrorBody(value: unknown): ApiErrorBody | undefined {
+  const sanitized = sanitizeErrorBodyValue(value);
+  return sanitized && !Array.isArray(sanitized) && typeof sanitized === "object"
+    ? (sanitized as ApiErrorBody)
+    : undefined;
+}
+
 /**
  * User-friendly error messages for common HTTP status codes
  */
@@ -36,8 +83,9 @@ export class ApiError extends Error {
   status: number;
   userMessage: string;
   isRetryable: boolean;
+  body?: ApiErrorBody;
 
-  constructor(status: number, originalMessage?: string) {
+  constructor(status: number, originalMessage?: string, body?: ApiErrorBody) {
     const defaultMessage =
       HTTP_ERROR_MESSAGES[status] ||
       `An unexpected error occurred (${status}). Please try again.`;
@@ -51,6 +99,7 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.userMessage = userMessage;
+    this.body = body ? sanitizeApiErrorBody(body) : undefined;
     // 5xx errors and timeouts are typically retryable
     this.isRetryable = status >= 500 || status === 408 || status === 429;
   }
@@ -352,23 +401,35 @@ export async function apiRequest<T = unknown>(
 
     if (!response.ok) {
       let detail: string | undefined;
+      let body: ApiErrorBody | undefined;
       try {
-        const errBody = (await response.json()) as {
+        const errBody: unknown = await response.json();
+        body = sanitizeApiErrorBody(errBody);
+        const errorPayload = errBody as {
           error?: unknown;
           detail?: unknown;
+          message?: unknown;
         };
-        if (typeof errBody?.error === "string" && errBody.error.trim()) {
-          detail = errBody.error;
-        } else if (
-          typeof errBody?.detail === "string" &&
-          errBody.detail.trim()
+        if (
+          typeof errorPayload?.error === "string" &&
+          errorPayload.error.trim()
         ) {
-          detail = errBody.detail;
+          detail = errorPayload.error;
+        } else if (
+          typeof errorPayload?.detail === "string" &&
+          errorPayload.detail.trim()
+        ) {
+          detail = errorPayload.detail;
+        } else if (
+          typeof errorPayload?.message === "string" &&
+          errorPayload.message.trim()
+        ) {
+          detail = errorPayload.message;
         }
       } catch {
         // Non-JSON error bodies fall back to status-based messages.
       }
-      throw new ApiError(response.status, detail);
+      throw new ApiError(response.status, detail, body);
     }
 
     const data = await response.json();

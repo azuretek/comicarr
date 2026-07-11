@@ -37,7 +37,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import feedparser
 import requests
 from requests.adapters import HTTPAdapter
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from urllib3.util.retry import Retry
 
 import comicarr
@@ -61,6 +61,7 @@ from comicarr.app.common.remote_artifacts import (
     safe_remote_filename,
     write_chunks_atomically,
 )
+from comicarr.app.downloads import handoff
 from comicarr.downloaders import external_server as exs
 from comicarr.tables import (
     annuals,
@@ -87,6 +88,16 @@ def get_search_executor():
         # overwhelming providers, but enough to see parallelization benefit
         _search_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="search_worker")
     return _search_executor
+
+
+def _wanted_candidate_rows(table, statuses, *extra_conditions):
+    """Load candidate and series state together for bulk eligibility checks."""
+    stmt = (
+        select(table, comics.c.Status.label("SeriesStatus"))
+        .select_from(table.outerjoin(comics, comics.c.ComicID == table.c.ComicID))
+        .where(table.c.Status.in_(statuses), *extra_conditions)
+    )
+    return db.select_all(stmt)
 
 
 def parallel_search_providers(scarios_list, timeout=120):
@@ -1658,6 +1669,8 @@ def verification(verified_matches, is_info):
                         provider=is_info["nzbprov"],
                         hash=searchresult.get("t_hash"),
                         nzbname=nzbname,
+                        journal_release_key=searchresult.get("journal_release_key"),
+                        journal_managed=searchresult.get("journal_managed", False),
                     )
                 notify_snatch(
                     sent_to,
@@ -1723,6 +1736,8 @@ def verification(verified_matches, is_info):
                 IssueArcID=is_info["IssueArcID"],
                 hash=searchresult.get("t_hash"),
                 nzbname=nzbname,
+                journal_release_key=searchresult.get("journal_release_key"),
+                journal_managed=searchresult.get("journal_managed", False),
             )
 
             # send out the notifications for the snatch.
@@ -1745,7 +1760,59 @@ def verification(verified_matches, is_info):
     return is_info  # foundc
 
 
-def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
+def _search_source_for_issue(issueid, entity_type=None):
+    """Resolve an explicit durable entity identity without table-order ambiguity."""
+
+    normalized_type = str(entity_type or "").strip().lower()
+    if normalized_type == "annual":
+        return (
+            db.select_one(
+                select(annuals).where(
+                    annuals.c.IssueID == issueid,
+                    or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+                )
+            ),
+            "want_ann",
+            False,
+        )
+    if normalized_type == "issue":
+        return db.select_one(select(issues).where(issues.c.IssueID == issueid)), "want", False
+
+    result = db.select_one(select(issues).where(issues.c.IssueID == issueid))
+    if result is not None:
+        return result, "want", False
+
+    result = db.select_one(
+        select(annuals).where(
+            annuals.c.IssueID == issueid,
+            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+        )
+    )
+    if result is not None:
+        return result, "want_ann", False
+
+    result = db.select_one(select(storyarcs).where(storyarcs.c.IssueArcID == issueid))
+    if result is not None:
+        return result, "story_arc", True
+
+    return db.select_one(select(weekly).where(weekly.c.IssueID == issueid)), "pullwant", True
+
+
+def searchforissue(
+    issueid=None,
+    new=False,
+    rsschecker=None,
+    manual=False,
+    acquisition_run_id=None,
+    acquisition_trigger=None,
+    entity_type=None,
+):
+    """Queue or run searches while preserving an optional outer run identity.
+
+    The historical backlog scan owns candidate discovery.  Manual callers can
+    now supply one durable run ID so all accepted Wanted rows become visible as
+    a single operation without changing the per-issue worker contract.
+    """
     if rsschecker == "yes":
         while comicarr.SEARCHLOCK.locked():
             # logger.info(
@@ -1808,15 +1875,17 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
             stloop = 2  # 3 levels - one for issues, one for storyarcs, one  for annuals
             results = []
             search_skip = {}
+            queued_count = 0
+            error_count = 0
 
             if comicarr.CONFIG.ANNUALS_ON:
                 stloop += 1
             while stloop > 0:
                 if stloop == 1:
                     if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                        issues_1 = db.select_all(select(issues).where(issues.c.Status.in_(["Wanted", "Failed"])))
+                        issues_1 = _wanted_candidate_rows(issues, ["Wanted", "Failed"])
                     else:
-                        issues_1 = db.select_all(select(issues).where(issues.c.Status == "Wanted"))
+                        issues_1 = _wanted_candidate_rows(issues, ["Wanted"])
                     for iss in issues_1:
                         checkit = searchforissue_checker(
                             iss["IssueID"],
@@ -1827,6 +1896,11 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 "ComicName": iss["ComicName"],
                                 "Issue_Number": iss["Issue_Number"],
                                 "ComicID": iss["ComicID"],
+                                "candidate": {
+                                    "LegacyStatus": iss["Status"],
+                                    "AcquisitionIntent": iss.get("AcquisitionIntent"),
+                                    "SeriesStatus": iss["SeriesStatus"],
+                                },
                             },
                         )
                         if checkit["status"] is True:
@@ -1866,11 +1940,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                 elif stloop == 2:
                     if comicarr.CONFIG.SEARCH_STORYARCS is True or rsschecker:
                         if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                            issues_2 = db.select_all(
-                                select(storyarcs).where(storyarcs.c.Status.in_(["Wanted", "Failed"]))
-                            )
+                            issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted", "Failed"])
                         else:
-                            issues_2 = db.select_all(select(storyarcs).where(storyarcs.c.Status == "Wanted"))
+                            issues_2 = _wanted_candidate_rows(storyarcs, ["Wanted"])
                         cnt = 0
                         for iss in issues_2:
                             checkit = searchforissue_checker(
@@ -1882,6 +1954,11 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                     "ComicName": iss["ComicName"],
                                     "Issue_Number": iss["IssueNumber"],
                                     "ComicID": iss["ComicID"],
+                                    "candidate": {
+                                        "LegacyStatus": iss["Status"],
+                                        "AcquisitionIntent": None,
+                                        "SeriesStatus": iss["SeriesStatus"],
+                                    },
                                 },
                             )
                             if checkit["status"] is True:
@@ -1922,12 +1999,16 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                         logger.info("Issues that belong to part of a Story Arc to be searched for : %s" % cnt)
                 elif stloop == 3:
                     if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING and comicarr.CONFIG.FAILED_AUTO:
-                        issues_3 = db.select_all(
-                            select(annuals).where(annuals.c.Status.in_(["Wanted", "Failed"]) & (annuals.c.Deleted != 1))
+                        issues_3 = _wanted_candidate_rows(
+                            annuals,
+                            ["Wanted", "Failed"],
+                            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
                         )
                     else:
-                        issues_3 = db.select_all(
-                            select(annuals).where((annuals.c.Status == "Wanted") & (annuals.c.Deleted != 1))
+                        issues_3 = _wanted_candidate_rows(
+                            annuals,
+                            ["Wanted"],
+                            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
                         )
                     for iss in issues_3:
                         checkit = searchforissue_checker(
@@ -1939,6 +2020,11 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 "ComicName": iss["ComicName"],
                                 "Issue_Number": iss["Issue_Number"],
                                 "ComicID": iss["ComicID"],
+                                "candidate": {
+                                    "LegacyStatus": iss["Status"],
+                                    "AcquisitionIntent": iss.get("AcquisitionIntent"),
+                                    "SeriesStatus": iss["SeriesStatus"],
+                                },
                             },
                         )
                         if checkit["status"] is True:
@@ -2109,7 +2195,13 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     else:
                         DateAdded = result["DateAdded"]
 
-                    if rsschecker is None and DateAdded >= comicarr.SEARCH_TIER_DATE:
+                    # Automatic scans retain their tier guard. An explicit
+                    # operator-run backlog scan is intentionally broader: its
+                    # durable run provides the audit trail and it must not
+                    # silently leave older Wanted obligations untouched.
+                    if rsschecker is None and (
+                        DateAdded >= comicarr.SEARCH_TIER_DATE or acquisition_run_id is not None
+                    ):
                         logger.fdebug(
                             "[TIER1] Adding: %s #%s [ComicID:%s / IssueiD: %s][ %s >= %s]"
                             % (
@@ -2121,7 +2213,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 comicarr.SEARCH_TIER_DATE,
                             )
                         )
-                        comicarr.SEARCH_QUEUE.put(
+                        from comicarr.app.search.commands import enqueue_search_command
+
+                        enqueue_search_command(
                             {
                                 "comicname": comicname,
                                 "seriesyear": SeriesYear,
@@ -2129,8 +2223,14 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 "issueid": result["IssueID"],
                                 "comicid": result["ComicID"],
                                 "booktype": booktype,
-                            }
+                                "entity_type": "annual" if result.get("mode") == "want_ann" else "issue",
+                            },
+                            trigger=acquisition_trigger or "wanted_scan",
+                            run_id=acquisition_run_id,
+                            scope_type="wanted_backlog" if acquisition_run_id else None,
+                            scope_id="all" if acquisition_run_id else None,
                         )
+                        queued_count += 1
                         continue
                     elif rsschecker:
                         if not [
@@ -2212,6 +2312,7 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     #        )
 
                 except Exception as err:
+                    error_count += 1
                     exc_type, exc_value, exc_tb = sys.exc_info()
                     filename, line_num, func_name, err_text = traceback.extract_tb(exc_tb)[-1]
                     tracebackline = traceback.format_exc()
@@ -2511,31 +2612,20 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                 logger.info("Completed Queueing API Search scan")
                 if comicarr.SEARCHLOCK.locked():
                     comicarr.SEARCHLOCK.release()
+                return {
+                    "status": "QUEUED",
+                    "queued_count": queued_count,
+                    "error_count": error_count,
+                    "run_id": acquisition_run_id,
+                }
         else:
             try:
                 comicarr.SEARCHLOCK.acquire()
-                result = db.select_one(select(issues).where(issues.c.IssueID == issueid))
-                smode = "want"
-                oneoff = False
+                result, smode, oneoff = _search_source_for_issue(issueid, entity_type=entity_type)
                 if result is None:
-                    result = db.select_one(
-                        select(annuals).where((annuals.c.IssueID == issueid) & (annuals.c.Deleted != 1))
-                    )
-                    smode = "want_ann"
-                    if result is None:
-                        result = db.select_one(select(storyarcs).where(storyarcs.c.IssueArcID == issueid))
-                        smode = "story_arc"
-                        oneoff = True
-                        if result is None:
-                            result = db.select_one(select(weekly).where(weekly.c.IssueID == issueid))
-                            smode = "pullwant"
-                            oneoff = True
-                            if result is None:
-                                logger.fdebug(
-                                    "Unable to locate IssueID - you probably should delete/refresh the series."
-                                )
-                                comicarr.SEARCHLOCK.release()
-                                return
+                    logger.fdebug("Unable to locate IssueID - you probably should delete/refresh the series.")
+                    comicarr.SEARCHLOCK.release()
+                    return
 
                 # if it's not manually initiated, make sure it's not already downloaded/snatched.
                 if not manual:
@@ -2548,7 +2638,12 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                         result["ReleaseDate"],
                         result["IssueDate"],
                         result["DigitalDate"],
-                        {"ComicName": result["ComicName"], "Issue_Number": issnumb, "ComicID": result["ComicID"]},
+                        {
+                            "ComicName": result["ComicName"],
+                            "Issue_Number": issnumb,
+                            "ComicID": result["ComicID"],
+                            "entity_type": "annual" if smode == "want_ann" else "issue",
+                        },
                     )
                     if checkit["status"] is False:
                         logger.fdebug(
@@ -2757,10 +2852,16 @@ def searchIssueIDList(issuelist):
     ):
         for issueid in issuelist:
             comicname = None
+            entity_type = "issue"
             issue = db.select_one(select(issues).where(issues.c.IssueID == issueid))
             if issue is None:
-                issue = db.select_one(select(annuals).where((annuals.c.IssueID == issueid) & (annuals.c.Deleted != 1)))
-                if issue is None:
+                annual_issue = db.select_one(
+                    select(annuals).where((annuals.c.IssueID == issueid) & (annuals.c.Deleted != 1))
+                )
+                if annual_issue is not None:
+                    issue = annual_issue
+                    entity_type = "annual"
+                else:
                     issue = db.select_one(select(storyarcs).where(storyarcs.c.IssueArcID == issueid))
                     if issue is not None:
                         comicname = issue["ComicName"]
@@ -2792,7 +2893,9 @@ def searchIssueIDList(issuelist):
                 if comic["Corrected_Type"] is not None and comic["Type"] != comic["Corrected_Type"]:
                     booktype = comic["Corrected_Type"]
 
-            comicarr.SEARCH_QUEUE.put(
+            from comicarr.app.search.commands import enqueue_search_command
+
+            enqueue_search_command(
                 {
                     "comicname": comicname,
                     "seriesyear": seriesyear,
@@ -2800,7 +2903,9 @@ def searchIssueIDList(issuelist):
                     "issueid": issue["IssueID"],  # issueid,
                     "comicid": issue["ComicID"],
                     "booktype": booktype,
-                }
+                    "entity_type": entity_type,
+                },
+                trigger="issue_list",
             )
 
         logger.info("Completed queuing of search request.")
@@ -2962,6 +3067,22 @@ def _nzb_cache_path(cache_dir, nzbname):
     return str(resolve_remote_artifact_path(cache_dir, nzbname))
 
 
+def _configured_torrent_handoff_route():
+    if comicarr.USE_UTORRENT:
+        return "utorrent"
+    if comicarr.USE_RTORRENT:
+        return "rtorrent"
+    if comicarr.USE_TRANSMISSION:
+        return "transmission"
+    if comicarr.USE_DELUGE:
+        return "deluge"
+    if comicarr.USE_QBITTORRENT:
+        return "qbittorrent"
+    if comicarr.USE_WATCHDIR:
+        return "watchdir"
+    return "unknown"
+
+
 def searcher(
     nzbprov,
     nzbname,
@@ -2993,6 +3114,25 @@ def searcher(
         IssueArcID = comicinfo[0]["IssueArcID"]
     except Exception:
         IssueArcID = None
+
+    journal_issueid = IssueID if IssueID is not None else IssueArcID
+    from comicarr.app.downloads import journal as pipeline_journal
+
+    journal_payload = {
+        "issueid": journal_issueid,
+        "comicid": ComicID,
+        "provider": tmpprov,
+        "nzbname": nzbname,
+        "comicname": ComicName,
+        "issuenumber": IssueNumber,
+    }
+    journal_release_key = pipeline_journal.release_key(
+        journal_issueid,
+        tmpprov,
+        nzbname=nzbname,
+        discriminant=nzbid or nzbname or journal_payload,
+    )
+    journal_managed = False
 
     # setup the priorities.
     if comicarr.CONFIG.SAB_PRIORITY:
@@ -3287,6 +3427,10 @@ def searcher(
     sent_to = None
     t_hash = None
     if comicarr.CONFIG.ENABLE_DDL is True and "DDL" in nzbprov:
+        # Each durable DDL command owns its own reservation in ddl_downloader;
+        # updater must not create a second generic issue/provider row.
+        journal_release_key = None
+        journal_managed = True
         if all([IssueID is None, IssueArcID is not None]):
             tmp_issueid = IssueArcID
         else:
@@ -3361,8 +3505,22 @@ def searcher(
         if os.path.exists(comicarr.CONFIG.BLACKHOLE_DIR):
             # copy the nzb from nzbpath to blackhole dir.
             try:
-                shutil.move(nzbpath, os.path.join(comicarr.CONFIG.BLACKHOLE_DIR, nzbname))
-            except (OSError, IOError):
+
+                def _blackhole_sender():
+                    shutil.move(nzbpath, os.path.join(comicarr.CONFIG.BLACKHOLE_DIR, nzbname))
+                    return {"status": True}
+
+                handoff.perform_handoff(
+                    journal_release_key,
+                    "blackhole",
+                    _blackhole_sender,
+                    payload=journal_payload,
+                    issueid=journal_issueid,
+                    provider=tmpprov,
+                    nzbname=nzbname,
+                )
+                journal_managed = True
+            except (OSError, IOError, handoff.HandoffError):
                 logger.warn(
                     "Failed to move nzb into blackhole directory - check blackhole directory and/or permissions."
                 )
@@ -3421,7 +3579,21 @@ def searcher(
         logger.fdebug("Torrent Provider: %s" % nzbprov)
 
         # nzbid = hash for usage with public torrents
-        rcheck = rsscheck.torsend2client(ComicName, IssueNumber, comyear, link, nzbprov, nzbid)
+        torrent_route = _configured_torrent_handoff_route()
+        try:
+            rcheck, _route_acceptance = handoff.perform_handoff(
+                journal_release_key,
+                torrent_route,
+                lambda: rsscheck.torsend2client(ComicName, IssueNumber, comyear, link, nzbprov, nzbid),
+                payload=journal_payload,
+                issueid=journal_issueid,
+                provider=tmpprov,
+                nzbname=nzbname,
+            )
+            journal_managed = True
+        except Exception as e:
+            logger.error("Torrent handoff could not be durably completed: %s" % type(e).__name__)
+            return "torrent-fail"
         if rcheck == "fail":
             if comicarr.CONFIG.FAILED_DOWNLOAD_HANDLING:
                 logger.error(
@@ -3481,6 +3653,7 @@ def searcher(
                         "hash": rcheck["hash"],
                         "provider": nzbprov,
                         "nzbname": nzbname,
+                        "journal_release_key": journal_release_key,
                     }
                 )
             elif any([comicarr.USE_RTORRENT, comicarr.USE_DELUGE]) and comicarr.CONFIG.LOCAL_TORRENT_PP:
@@ -3491,6 +3664,7 @@ def searcher(
                         "hash": rcheck["hash"],
                         "provider": nzbprov,
                         "nzbname": nzbname,
+                        "journal_release_key": journal_release_key,
                     }
                 )
             else:
@@ -3509,6 +3683,8 @@ def searcher(
                                     nzbprov,
                                     t_hash,
                                     comicinfo[0]["IssueDate"],
+                                    journal_release_key=journal_release_key,
+                                    journal_managed=True,
                                 )
                                 pnumbers = None
                                 plist = None
@@ -3568,7 +3744,20 @@ def searcher(
         # nzb.get
         if comicarr.USE_NZBGET:
             ss = nzbget.NZBGet()
-            send_to_nzbget = ss.sender(nzbpath)
+            try:
+                send_to_nzbget, _route_acceptance = handoff.perform_handoff(
+                    journal_release_key,
+                    "nzbget",
+                    lambda: ss.sender(nzbpath),
+                    payload=journal_payload,
+                    issueid=journal_issueid,
+                    provider=tmpprov,
+                    nzbname=nzbname,
+                )
+                journal_managed = True
+            except Exception as e:
+                logger.error("NZBGet handoff could not be durably completed: %s" % type(e).__name__)
+                return "nzbget-fail"
             if comicarr.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True:
                 if send_to_nzbget["status"] is True:
                     send_to_nzbget["comicid"] = ComicID
@@ -3578,6 +3767,8 @@ def searcher(
                         send_to_nzbget["issueid"] = "S" + IssueArcID
                     send_to_nzbget["apicall"] = True
                     send_to_nzbget["download_info"] = {"provider": nzbprov, "id": nzbid}
+                    send_to_nzbget["journal_release_key"] = journal_release_key
+                    send_to_nzbget["clientmode"] = "nzbget"
                     comicarr.NZB_QUEUE.put(send_to_nzbget)
                 elif send_to_nzbget["status"] == "double-pp":
                     return send_to_nzbget["status"]
@@ -3725,7 +3916,20 @@ def searcher(
 
             if sab_params is not None:
                 ss = sabnzbd.SABnzbd(sab_params)
-                sendtosab = ss.sender()
+                try:
+                    sendtosab, _route_acceptance = handoff.perform_handoff(
+                        journal_release_key,
+                        "sabnzbd",
+                        ss.sender,
+                        payload=journal_payload,
+                        issueid=journal_issueid,
+                        provider=tmpprov,
+                        nzbname=nzbname,
+                    )
+                    journal_managed = True
+                except Exception as e:
+                    logger.error("SABnzbd handoff could not be durably completed: %s" % type(e).__name__)
+                    return "sab-fail"
                 if all(
                     [
                         sendtosab["status"] is True,
@@ -3739,7 +3943,9 @@ def searcher(
                         sendtosab["issueid"] = "S" + IssueArcID
                     sendtosab["apicall"] = True
                     sendtosab["download_info"] = {"provider": nzbprov, "id": nzbid}
-                    logger.info("sendtosab: %s" % sendtosab)
+                    sendtosab["journal_release_key"] = journal_release_key
+                    sendtosab["clientmode"] = "sabnzbd"
+                    logger.info("SABnzbd accepted download id=%s" % sendtosab.get("nzo_id"))
                     comicarr.NZB_QUEUE.put(sendtosab)
                 elif sendtosab["status"] == "double-pp":
                     return sendtosab["status"]
@@ -3813,6 +4019,8 @@ def searcher(
         "SARC": SARC,
         "alt_nzbname": alt_nzbname,
         "t_hash": t_hash,
+        "journal_release_key": journal_release_key,
+        "journal_managed": journal_managed,
     }
 
     # if it's a directsend link (ie. via a retry).
@@ -4402,6 +4610,21 @@ def searchforissue_checker(issueid, storedate, issuedate, digitaldate, info):
     # status issue check - check status to see if it's Downloaded / Snatched
     # already due to concurrent searches possibly.
     if issueid is not None:
+        from comicarr.app.search.commands import evaluate_search_candidate
+        from comicarr.app.series import queries as series_queries
+
+        candidate = info.get("candidate") or series_queries.get_search_candidate_state(
+            issueid,
+            entity_type=info.get("entity_type"),
+        )
+        if candidate is not None:
+            return evaluate_search_candidate(
+                candidate,
+                release_date=storedate,
+                digital_date=digitaldate,
+                issue_date=issuedate,
+            )
+
         isscheck = helpers.issue_status(issueid)
         # isscheck will return True if already Downloaded / Snatched,
         # False if it's still in a Wanted status.

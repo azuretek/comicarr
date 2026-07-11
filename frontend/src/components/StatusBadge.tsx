@@ -5,6 +5,7 @@ type BadgeVariant =
   | "active"
   | "paused"
   | "ended"
+  | "error"
   | "wanted"
   | "downloaded"
   | "skipped";
@@ -75,6 +76,18 @@ export default function StatusBadge({
       dotColor: "var(--status-skipped)",
       glowColor: "var(--status-skipped)",
     },
+    ignored: {
+      variant: "skipped",
+      label: "Ignored",
+      dotColor: "var(--status-skipped)",
+      glowColor: "var(--status-skipped)",
+    },
+    reserved: {
+      variant: "paused",
+      label: "Reserved",
+      dotColor: "var(--status-paused)",
+      glowColor: "var(--status-paused)",
+    },
     snatched: {
       variant: "active",
       label: "Snatched",
@@ -86,6 +99,24 @@ export default function StatusBadge({
       label: "Archived",
       dotColor: "var(--muted-foreground)",
       glowColor: "var(--muted-foreground)",
+    },
+    failed: {
+      variant: "error",
+      label: "Failed",
+      dotColor: "var(--status-error)",
+      glowColor: "var(--status-error)",
+    },
+    unknown: {
+      variant: "default",
+      label: "Unknown",
+      dotColor: "var(--muted-foreground)",
+      glowColor: "var(--muted-foreground)",
+    },
+    missing: {
+      variant: "wanted",
+      label: "Missing",
+      dotColor: "var(--status-wanted)",
+      glowColor: "var(--status-wanted)",
     },
   };
 

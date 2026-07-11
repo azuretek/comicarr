@@ -27,17 +27,25 @@ import comicarr
 from comicarr import db, getcomics, logger, nzbget, process, sabnzbd
 from comicarr.app.downloads import queries as dl_queries
 from comicarr.app.downloads.ddl_commands import DDLCommand, DDLCommandError
+from comicarr.app.downloads.pp_commands import PostProcessCommandError, configured_roots, validate_postprocess_item
 from comicarr.downloaders import mediafire, mega, pixeldrain
 from comicarr.tables import annuals, comics, ddl_info, issues, storyarcs, weekly
 
-# P1: bounded re-enqueue cap for the DDL atomic begin()-blocks. On a journal
-# raise inside one of those blocks BOTH ddl_info and journal roll back AND the
-# GetComics DDL path wrote no prior journal/foundsearch row — so nothing
-# (replay_pipeline / _reconstruct_anchors) would ever rescan it: the item is
-# lost forever. We re-put it on DDL_QUEUE (idempotent upsert + idempotent
-# record_transition ⇒ retry-safe) so it is genuinely recoverable, but cap the
-# requeues so a persistent DB failure surfaces loudly instead of hot-looping.
-_DDL_JOURNAL_REQUEUE_CAP = 3
+
+def _maintenance_retry_delay(item):
+    """Keep fenced monitor work durable without spinning a queue worker."""
+
+    if not isinstance(item, dict):
+        return 5
+    try:
+        attempt = int(item.get("_maintenance_retry_attempt", 0)) + 1
+    except (TypeError, ValueError):
+        attempt = 1
+    item["_maintenance_retry_attempt"] = attempt
+    from comicarr.app.acquisition.maintenance import maintenance_retry_delay
+
+    return maintenance_retry_delay(attempt)
+
 
 # ---------------------------------------------------------------------------
 # Download history
@@ -267,9 +275,15 @@ def requeue_ddl_item(item_id):
         return {"success": False, "error": "DDL item not found: %s" % item_id, "not_found": True}
 
     status = str(item.get("status") or item.get("Status") or "").strip()
-    # Failed = retry after terminal failure; Queued = re-handoff a durable orphan.
-    # Downloading/Completed must not be scheduled a second concurrent run.
-    if status and status not in {"Failed", "Queued"}:
+    # Only a terminal failure can be manually retried. Queued rows belong to
+    # the durable outbox/recovery worker; accepting them here would allow two
+    # concurrent requests to enqueue the same external download.
+    if status != "Failed":
+        if not status:
+            try:
+                DDLCommand.from_mapping(item)
+            except DDLCommandError as e:
+                return {"success": False, "error": str(e), "validation_error": True}
         return {
             "success": False,
             "error": "DDL item status %s cannot be requeued" % status,
@@ -282,7 +296,13 @@ def requeue_ddl_item(item_id):
         return {"success": False, "error": str(e), "validation_error": True}
 
     try:
-        dl_queries.update_ddl_status(item_id, "Queued")
+        claimed = dl_queries.claim_failed_ddl_retry(item_id)
+        if not claimed:
+            return {
+                "success": False,
+                "error": "DDL item changed before retry could be claimed",
+                "validation_error": True,
+            }
     except Exception as e:
         logger.error("[DOWNLOADS] Unable to update DDL item %s for requeue: %s" % (item_id, e))
         return {
@@ -291,8 +311,6 @@ def requeue_ddl_item(item_id):
             "operational_error": True,
         }
 
-    # Allow a deliberate requeue to supersede an in-memory owner for this id.
-    comicarr.DDL_QUEUED.discard(item_id)
     try:
         if not _enqueue_ddl_queue_item(comicarr.DDL_QUEUE, command.to_queue_item()):
             return {
@@ -912,6 +930,116 @@ def reverse_the_pack_snatch(pack_id, comicid):
         }
 
 
+def _finalize_ddl_download(item, ddzstat, release_key):
+    """Validate and durably hand a completed DDL artifact to PP.
+
+    Called by handoff.perform_handoff while its maintenance lease is still
+    active, so the file validation, downloaded transition and PP enqueue form
+    one owned side-effect window. It never re-runs the external download.
+    """
+    from comicarr.app.downloads import journal
+    from comicarr.helpers import check_file_condition
+
+    if ddzstat.get("success") and ddzstat.get("filename") is not None:
+        filecondition = check_file_condition(ddzstat.get("path"))
+        if not filecondition.get("status"):
+            ddzstat["success"] = False
+            ddzstat["link_type_failure"] = item.get("link_type")
+
+    if not ddzstat.get("success"):
+        journal.mark_failed(
+            release_key,
+            "ddl_download_or_artifact_validation_failed",
+            payload={
+                "issueid": item.get("issueid"),
+                "comicid": item.get("comicid"),
+                "provider": "DDL",
+                "ddl_id": item.get("id"),
+                "filename": item.get("filename"),
+                "ddl": True,
+            },
+            issueid=item.get("issueid"),
+            provider="DDL",
+            downloader_type="ddl",
+            nzbname=item.get("filename"),
+        )
+        return False
+
+    nzb_name = ddzstat.get("filename") or os.path.basename(ddzstat["path"])
+    payload = {
+        "issueid": item.get("issueid"),
+        "comicid": item.get("comicid"),
+        "provider": "DDL",
+        "ddl_id": item.get("id"),
+        "id": item.get("id"),
+        "series": item.get("series"),
+        "filename": item.get("filename"),
+        "ddl": True,
+        "nzb_folder": ddzstat["path"],
+        "nzb_name": nzb_name,
+        "download_info": {"provider": "DDL", "id": item.get("id")},
+    }
+    completed = {"status": "Completed", "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+    try:
+        with db.get_engine().begin() as conn:
+            db.upsert_conn(conn, "ddl_info", completed, {"ID": item["id"]})
+            won = journal.record_transition(
+                release_key,
+                journal.DOWNLOADED,
+                payload=payload,
+                conn=conn,
+                issueid=item.get("issueid"),
+                provider="DDL",
+                downloader_type="ddl",
+                nzbname=item.get("filename"),
+            )
+            if not won:
+                current = journal.read_one(release_key)
+                if not current or current.get("stage") != journal.DOWNLOADED:
+                    raise RuntimeError("DDL downloaded transition did not advance the accepted obligation")
+    except Exception as e:
+        # The artifact is already on disk. Preserve that fact and force an
+        # operator decision; never amplify this into another external fetch.
+        try:
+            db.upsert("ddl_info", completed, {"ID": item["id"]})
+            journal.mark_manual_review(
+                release_key,
+                "ddl_artifact_state_persistence_error:%s" % type(e).__name__,
+                payload=payload,
+                issueid=item.get("issueid"),
+                provider="DDL",
+                downloader_type="ddl",
+                nzbname=item.get("filename"),
+            )
+        finally:
+            raise
+
+    if comicarr.CONFIG.POST_PROCESSING is True:
+        comicarr.PP_QUEUE.put(
+            {
+                "nzb_name": nzb_name,
+                "nzb_folder": ddzstat["path"],
+                "failed": False,
+                "issueid": item.get("issueid"),
+                "comicid": item.get("comicid"),
+                "apicall": True,
+                "ddl": True,
+                "download_info": {"provider": "DDL", "id": item.get("id")},
+                "journal_release_key": release_key,
+            }
+        )
+    else:
+        journal.mark_done(
+            release_key,
+            payload=payload,
+            issueid=item.get("issueid"),
+            provider="DDL",
+            downloader_type="ddl",
+            nzbname=item.get("filename"),
+        )
+    return True
+
+
 def ddl_downloader(queue):
     """Run the DDL worker without allowing one poison item to stop it."""
     active_item = {"value": None}
@@ -993,7 +1121,7 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
             active_item["value"] = item
             command = DDLCommand.from_mapping(item)
             canonical_item = command.to_queue_item()
-            for internal_key in ("_journal_retry", "link_type_failure", "ddl"):
+            for internal_key in ("_journal_retry", "link_type_failure", "ddl", "journal_release_key"):
                 if internal_key in item:
                     canonical_item[internal_key] = item[internal_key]
             item = canonical_item
@@ -1009,22 +1137,16 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
             ctrlval = {"ID": item["id"]}
             val = {"status": "Downloading", "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
 
-            # --- DDL snatch: ddl_info status='Downloading' + journal snatched ---
-            # Unlike the NZB/torrent seam (where db.upsert owns its own txn so
-            # the journal write is ordered-LAST), the DDL "download started"
-            # write is atomic-capable: a single explicit begin() block writes
-            # the ddl_info row AND the journal `snatched` row together via
-            # db.upsert_conn (same dialect-aware ON CONFLICT as db.upsert, on
-            # the shared conn), so there is NO residual window — if the block
-            # raises, BOTH rows roll back. The ddl_info conflict key column is
-            # "ID" (UPSERT_KEYS["ddl_info"]); the key_dict uses the real column
-            # name, not the legacy lowercase "id" alias.
-            from comicarr.app.downloads import journal
+            # Persist the durable command state first. The journal reservation
+            # is acquired below, inside the maintenance lease, immediately
+            # before the external download/file-write side effect.
+            from comicarr.app.acquisition.maintenance import MaintenanceBlocked
+            from comicarr.app.downloads import handoff, journal
 
             ddl_issueid = item.get("issueid")
             ddl_payload = {key: value for key, value in item.items() if not key.startswith("_")}
             ddl_payload.update({"provider": "DDL", "ddl": True})
-            ddl_rkey = journal.release_key(
+            ddl_rkey = item.get("journal_release_key") or journal.release_key(
                 ddl_issueid,
                 "DDL",
                 nzbname=item.get("filename"),
@@ -1032,133 +1154,124 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                 discriminant=item["id"],
             )
             try:
-                with db.get_engine().begin() as conn:
-                    db.upsert_conn(conn, "ddl_info", val, {"ID": item["id"]})
-                    journal.record_transition(
-                        ddl_rkey,
-                        journal.SNATCHED,
-                        payload=ddl_payload,
-                        conn=conn,
-                        issueid=ddl_issueid,
-                        provider="DDL",
-                        downloader_type="ddl",
-                        nzbname=item.get("filename"),
-                    )
+                db.upsert("ddl_info", val, {"ID": item["id"]})
             except Exception as e:
-                # P1: a journal raise (OperationalError 5-retry cap, or
-                # IntegrityError) inside this atomic block must NOT propagate
-                # through the `while True` loop and permanently kill the DDL
-                # worker thread. begin() auto-rolls-back, so ddl_info + journal
-                # roll back together (consistent). But the GetComics DDL path
-                # writes ddl_info+DDL_QUEUE.put with NO prior journal/
-                # foundsearch row, so on rollback there is NO journal row,
-                # ddl_info reverts, and NOTHING (replay/_reconstruct_anchors,
-                # which never scans ddl_info) would recover it — the item is
-                # lost forever. Re-enqueue it (the ddl_info upsert + journal
-                # record_transition are idempotent ⇒ retry-safe), bounded so a
-                # persistent DB failure surfaces loudly instead of hot-looping.
-                item["_journal_retry"] = item.get("_journal_retry", 0) + 1
-                if item["_journal_retry"] > _DDL_JOURNAL_REQUEUE_CAP:
-                    logger.error(
-                        "[DOWNLOADS-DDL] snatch atomic block failed %d times for "
-                        "%s (id=%s) — exceeded requeue cap (%d); NOT requeuing. "
-                        "This indicates a persistent DB failure (system down) — "
-                        "surfacing loudly rather than spinning: %s"
-                        % (
-                            item["_journal_retry"],
-                            item.get("series"),
-                            item.get("id"),
-                            _DDL_JOURNAL_REQUEUE_CAP,
-                            e,
-                        )
-                    )
-                    # Item is abandoned (cap exceeded, not requeued): mark
-                    # durable Failed so it is not stuck as Downloading/Queued,
-                    # then clear in-memory ownership for the process lifetime.
-                    try:
-                        db.upsert(
-                            "ddl_info",
-                            {
-                                "status": "Failed",
-                                "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            },
-                            {"ID": item["id"]},
-                        )
-                    except Exception as status_error:
-                        logger.error(
-                            "[DOWNLOADS-DDL] Unable to mark Failed after journal requeue cap for %s: %s"
-                            % (item.get("id"), status_error)
-                        )
-                    comicarr.DDL_QUEUED.discard(item["id"])
-                    comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
-                    try:
-                        link_type_failure.pop(item["id"])
-                    except KeyError:
-                        pass
-                    continue
                 logger.error(
-                    "[DOWNLOADS-DDL] snatch atomic block failed for %s (id=%s) "
-                    "— ddl_info+journal rolled back together; re-enqueued on "
-                    "DDL_QUEUE (attempt %d/%d, idempotent retry) so it is "
-                    "genuinely recoverable; continuing: %s"
-                    % (
-                        item.get("series"),
-                        item.get("id"),
-                        item["_journal_retry"],
-                        _DDL_JOURNAL_REQUEUE_CAP,
-                        e,
-                    )
+                    "[DOWNLOADS-DDL] could not persist Downloading state for id=%s; external side effect NOT started: %s"
+                    % (item.get("id"), type(e).__name__)
                 )
-                # Requeued for an idempotent retry: clear stale per-attempt
-                # in-memory state (stuck-notify + link-failure) so it does not
-                # drift for the process lifetime, but keep the DDL_QUEUED
-                # membership intact so the re-put item's dedup state stays
-                # consistent (line ~772 re-adds it harmlessly on reprocess).
-                comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
-                try:
-                    link_type_failure.pop(item["id"])
-                except KeyError:
-                    pass
-                comicarr.DDL_QUEUE.put(item)
+                comicarr.DDL_QUEUED.discard(item["id"])
                 continue
 
-            if item["site"] == "DDL(GetComics)":
-                try:
-                    remote_filesize = item["remote_filesize"]
-                except Exception:
+            ddl_result = {}
+            ddl_finalization = {"complete": False}
+
+            def _run_ddl_side_effect(item=item, ddl_result=ddl_result):
+                if item["site"] == "DDL(GetComics)":
                     try:
-                        from comicarr.helpers import human2bytes
-
-                        remote_filesize = human2bytes(re.sub("/s", "", item["size"][:-1]).strip())
+                        remote_filesize = item["remote_filesize"]
                     except Exception:
-                        remote_filesize = 0
+                        try:
+                            from comicarr.helpers import human2bytes
 
-                if item["link_type"] in {"GC-Main", "GC-Mirror"}:
-                    ddz = getcomics.GC()
-                    ddzstat = ddz.downloadit(
-                        id=item["id"],
-                        link=item["link"],
-                        mainlink=item["mainlink"],
-                        resume=item["resume"],
-                        issueid=item["issueid"],
-                        remote_filesize=remote_filesize,
-                        link_type=item["link_type"],
+                            remote_filesize = human2bytes(re.sub("/s", "", item["size"][:-1]).strip())
+                        except Exception:
+                            remote_filesize = 0
+
+                    if item["link_type"] in {"GC-Main", "GC-Mirror"}:
+                        ddz = getcomics.GC()
+                        result = ddz.downloadit(
+                            id=item["id"],
+                            link=item["link"],
+                            mainlink=item["mainlink"],
+                            resume=item["resume"],
+                            issueid=item["issueid"],
+                            remote_filesize=remote_filesize,
+                            link_type=item["link_type"],
+                        )
+                    elif item["link_type"] == "GC-Mega":
+                        result = mega.MegaNZ().ddl_download(
+                            item["link"], None, item["id"], item["issueid"], item["link_type"]
+                        )
+                    elif item["link_type"] == "GC-Media":
+                        result = mediafire.MediaFire().ddl_download(item["link"], item["id"], item["issueid"])
+                    else:
+                        result = pixeldrain.PixelDrain().ddl_download(item["link"], item["id"], item["issueid"])
+                else:
+                    result = mega.MegaNZ().ddl_download(
+                        item["link"], item["filename"], item["id"], item["issueid"], item["link_type"]
                     )
-                elif item["link_type"] == "GC-Mega":
-                    meganz = mega.MegaNZ()
-                    ddzstat = meganz.ddl_download(item["link"], None, item["id"], item["issueid"], item["link_type"])
-                elif item["link_type"] == "GC-Media":
-                    mediaf = mediafire.MediaFire()
-                    ddzstat = mediaf.ddl_download(item["link"], item["id"], item["issueid"])
-                elif item["link_type"] == "GC-Pixel":
-                    pdrain = pixeldrain.PixelDrain()
-                    ddzstat = pdrain.ddl_download(item["link"], item["id"], item["issueid"])
+                ddl_result["value"] = result
+                return {"status": bool(result.get("success")), "ddl_id": item["id"]}
 
-            elif item["site"] == "DDL(External)":
-                meganz = mega.MegaNZ()
-                ddzstat = meganz.ddl_download(
-                    item["link"], item["filename"], item["id"], item["issueid"], item["link_type"]
+            def _finalize_ddl_handoff(
+                _response,
+                _acceptance,
+                item=item,
+                ddl_result=ddl_result,
+                ddl_rkey=ddl_rkey,
+                ddl_finalization=ddl_finalization,
+            ):
+                ddl_finalization["complete"] = _finalize_ddl_download(item, ddl_result["value"], ddl_rkey)
+
+            try:
+                handoff.perform_handoff(
+                    ddl_rkey,
+                    "ddl",
+                    _run_ddl_side_effect,
+                    payload=ddl_payload,
+                    owner="ddl-worker",
+                    issueid=ddl_issueid,
+                    provider="DDL",
+                    nzbname=item.get("filename"),
+                    finalizer=_finalize_ddl_handoff,
+                    resume_accepted=bool(item.get("journal_release_key")),
                 )
+            except MaintenanceBlocked:
+                db.upsert(
+                    "ddl_info",
+                    {"status": "Queued", "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")},
+                    {"ID": item["id"]},
+                )
+                comicarr.DDL_QUEUED.discard(item["id"])
+                logger.info("[DOWNLOADS-DDL] Maintenance fence retained id=%s as durable Queued work." % item["id"])
+                continue
+            except Exception as e:
+                logger.error(
+                    "[DOWNLOADS-DDL] external outcome for id=%s requires review; not re-downloading: %s"
+                    % (item.get("id"), type(e).__name__)
+                )
+                try:
+                    current = journal.read_one(ddl_rkey)
+                    if current and current.get("stage") == journal.MANUAL_REVIEW:
+                        status = "Manual Review"
+                    elif (ddl_result.get("value") or {}).get("success"):
+                        status = "Completed"
+                    elif current and journal.stage_rank(current.get("stage")) >= journal.stage_rank(journal.DOWNLOADED):
+                        status = "Completed"
+                    else:
+                        status = "Failed"
+                    db.upsert(
+                        "ddl_info",
+                        {"status": status, "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")},
+                        {"ID": item["id"]},
+                    )
+                except Exception as status_error:
+                    logger.error(
+                        "[DOWNLOADS-DDL] unable to reconcile durable status for id=%s: %s"
+                        % (item.get("id"), type(status_error).__name__)
+                    )
+                comicarr.DDL_QUEUED.discard(item["id"])
+                continue
+            ddzstat = ddl_result["value"]
+
+            if ddl_finalization["complete"]:
+                comicarr.DDL_QUEUED.discard(item["id"])
+                comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
+                link_type_failure.pop(item["id"], None)
+                ddl_cleanup(item["id"])
+                active_item["value"] = None
+                continue
 
             if ddzstat["success"] and ddzstat["filename"] is not None:
                 filecondition = check_file_condition(ddzstat["path"])
@@ -1225,88 +1338,39 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                         )
                     logger.fdebug("[DOWNLOADS-DDL] Journaled downloaded for %s" % ddlc_rkey)
                 except Exception as e:
-                    # P1: same protection as the snatch block. begin()
-                    # auto-rolls-back, so ddl_info status='Completed' + journal
-                    # `downloaded` roll back together (consistent). With no
-                    # journal row and ddl_info reverted, replay would never
-                    # rescan this item, so re-enqueue it (idempotent upsert +
-                    # record_transition ⇒ retry-safe) instead of dropping the
-                    # PP handoff and losing it. Bounded so a persistent DB
-                    # failure surfaces loudly instead of hot-looping.
-                    item["_journal_retry"] = item.get("_journal_retry", 0) + 1
-                    if item["_journal_retry"] > _DDL_JOURNAL_REQUEUE_CAP:
-                        logger.error(
-                            "[DOWNLOADS-DDL] downloaded atomic block failed %d "
-                            "times for %s (id=%s) — exceeded requeue cap (%d); "
-                            "NOT requeuing. Persistent DB failure (system down) "
-                            "— surfacing loudly rather than spinning: %s"
-                            % (
-                                item["_journal_retry"],
-                                item.get("series"),
-                                item.get("id"),
-                                _DDL_JOURNAL_REQUEUE_CAP,
-                                e,
-                            )
-                        )
-                        # Item is abandoned (cap exceeded, not requeued): mark
-                        # durable Failed so post-download work is not left as
-                        # permanent Downloading without a terminal state.
-                        try:
-                            db.upsert(
-                                "ddl_info",
-                                {
-                                    "status": "Failed",
-                                    "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                                },
-                                {"ID": item["id"]},
-                            )
-                        except Exception as status_error:
-                            logger.error(
-                                "[DOWNLOADS-DDL] Unable to mark Failed after journal requeue cap for %s: %s"
-                                % (item.get("id"), status_error)
-                            )
-                        comicarr.DDL_QUEUED.discard(item["id"])
-                        comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
-                        try:
-                            link_type_failure.pop(item["id"])
-                        except KeyError:
-                            pass
-                        continue
                     logger.error(
-                        "[DOWNLOADS-DDL] downloaded atomic block failed for %s "
-                        "(id=%s) — ddl_info+journal rolled back together; "
-                        "re-enqueued on DDL_QUEUE (attempt %d/%d, idempotent "
-                        "retry) so it is genuinely recoverable; continuing: %s"
-                        % (
-                            item.get("series"),
-                            item.get("id"),
-                            item["_journal_retry"],
-                            _DDL_JOURNAL_REQUEUE_CAP,
-                            e,
-                        )
+                        "[DOWNLOADS-DDL] artifact exists for id=%s but downloaded-state persistence failed; "
+                        "quarantining without re-downloading: %s" % (item.get("id"), type(e).__name__)
                     )
-                    # AMPLIFICATION NOTE: re-enqueuing here restarts the loop
-                    # at the top, which re-runs the FULL DDL download (the
-                    # source fetch, not just this failed post-download journal
-                    # write) purely to retry the journal transition. This is
-                    # accepted: the requeue cap (_DDL_JOURNAL_REQUEUE_CAP=3)
-                    # bounds the re-download blast radius, downloaders support
-                    # resume, and a persistent DB failure surfaces loudly via
-                    # the cap above rather than hot-looping. No finer-grained
-                    # "journal-only retry" path exists by design (keeping a
-                    # single recoverable restart point).
-                    # Requeued for an idempotent retry: clear stale per-attempt
-                    # in-memory state (stuck-notify + link-failure) so it does
-                    # not drift for the process lifetime, but keep the
-                    # DDL_QUEUED membership intact so the re-put item's dedup
-                    # state stays consistent (line ~772 re-adds it harmlessly
-                    # on reprocess).
+                    try:
+                        db.upsert(
+                            "ddl_info",
+                            {
+                                "status": "Manual Review",
+                                "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            },
+                            {"ID": item["id"]},
+                        )
+                        journal.mark_manual_review(
+                            ddlc_rkey,
+                            "ddl_artifact_state_persistence_error:%s" % type(e).__name__,
+                            payload=ddlc_payload,
+                            issueid=ddlc_issueid,
+                            provider="DDL",
+                            downloader_type="ddl",
+                            nzbname=item.get("filename"),
+                        )
+                    except Exception as quarantine_error:
+                        logger.error(
+                            "[DOWNLOADS-DDL] unable to persist quarantine for id=%s: %s"
+                            % (item.get("id"), type(quarantine_error).__name__)
+                        )
+                    comicarr.DDL_QUEUED.discard(item["id"])
                     comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
                     try:
                         link_type_failure.pop(item["id"])
                     except KeyError:
                         pass
-                    comicarr.DDL_QUEUE.put(item)
                     continue
 
             if all([ddzstat["success"] is True, comicarr.CONFIG.POST_PROCESSING is True]):
@@ -1488,41 +1552,69 @@ def postprocess_main(queue):
             queue.put(item)
             time.sleep(1)
             continue
-        pp = None
-        logger.info("Now loading from post-processing queue: %s" % item)
+        logger.info(
+            "Now loading post-processing command name=%s issueid=%s"
+            % (
+                item.get("nzb_name") if isinstance(item, dict) else "unknown",
+                item.get("issueid") if isinstance(item, dict) else None,
+            )
+        )
 
-        # PP-consumer idempotency guard: a single atomic conditional advance
-        # `downloaded -> post_processing` (the convergence point for every
-        # duplicate-enqueue source). Exactly one concurrent caller wins; losers
-        # (already >= post_processing / terminal / concurrent winner) drop.
-        #
-        # Key contract: for a journaled download consume the propagated
-        # `journal_release_key` VERBATIM — never re-derive (a PP item carries
-        # no provider/hash, so re-derivation would diverge from the snatch /
-        # downloaded row and silently void exactly-once). Derive a key ONLY
-        # for genuinely unjournaled manual/API/ComicRN PP (no row exists; the
-        # advance is then a behavior-neutral insert-if-absent). On a journal
-        # error inside the guard we do NOT crash — fall through to PP, whose
-        # existing Status in ("Wanted","Snatched") guard is the secondary net.
-        canonical_release_key = None
         try:
-            from comicarr.app.downloads import journal
+            item = validate_postprocess_item(item, roots=_configured_postprocess_roots())
+        except PostProcessCommandError as e:
+            _quarantine_postprocess_item(item, "invalid_postprocess_command:%s" % type(e).__name__)
+            logger.error("[DOWNLOADS-PP] Rejected unsafe post-processing command: %s" % e)
+            continue
 
-            propagated_key = item.get("journal_release_key")
-            if propagated_key:
-                # Journaled download: consume the exact key the producer
-                # stamped from its `downloaded` write. NEVER re-derive here.
-                canonical_release_key = propagated_key
-            else:
-                # Genuinely unjournaled PP (manual/API force_process:107 /
-                # ComicRN — no journal row exists). Derive from the guaranteed
-                # field intersection; the advance is insert-if-absent / no-op.
-                claim_ident = {
-                    "issueid": item.get("issueid"),
-                    "comicid": item.get("comicid"),
-                    "nzbname": item.get("nzb_name"),
-                }
-                canonical_release_key = journal.derive_release_key(claim_ident)
+        outcome, pp = _run_owned_postprocess(item)
+        if outcome == "requeue":
+            queue.put(item)
+            time.sleep(1)
+            continue
+        if outcome in {"drop", "failed"}:
+            continue
+        if pp is not None:
+            try:
+                if pp["mode"] == "stop" and comicarr.APILOCK.locked():
+                    comicarr.APILOCK.release()
+            except (KeyError, TypeError):
+                pass
+        if comicarr.APILOCK.locked():
+            logger.info("Another item is post-processing still...")
+            time.sleep(15)
+
+
+def _run_owned_postprocess(item):
+    """Acquire the maintenance lease before the CAS and hold it through PP."""
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+    from comicarr.app.downloads import journal
+
+    propagated_key = item.get("journal_release_key")
+    claim_ident = {
+        "issueid": item.get("issueid"),
+        "comicid": item.get("comicid"),
+        "nzbname": item.get("nzb_name"),
+    }
+    intended_key = propagated_key or journal.derive_release_key(claim_ident)
+    controller = MaintenanceController()
+    try:
+        lease = controller.acquire_lease(
+            "postprocess-worker",
+            "postprocess",
+            entity_type="release",
+            entity_id=intended_key,
+        )
+    except MaintenanceBlocked:
+        return "requeue", None
+
+    canonical_release_key = intended_key
+    try:
+        controller.assert_lease_current(lease)
+        # Revalidate inside the held lease immediately before the claim and
+        # filesystem work, closing the common validate-then-symlink-swap gap.
+        item = validate_postprocess_item(item, roots=_configured_postprocess_roots())
+        try:
             won = journal.record_transition(
                 canonical_release_key,
                 journal.POST_PROCESSING,
@@ -1536,24 +1628,23 @@ def postprocess_main(queue):
                 },
                 issueid=item.get("issueid"),
             )
-            if won is False:
-                # Lost the claim (already >= post_processing / terminal, or a
-                # concurrent winner took it). Drop the item — no second
-                # process.Process. This is the exactly-once convergence point.
-                logger.info(
-                    "[DOWNLOADS-PP] Idempotency claim LOST for %s — already "
-                    "post-processing/processed or claimed concurrently; "
-                    "dropping duplicate." % canonical_release_key
-                )
-                continue
-            logger.fdebug("[DOWNLOADS-PP] Idempotency claim WON for %s" % canonical_release_key)
         except Exception as e:
-            # Journal unreachable mid-claim — do NOT crash the worker. Fall
-            # through to PP; the existing Status guard is the fallback.
+            if propagated_key:
+                logger.error(
+                    "[DOWNLOADS-PP] Durable claim failed for journaled item %s; retaining without side effect: %s"
+                    % (canonical_release_key, type(e).__name__)
+                )
+                return "requeue", None
             logger.error(
-                "[DOWNLOADS-PP] Journal error during idempotency claim (falling through to Status guard): %s" % e
+                "[DOWNLOADS-PP] Journal unavailable for explicit legacy/manual PP; using legacy status guard: %s"
+                % type(e).__name__
             )
             canonical_release_key = None
+            won = True
+
+        if won is False:
+            logger.info("[DOWNLOADS-PP] Idempotency claim lost for %s; dropping duplicate." % canonical_release_key)
+            return "drop", None
 
         try:
             pprocess = process.Process(
@@ -1567,28 +1658,72 @@ def postprocess_main(queue):
                 item["download_info"],
                 journal_release_key=canonical_release_key,
             )
-        except Exception:
+        except (KeyError, TypeError):
             pprocess = process.Process(
                 item["nzb_name"],
                 item["nzb_folder"],
-                item["failed"],
-                item["issueid"],
-                item["comicid"],
-                item["apicall"],
+                item.get("failed", False),
+                item.get("issueid"),
+                item.get("comicid"),
+                item.get("apicall", False),
                 journal_release_key=canonical_release_key,
             )
-        pp = pprocess.post_process()
-        if pp is not None:
-            if pp["mode"] == "stop":
-                comicarr.APILOCK.release()
+        return "processed", pprocess.post_process()
+    except PostProcessCommandError as e:
+        _quarantine_postprocess_item(
+            item,
+            "invalid_postprocess_command:%s" % type(e).__name__,
+            release_key=canonical_release_key,
+        )
+        logger.error("[DOWNLOADS-PP] Command changed after validation; quarantined: %s" % e)
+        return "failed", None
+    except MaintenanceBlocked:
+        return "requeue", None
+    except Exception as e:
+        _quarantine_postprocess_item(
+            item,
+            "postprocess_error:%s" % type(e).__name__,
+            release_key=canonical_release_key,
+        )
         if comicarr.APILOCK.locked():
-            logger.info("Another item is post-processing still...")
-            time.sleep(15)
+            try:
+                comicarr.APILOCK.release()
+            except RuntimeError:
+                pass
+        logger.error("[DOWNLOADS-PP] Owned post-processing failed; item quarantined: %s" % type(e).__name__)
+        return "failed", None
+    finally:
+        controller.release_lease(lease.lease_id)
+
+
+def _configured_postprocess_roots():
+    return configured_roots()
+
+
+def _quarantine_postprocess_item(item, reason, release_key=None):
+    from comicarr.app.downloads import journal
+
+    if not isinstance(item, dict):
+        return False
+    key = release_key or item.get("journal_release_key")
+    if not key:
+        key = journal.derive_release_key(item)
+    try:
+        return journal.mark_manual_review(
+            key,
+            reason,
+            payload=item,
+            issueid=item.get("issueid"),
+        )
+    except Exception as e:
+        logger.error("[DOWNLOADS-PP] Unable to persist quarantine for %s: %s" % (key, type(e).__name__))
+        return False
 
 
 def worker_main(queue):
     import queue as queue_module
 
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
     from comicarr.app.search.service import torrentinfo
 
     while True:
@@ -1596,127 +1731,118 @@ def worker_main(queue):
             item = queue.get(timeout=15)
         except queue_module.Empty:
             continue
-        logger.info("Now loading from queue: %s" % item)
         if item == "exit":
             logger.info("Cleaning up workers for shutdown")
             break
-        snstat = torrentinfo(torrent_hash=item["hash"], download=True)
-        if snstat["snatch_status"] == "IN PROGRESS":
-            logger.info("Still downloading in client....let us try again momentarily.")
-            time.sleep(30)
-            comicarr.SNATCHED_QUEUE.put(item)
-        elif any([snstat["snatch_status"] == "MONITOR FAIL", snstat["snatch_status"] == "MONITOR COMPLETE"]):
-            logger.info("File copied for post-processing - submitting as a direct pp.")
+        controller = MaintenanceController()
+        try:
+            with controller.lease(
+                "torrent-monitor",
+                "download-monitor",
+                entity_type="release",
+                entity_id=item.get("journal_release_key") or item.get("hash"),
+            ) as lease:
+                controller.assert_lease_current(lease)
+                item.pop("_maintenance_retry_attempt", None)
+                snstat = torrentinfo(torrent_hash=item["hash"], download=True)
+                _handle_torrent_monitor_result(item, snstat)
+        except MaintenanceBlocked:
+            queue.put(item)
+            time.sleep(_maintenance_retry_delay(item))
 
-            # downloaded marker, written before the PP_QUEUE.put. The exact
-            # rkey is propagated onto the PP item as `journal_release_key` so
-            # the atomic claim advances THIS row — it must NOT be re-derived
-            # from the PP item (no provider/hash there ⇒ a divergent orphan
-            # key voiding exactly-once). None only if the journal write failed,
-            # in which case the consumer fallback re-derivation handles it.
-            torrent_journal_release_key = None
-            try:
-                from comicarr.app.downloads import journal
 
-                journal_payload = {
-                    "issueid": item.get("issueid"),
-                    "comicid": item.get("comicid"),
-                    "hash": item.get("hash"),
-                    "nzb_name": os.path.basename(snstat["copied_filepath"]),
-                    "nzb_folder": snstat["copied_filepath"],
-                    "apicall": True,
-                    "ddl": False,
-                }
-                rkey = journal.release_key(
-                    item.get("issueid"),
-                    item.get("provider"),
-                    nzbname=item.get("nzbname"),
-                    hash=item.get("hash"),
-                    discriminant=item.get("hash") or item.get("provider") or journal_payload,
-                )
-                journal.record_transition(
-                    rkey,
-                    journal.DOWNLOADED,
-                    payload=journal_payload,
-                    issueid=item.get("issueid"),
-                    provider=item.get("provider"),
-                    downloader_type="torrent",
-                    nzbname=item.get("nzbname"),
-                    hash=item.get("hash"),
-                )
-                torrent_journal_release_key = rkey
-                logger.fdebug("[DOWNLOADS-WORKER] Journaled downloaded for %s" % rkey)
-            except Exception as e:
-                # A journal failure must NOT block the PP handoff (additive /
-                # inert). Log loudly; replay closes any residual window.
-                logger.error("[DOWNLOADS-WORKER] Journal downloaded transition failed: %s" % e)
+def _handle_torrent_monitor_result(item, snstat):
+    from comicarr.app.downloads import journal
 
-            comicarr.PP_QUEUE.put(
-                {
-                    "nzb_name": os.path.basename(snstat["copied_filepath"]),
-                    "nzb_folder": snstat["copied_filepath"],
-                    "failed": False,
-                    "issueid": item["issueid"],
-                    "comicid": item["comicid"],
-                    "apicall": True,
-                    "ddl": False,
-                    "download_info": None,
-                    "journal_release_key": torrent_journal_release_key,
-                }
-            )
-        elif snstat["snatch_status"] == "NOT FOUND":
-            # P1-4: U5 made torrentinfo() return an EXPLICIT NOT FOUND when the
-            # hash is absent from the client. Without this branch the item fell
-            # through every if/elif and was SILENTLY dropped — no log, no
-            # journal mark, the journal row stuck forever at `snatched`. The
-            # row IS journaled snatched (foundsearch snatch seam), so derive
-            # the SAME canonical release_key (P0-1 single-derivation: the item
-            # now carries provider+nzbname+hash from the SNATCHED_QUEUE put)
-            # and journal mark_failed with a distinguishable fail_reason so the
-            # item is visible/recoverable (R9) rather than silently lost.
-            logger.error(
-                "[DOWNLOADS-WORKER] torrent hash not found in client for "
-                "issueid=%s comicid=%s hash=%s — marking the journal row "
-                "failed (recoverable, not silently dropped)."
-                % (item.get("issueid"), item.get("comicid"), item.get("hash"))
-            )
-            try:
-                from comicarr.app.downloads import journal
+    status = snstat.get("snatch_status")
+    if status == "IN PROGRESS":
+        logger.info("Torrent is still downloading; scheduling another monitor pass.")
+        comicarr.SNATCHED_QUEUE.put(item)
+        return
 
-                fail_payload = {
-                    "issueid": item.get("issueid"),
-                    "comicid": item.get("comicid"),
-                    "hash": item.get("hash"),
-                    "provider": item.get("provider"),
-                    "nzbname": item.get("nzbname"),
-                    "apicall": True,
-                    "ddl": False,
-                }
-                fail_rkey = journal.release_key(
-                    item.get("issueid"),
-                    item.get("provider"),
-                    nzbname=item.get("nzbname"),
-                    hash=item.get("hash"),
-                    discriminant=item.get("hash") or item.get("provider") or fail_payload,
-                )
-                journal.mark_failed(
-                    fail_rkey,
-                    "torrent_hash_not_in_client",
-                    payload=fail_payload,
-                    issueid=item.get("issueid"),
-                    provider=item.get("provider"),
-                    downloader_type="torrent",
-                    nzbname=item.get("nzbname"),
-                    hash=item.get("hash"),
-                )
-            except Exception as e:
-                logger.error(
-                    "[DOWNLOADS-WORKER] could not journal mark_failed for "
-                    "NOT FOUND torrent (issueid=%s): %s" % (item.get("issueid"), e)
-                )
+    payload = {
+        "issueid": item.get("issueid"),
+        "comicid": item.get("comicid"),
+        "hash": item.get("hash"),
+        "provider": item.get("provider"),
+        "nzbname": item.get("nzbname"),
+        "apicall": True,
+        "ddl": False,
+    }
+    rkey = item.get("journal_release_key") or journal.release_key(
+        item.get("issueid"),
+        item.get("provider"),
+        nzbname=item.get("nzbname"),
+        hash=item.get("hash"),
+        discriminant=item.get("nzbname") or payload,
+    )
+
+    if status == "NOT FOUND":
+        logger.error(
+            "[DOWNLOADS-WORKER] torrent hash not found in client for issueid=%s; marking failed." % item.get("issueid")
+        )
+        journal.mark_failed(
+            rkey,
+            "torrent_hash_not_in_client",
+            payload=payload,
+            issueid=item.get("issueid"),
+            provider=item.get("provider"),
+            downloader_type="torrent",
+            nzbname=item.get("nzbname"),
+            hash=item.get("hash"),
+        )
+        return
+
+    if status not in {"MONITOR FAIL", "MONITOR COMPLETE"}:
+        logger.warn("[DOWNLOADS-WORKER] Unhandled torrent monitor status=%s; retaining journal state." % status)
+        return
+
+    copied_path = snstat.get("copied_filepath")
+    payload.update({"nzb_name": os.path.basename(copied_path or ""), "nzb_folder": copied_path})
+    try:
+        existing = journal.read_one(rkey)
+        downloader_type = (existing or {}).get("downloader_type") or item.get("clientmode") or "torrent"
+        won = journal.record_transition(
+            rkey,
+            journal.DOWNLOADED,
+            payload=payload,
+            issueid=item.get("issueid"),
+            provider=item.get("provider"),
+            downloader_type=downloader_type,
+            nzbname=item.get("nzbname"),
+            hash=item.get("hash"),
+        )
+    except Exception as e:
+        journal.mark_manual_review(
+            rkey,
+            "torrent_artifact_state_persistence_error:%s" % type(e).__name__,
+            payload=payload,
+            issueid=item.get("issueid"),
+            provider=item.get("provider"),
+            hash=item.get("hash"),
+        )
+        logger.error("[DOWNLOADS-WORKER] Copied torrent artifact quarantined; PP not started.")
+        return
+    if not won:
+        return
+    comicarr.PP_QUEUE.put(
+        {
+            "nzb_name": payload["nzb_name"],
+            "nzb_folder": copied_path,
+            "failed": False,
+            "issueid": item.get("issueid"),
+            "comicid": item.get("comicid"),
+            "apicall": True,
+            "ddl": False,
+            "download_info": None,
+            "journal_release_key": rkey,
+        }
+    )
 
 
 def nzb_monitor(queue):
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+
     while True:
         if comicarr.RETURN_THE_NZBQUEUE.qsize() >= 1:
             if comicarr.USE_SABNZBD is True:
@@ -1735,10 +1861,26 @@ def nzb_monitor(queue):
                         if comicarr.RETURN_THE_NZBQUEUE.qsize() >= 1:
                             qu_retrieve = comicarr.RETURN_THE_NZBQUEUE.get(True)
                             try:
-                                nzstat = s.historycheck(qu_retrieve)
-                                cdh_monitor(queue, qu_retrieve, nzstat, readd=True)
+                                controller = MaintenanceController()
+                                with controller.lease(
+                                    "nzb-monitor",
+                                    "download-monitor",
+                                    entity_type="release",
+                                    entity_id=qu_retrieve.get("journal_release_key") or qu_retrieve.get("nzo_id"),
+                                ) as lease:
+                                    controller.assert_lease_current(lease)
+                                    nzstat = s.historycheck(qu_retrieve)
+                                    cdh_monitor(queue, qu_retrieve, nzstat, readd=True, lease=lease)
+                            except MaintenanceBlocked:
+                                comicarr.RETURN_THE_NZBQUEUE.put(qu_retrieve)
                             except Exception as e:
-                                logger.error("Exception occured trying to re-add %s to queue: %s" % (qu_retrieve, e))
+                                logger.error(
+                                    "Exception occurred while resuming NZB monitor id=%s: %s"
+                                    % (
+                                        qu_retrieve.get("nzo_id") or qu_retrieve.get("NZBID"),
+                                        type(e).__name__,
+                                    )
+                                )
                             time.sleep(5)
                         else:
                             break
@@ -1747,31 +1889,59 @@ def nzb_monitor(queue):
             if item == "exit":
                 logger.info("Cleaning up workers for shutdown")
                 break
+            logger.info("Now monitoring NZB client id=%s" % (item.get("nzo_id") or item.get("NZBID")))
+            route = item.get("clientmode")
+            controller = MaintenanceController()
             try:
-                tmp_apikey = item["queue"].pop("apikey")
-                logger.info("Now loading from queue: %s" % item)
-            except Exception:
-                logger.info("Now loading from queue: %s" % item)
-            else:
-                item["queue"]["apikey"] = tmp_apikey
-            if all([comicarr.USE_SABNZBD is True, comicarr.CONFIG.SAB_CLIENT_POST_PROCESSING is True]):
-                nz = sabnzbd.SABnzbd(item)
-                nzstat = nz.processor()
-            elif all([comicarr.USE_NZBGET is True, comicarr.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True]):
-                nz = nzbget.NZBGet()
-                nzstat = nz.processor(item)
-            else:
-                logger.warn("There are no NZB Completed Download handlers enabled.")
-                break
-            cdh_monitor(queue, item, nzstat)
+                with controller.lease(
+                    "nzb-monitor",
+                    "download-monitor",
+                    entity_type="release",
+                    entity_id=item.get("journal_release_key") or item.get("nzo_id") or item.get("NZBID"),
+                ) as lease:
+                    controller.assert_lease_current(lease)
+                    if route == "sabnzbd" or (not route and comicarr.USE_SABNZBD is True):
+                        nz = sabnzbd.SABnzbd(item)
+                        nzstat = nz.processor()
+                    elif route == "nzbget" or (not route and comicarr.USE_NZBGET is True):
+                        nz = nzbget.NZBGet()
+                        nzstat = nz.processor(item)
+                    else:
+                        logger.warn("There is no matching NZB completed-download handler for route=%s." % route)
+                        continue
+                    cdh_monitor(queue, item, nzstat, lease=lease)
+            except MaintenanceBlocked:
+                queue.put(item)
+                time.sleep(_maintenance_retry_delay(item))
         else:
             time.sleep(5)
 
 
-def cdh_monitor(queue, item, nzstat, readd=False):
+def cdh_monitor(queue, item, nzstat, readd=False, lease=None):
+    if lease is not None:
+        return _cdh_monitor_owned(queue, item, nzstat, readd=readd)
+
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+
+    controller = MaintenanceController()
+    try:
+        with controller.lease(
+            "nzb-monitor",
+            "download-monitor",
+            entity_type="release",
+            entity_id=item.get("journal_release_key") or item.get("nzo_id") or item.get("NZBID"),
+        ) as owned_lease:
+            controller.assert_lease_current(owned_lease)
+            return _cdh_monitor_owned(queue, item, nzstat, readd=readd)
+    except MaintenanceBlocked:
+        queue.put(item)
+        return
+
+
+def _cdh_monitor_owned(queue, item, nzstat, readd=False):
     from comicarr.helpers import check_file_condition
 
-    known_nzb_id = item["nzo_id"] if (comicarr.USE_SABNZBD is True) else item["NZBID"]
+    known_nzb_id = item.get("nzo_id") or item.get("NZBID")
     if any([nzstat["status"] == "file not found", nzstat["status"] == "double-pp"]):
         logger.warn("Unable to complete post-processing call due to not finding file. [%s]" % item)
     elif nzstat["status"] == "nzb removed" or "unhandled status" in str(nzstat["status"]).lower():
@@ -1825,29 +1995,45 @@ def cdh_monitor(queue, item, nzstat, readd=False):
                 "ddl": False,
                 "download_info": nzstat.get("download_info"),
             }
-            rkey = journal.release_key(
+            rkey = item.get("journal_release_key") or journal.release_key(
                 nzstat.get("issueid"),
                 di.get("provider"),
                 nzbname=di.get("nzbname") or nzstat.get("name"),
                 hash=di.get("hash"),
-                discriminant=di.get("hash") or di.get("provider") or journal_payload,
+                discriminant=di.get("nzbname") or di.get("provider") or journal_payload,
             )
-            journal.record_transition(
+            existing = journal.read_one(rkey)
+            downloader_type = (existing or {}).get("downloader_type") or item.get("clientmode") or "nzb"
+            won = journal.record_transition(
                 rkey,
                 journal.DOWNLOADED,
                 payload=journal_payload,
                 issueid=nzstat.get("issueid"),
                 provider=di.get("provider"),
-                downloader_type="nzb",
+                downloader_type=downloader_type,
                 nzbname=di.get("nzbname") or nzstat.get("name"),
                 hash=di.get("hash"),
             )
             cdh_journal_release_key = rkey
             logger.fdebug("[DOWNLOADS-CDH] Journaled downloaded for %s" % rkey)
         except Exception as e:
-            # A journal failure must NOT block the PP handoff (additive /
-            # inert). Log loudly; replay closes any residual window.
-            logger.error("[DOWNLOADS-CDH] Journal downloaded transition failed: %s" % e)
+            if item.get("journal_release_key"):
+                try:
+                    journal.mark_manual_review(
+                        item["journal_release_key"],
+                        "nzb_artifact_state_persistence_error:%s" % type(e).__name__,
+                        payload=journal_payload,
+                        issueid=nzstat.get("issueid"),
+                        provider=di.get("provider"),
+                    )
+                except Exception:
+                    pass
+                logger.error("[DOWNLOADS-CDH] Artifact state was not durable; PP not started.")
+                return
+            logger.error("[DOWNLOADS-CDH] Legacy unjournaled downloaded transition failed: %s" % type(e).__name__)
+
+        if item.get("journal_release_key") and not won:
+            return
 
         try:
             comicarr.PP_QUEUE.put(
@@ -1868,7 +2054,17 @@ def cdh_monitor(queue, item, nzstat, readd=False):
     return
 
 
-def lookupthebitches(filelist, folder, nzbname, nzbid, prov, hash, pulldate):
+def lookupthebitches(
+    filelist,
+    folder,
+    nzbname,
+    nzbid,
+    prov,
+    hash,
+    pulldate,
+    journal_release_key=None,
+    journal_managed=False,
+):
     from sqlalchemy import select
 
     from comicarr.app.series.service import listLibrary
@@ -1914,7 +2110,15 @@ def lookupthebitches(filelist, folder, nzbname, nzbid, prov, hash, pulldate):
                 oneoff = False
                 mode = "want"
             comicarr.updater.nzblog(x["issueid"], nzbname, x["comicname"], id=nzbid, prov=prov, oneoff=oneoff)
-            comicarr.updater.foundsearch(x["comicid"], x["issueid"], mode=mode, provider=prov, hash=hash)
+            comicarr.updater.foundsearch(
+                x["comicid"],
+                x["issueid"],
+                mode=mode,
+                provider=prov,
+                hash=hash,
+                journal_release_key=journal_release_key,
+                journal_managed=journal_managed,
+            )
 
 
 # Magic numbers for file type detection

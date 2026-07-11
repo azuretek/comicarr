@@ -191,6 +191,43 @@ describe("API Client", () => {
       }
     });
 
+    it("retains a sanitized structured body for actionable API errors", async () => {
+      server.use(
+        http.post("/api/series/160294/search-missing", () => {
+          return HttpResponse.json(
+            {
+              success: false,
+              status: "stale_preview",
+              error: "Series acquisition state changed",
+              preview: { eligibleCount: 4, preview_token: "session-secret" },
+              api_key: "should-not-be-exposed",
+            },
+            { status: 409 },
+          );
+        }),
+      );
+
+      try {
+        await apiRequest("POST", "/api/series/160294/search-missing", {
+          confirm: true,
+          preview_token: "session-secret",
+          fingerprint: "fingerprint",
+        });
+        throw new Error("expected apiRequest to reject");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ApiError);
+        const apiError = error as ApiError & { body?: Record<string, unknown> };
+        expect(apiError.body).toMatchObject({
+          success: false,
+          status: "stale_preview",
+          error: "Series acquisition state changed",
+          preview: { eligibleCount: 4 },
+        });
+        expect(apiError.body).not.toHaveProperty("api_key");
+        expect(apiError.body?.preview).not.toHaveProperty("preview_token");
+      }
+    });
+
     it("should include credentials for cookie-based auth", async () => {
       let capturedCredentials: RequestCredentials | undefined;
       server.use(

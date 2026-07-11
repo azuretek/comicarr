@@ -14,12 +14,12 @@ The core domain. Largest route count but well-understood patterns
 established by Phases 1-3 (Phase 4).
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from comicarr.app.core.context import AppContext, get_context
 from comicarr.app.core.exceptions import NotFoundError
-from comicarr.app.core.security import require_api_key, require_session
+from comicarr.app.core.security import COOKIE_NAME, require_api_key, require_session
 from comicarr.app.series import queries as series_queries
 from comicarr.app.series import service as series_service
 
@@ -178,21 +178,82 @@ def refresh_series(comic_id: str, ctx: AppContext = Depends(get_context)):
     return result
 
 
+def _session_identity(request: Request, username: str):
+    """Bind one-shot mutating previews to the authenticated browser session."""
+    return request.cookies.get(COOKIE_NAME) or username
+
+
+@router.get("/series/{comic_id}/search-missing/preview", dependencies=[Depends(require_session)])
+def preview_search_all_missing(
+    comic_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Preview eligible/excluded counts for series-scoped Search all missing."""
+    result = series_service.preview_search_all_missing(
+        ctx,
+        comic_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+    )
+    if result.get("success") is False:
+        return JSONResponse(status_code=int(result.get("status_code") or 400), content=result)
+    return result
+
+
+@router.post("/series/{comic_id}/search-missing", dependencies=[Depends(require_session)])
+async def search_all_missing(
+    comic_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Queue eligible missing issues once and coalesce a durable search run."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    confirm = bool(body.get("confirm"))
+    result = series_service.search_all_missing(
+        ctx,
+        comic_id,
+        audit_identity=username,
+        confirm=confirm,
+        preview_token=body.get("preview_token") or body.get("previewToken"),
+        fingerprint=body.get("fingerprint"),
+        session_id=_session_identity(request, username),
+    )
+    if result.get("success") is False:
+        return JSONResponse(status_code=int(result.get("status_code") or 400), content=result)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Issue management
 # ---------------------------------------------------------------------------
 
 
-@router.put("/series/issues/{issue_id}/queue", dependencies=[Depends(require_session)])
-def queue_issue(issue_id: str, ctx: AppContext = Depends(get_context)):
+@router.put("/series/issues/{issue_id}/queue")
+def queue_issue(
+    issue_id: str,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
     """Mark an issue as Wanted and trigger search."""
-    return series_service.queue_issue(ctx, issue_id)
+    return series_service.queue_issue(ctx, issue_id, audit_identity=username)
 
 
-@router.put("/series/issues/{issue_id}/unqueue", dependencies=[Depends(require_session)])
-def unqueue_issue(issue_id: str, ctx: AppContext = Depends(get_context)):
+@router.put("/series/issues/{issue_id}/unqueue")
+def unqueue_issue(
+    issue_id: str,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
     """Mark an issue as Skipped."""
-    return series_service.unqueue_issue(ctx, issue_id)
+    return series_service.unqueue_issue(ctx, issue_id, audit_identity=username)
 
 
 @router.get("/wanted", dependencies=[Depends(require_session)])

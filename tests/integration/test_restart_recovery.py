@@ -52,6 +52,7 @@ import pytest
 from sqlalchemy import select
 
 import comicarr
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import journal, recovery, recovery_classify
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import issues, metadata, nzblog, pipeline_journal, snatched
@@ -70,10 +71,17 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(
         comicarr,
         "CONFIG",
-        types.SimpleNamespace(HIGHCOUNT=0, SAB_APIKEY="k", SAB_HOST="http://sab.local"),
+        types.SimpleNamespace(
+            HIGHCOUNT=0,
+            SAB_APIKEY="k",
+            SAB_HOST="http://sab.local",
+            MANUAL_PP_FOLDER=str(tmp_path),
+        ),
         raising=False,
     )
     monkeypatch.setattr(comicarr, "DDL_STUCK_NOTIFIED", set(), raising=False)
+    monkeypatch.setattr(comicarr, "ACQUISITION_WORKERS_BLOCKED", False, raising=False)
+    monkeypatch.setattr(comicarr, "ACQUISITION_BLOCK_REASON", None, raising=False)
     monkeypatch.setattr(comicarr, "USE_SABNZBD", True, raising=False)
     monkeypatch.setattr(comicarr, "USE_NZBGET", False, raising=False)
     # comicarr.SIGNAL is process-global; the AE5 lifespan-drain test mutates
@@ -82,6 +90,7 @@ def _isolated_db(tmp_path, monkeypatch):
     comicarr.SIGNAL = None
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     yield
     comicarr.SIGNAL = saved_signal
     shutdown_engine()
@@ -123,7 +132,13 @@ def _insert_journal(release_key, stage, payload=None, **fields):
 
 
 def _probe(value):
-    return {dt: (lambda row, v=value: v) for dt in ("torrent", "nzb", "sab", "nzbget", "ddl", "DDL")}
+    return {dt: (lambda row, v=value: v) for dt in ("torrent", "nzb", "sab", "sabnzbd", "nzbget", "ddl", "DDL")}
+
+
+def _artifact_folder(tmp_path, name):
+    folder = tmp_path / name
+    folder.mkdir(exist_ok=True)
+    return str(folder)
 
 
 # ===========================================================================
@@ -295,7 +310,7 @@ def test_ae1_still_downloading_reenqueued_for_live_monitor_no_double_drive(fake_
 # ===========================================================================
 
 
-def test_ae2_moved_finishes_dbfacts_only_post_processing_redrives_in_full(fake_pp_queue, monkeypatch):
+def test_ae2_moved_finishes_dbfacts_only_post_processing_redrives_in_full(fake_pp_queue, monkeypatch, tmp_path):
     """AE2 (R4/R5): the two-marker finalizer. A `moved` row (destructive move
     committed, DB facts uncommitted) must finish DB facts ONLY — NO duplicate
     import/move, process.Process must NEVER be constructed for it. A
@@ -325,7 +340,12 @@ def test_ae2_moved_finishes_dbfacts_only_post_processing_redrives_in_full(fake_p
     _insert_journal(
         pp_key,
         journal.POST_PROCESSING,
-        payload={"issueid": "601", "comicid": "C6", "nzb_name": "N.cbz", "nzb_folder": "/dl/N"},
+        payload={
+            "issueid": "601",
+            "comicid": "C6",
+            "nzb_name": "N.cbz",
+            "nzb_folder": _artifact_folder(tmp_path, "N"),
+        },
         issueid="601",
         provider="nzb.su",
         downloader_type="nzb",
@@ -518,7 +538,7 @@ def test_ae3_two_concurrent_pp_threads_only_one_wins_the_atomic_claim():
     assert journal.read_one(rkey)["stage"] == journal.POST_PROCESSING
 
 
-def test_ae3_replay_is_lockfree_concurrent_with_held_init_lock(fake_pp_queue):
+def test_ae3_replay_is_lockfree_concurrent_with_held_init_lock(fake_pp_queue, tmp_path):
     """AE3 (R3/R5): replay must be lock-free (it does NOT acquire INIT_LOCK)
     so a concurrent SIGTERM halt() / a still-held startup lock can never
     deadlock or starve recovery. INIT_LOCK is held by the main thread for the
@@ -532,7 +552,11 @@ def test_ae3_replay_is_lockfree_concurrent_with_held_init_lock(fake_pp_queue):
     _insert_journal(
         rkey,
         journal.DOWNLOADED,
-        payload={"issueid": "900", "nzb_name": "P.cbz", "nzb_folder": "/dl/P"},
+        payload={
+            "issueid": "900",
+            "nzb_name": "P.cbz",
+            "nzb_folder": _artifact_folder(tmp_path, "P"),
+        },
         issueid="900",
         provider="nzb.su",
         downloader_type="nzb",
@@ -672,7 +696,7 @@ def test_ae4_transient_outage_is_unknown_not_falsely_failed(fake_pp_queue):
 
 
 @pytest.mark.asyncio
-async def test_ae5_inflight_write_completes_before_dispose_then_replay_finishes(fake_pp_queue):
+async def test_ae5_inflight_write_completes_before_dispose_then_replay_finishes(fake_pp_queue, tmp_path):
     """AE5 (R7/R8): an item is mid-pipeline (a worker writing a journal
     transition) when a restart is initiated. Driving the REAL U7 lifespan
     ordered drain: the in-flight journal write MUST land BEFORE
@@ -699,7 +723,7 @@ async def test_ae5_inflight_write_completes_before_dispose_then_replay_finishes(
         "comicid": "C47",
         "provider": "nzb.su",
         "nzb_name": "Series 001",
-        "nzb_folder": "/dl/Series_001",
+        "nzb_folder": _artifact_folder(tmp_path, "Series_001"),
     }
     # Pre-seed an in-flight (snatched) obligation a worker is mid-advancing.
     journal.record_transition(
@@ -795,6 +819,8 @@ async def test_ae5_inflight_write_completes_before_dispose_then_replay_finishes(
 
     # 4. The subsequent real replay_pipeline() completes the recovered
     #    obligation EXACTLY ONCE (no manual action, no silent drop).
+    comicarr.ACQUISITION_WORKERS_BLOCKED = False
+    comicarr.ACQUISITION_BLOCK_REASON = None
     recovery.replay_pipeline(probes=_probe("complete"))
     items = _drain(fake_pp_queue)
     assert len(items) == 1, "AE5: recovered record must be driven to PP exactly once"

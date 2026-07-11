@@ -17,6 +17,8 @@ COPY . .
 
 # Stage 3: Runtime
 FROM python:3.12-slim AS runtime
+ARG COMICARR_BUILD_ID
+ARG COMICARR_BUILD_COMMIT
 WORKDIR /opt/comicarr
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git p7zip-full unrar-free gosu \
@@ -25,7 +27,9 @@ COPY --from=backend-build /app /opt/comicarr
 COPY --from=frontend-build /app/frontend/dist /opt/comicarr/frontend/dist
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-ENV PATH="/opt/comicarr/.venv/bin:$PATH"
+ENV COMICARR_BUILD_ID=${COMICARR_BUILD_ID} \
+    COMICARR_BUILD_COMMIT=${COMICARR_BUILD_COMMIT} \
+    PATH="/opt/comicarr/.venv/bin:$PATH"
 EXPOSE 8090
 VOLUME ["/config", "/comics"]
 ENTRYPOINT ["/entrypoint.sh"]

@@ -29,10 +29,18 @@ import threading
 from collections import namedtuple
 from pathlib import Path
 
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_EXECUTED,
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+)
 from sqlalchemy import select
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.acquisition.models import DispatchState
+from comicarr.app.common.dates import normalize_utc_datetime
 from comicarr.app.core.security import LoginRateLimiter
 from comicarr.tables import comics, jobhistory, storyarcs
 
@@ -41,6 +49,16 @@ _rate_limiter = LoginRateLimiter()
 _fallback_weekly_refresh_lock = threading.Lock()
 
 WEEKLY_JOB_NAME = "Weekly Pullist"
+SCHEDULER_JOB_NAMES = {
+    "dbupdater": "DB Updater",
+    "search": "Auto-Search",
+    "weekly": WEEKLY_JOB_NAME,
+    "rss": "RSS Feeds",
+    "version": "Check Version",
+    "monitor": "Folder Monitor",
+    "importinbox": "Import Inbox Scanner",
+    "ddl_health": "DDL Health Check",
+}
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
 CONFIG_PERSISTENCE_ERROR = "Failed to persist configuration"
@@ -574,6 +592,34 @@ def get_version_info(ctx):
         "commits_behind": ctx.commits_behind,
         "install_type": ctx.install_type,
         "current_branch": ctx.current_branch,
+        "build": get_build_identity(ctx),
+    }
+
+
+def get_build_identity(ctx):
+    """Return deploy identity without treating runtime fallbacks as verified."""
+    declared_build_id = (os.environ.get("COMICARR_BUILD_ID") or "").strip() or None
+    declared_build_commit = (os.environ.get("COMICARR_BUILD_COMMIT") or "").strip() or None
+    build_id = declared_build_id
+    build_commit = declared_build_commit
+    source = "environment" if declared_build_id or declared_build_commit else "runtime"
+    runtime_commit = getattr(ctx, "current_version", None)
+    if not build_commit and runtime_commit and re.fullmatch(r"[0-9a-fA-F]{7,64}", str(runtime_commit)):
+        build_commit = str(runtime_commit)
+    release = getattr(ctx, "current_version_name", None) or getattr(ctx, "current_release_name", None)
+    version = getattr(ctx, "current_version", None)
+    if not build_id:
+        build_id = release or version or "unknown"
+    return {
+        "id": str(build_id),
+        "commit": str(build_commit) if build_commit else None,
+        "release": release,
+        "version": version,
+        "source": source,
+        # A version string or runtime Git SHA is useful diagnostic context,
+        # but only the image build arguments bind both values to the deployed
+        # artifact. Do not present a local/dev fallback as release-verified.
+        "verified": bool(declared_build_id and declared_build_commit),
     }
 
 
@@ -599,35 +645,61 @@ def get_recent_logs(ctx):
         return {"logs": [], "error": str(e)}
 
 
-def get_job_info(ctx):
+def get_job_info(ctx, include_acquisition=True):
     """Return scheduled job information."""
-    if not ctx.scheduler:
-        return {"jobs": []}
+    acquisition = None
+    if include_acquisition:
+        try:
+            from comicarr.app.search.health import get_acquisition_health
 
-    weekly_history = _get_weekly_job_history()
+            acquisition = get_acquisition_health()
+        except Exception as e:
+            acquisition = {"unavailable": {"reason": "schema_unavailable", "error": sanitize_job_error(e)}}
+    if not ctx.scheduler:
+        result = {"jobs": []}
+        if include_acquisition:
+            result["acquisition"] = acquisition
+        return result
+
     jobs = []
     for job in ctx.scheduler.get_jobs():
+        history = _get_weekly_job_history() if job.id == "weekly" else _get_job_history(job.name)
+        status = history.get("status") or "Waiting"
+        if job.next_run_time is None:
+            status = "Paused"
         job_info = {
             "id": job.id,
             "name": job.name,
             "next_run_time": str(job.next_run_time) if job.next_run_time else None,
             "trigger": str(job.trigger),
+            "status": status,
+            "state": _weekly_state(status),
+            "dispatch": {
+                "state": _weekly_state(status),
+                "last_attempt": history.get("prev_run_timestamp"),
+                "last_success": history.get("last_success_timestamp"),
+                "last_failure": history.get("last_failure_timestamp"),
+                "last_error": sanitize_job_error(history.get("last_error")) if history.get("last_error") else None,
+            },
         }
         if job.id == "weekly":
-            status = weekly_history.get("status") or getattr(comicarr, "WEEKLY_STATUS", "Waiting")
-            if job.next_run_time is None:
-                status = "Paused"
+            if not history.get("status"):
+                status = getattr(comicarr, "WEEKLY_STATUS", "Waiting")
+                job_info["status"] = status
+                job_info["state"] = _weekly_state(status)
+                job_info["dispatch"]["state"] = _weekly_state(status)
             job_info.update(
                 {
-                    "status": status,
-                    "state": _weekly_state(status),
-                    "last_success_timestamp": weekly_history.get("last_success_timestamp"),
-                    "last_failure_timestamp": weekly_history.get("last_failure_timestamp"),
-                    "last_error": weekly_history.get("last_error"),
+                    "last_success_timestamp": history.get("last_success_timestamp"),
+                    "last_failure_timestamp": history.get("last_failure_timestamp"),
+                    "last_error": sanitize_job_error(history.get("last_error")) if history.get("last_error") else None,
                 }
             )
         jobs.append(job_info)
-    return {"jobs": jobs}
+    result = {"jobs": jobs}
+    if include_acquisition:
+        result["acquisition"] = acquisition
+    return result
 
 
 def _weekly_state(status):
@@ -642,6 +714,7 @@ def _get_weekly_job_history():
             db.select_one(
                 select(
                     jobhistory.c.status,
+                    jobhistory.c.prev_run_timestamp,
                     jobhistory.c.last_success_timestamp,
                     jobhistory.c.last_failure_timestamp,
                     jobhistory.c.last_error,
@@ -651,6 +724,26 @@ def _get_weekly_job_history():
         )
     except Exception as e:
         logger.warn("[WEEKLY] Could not read durable refresh status: %s" % e)
+        return {}
+
+
+def _get_job_history(job_name):
+    """Read one durable scheduler outcome without making diagnostics fail."""
+    try:
+        return (
+            db.select_one(
+                select(
+                    jobhistory.c.status,
+                    jobhistory.c.prev_run_timestamp,
+                    jobhistory.c.last_success_timestamp,
+                    jobhistory.c.last_failure_timestamp,
+                    jobhistory.c.last_error,
+                ).where(jobhistory.c.JobName == str(job_name))
+            )
+            or {}
+        )
+    except Exception as e:
+        logger.warn("[SCHEDULER] Could not read durable status for %s: %s" % (job_name, e))
         return {}
 
 
@@ -707,10 +800,79 @@ def sanitize_job_error(error):
         message,
     )
     message = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[redacted]@", message)
-    return message[:500] or "Weekly refresh failed; check server logs for details."
+    return message[:500] or "Scheduled job failed; check server logs for details."
 
 
-def get_startup_diagnostics(ctx):
+def _event_timestamp(event):
+    scheduled = getattr(event, "scheduled_run_time", None)
+    if scheduled is None:
+        scheduled_runs = getattr(event, "scheduled_run_times", None) or []
+        scheduled = scheduled_runs[-1] if scheduled_runs else None
+    if isinstance(scheduled, datetime.datetime):
+        return normalize_utc_datetime(scheduled).timestamp()
+    return datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+
+def persist_scheduler_event(event):
+    """Persist APScheduler dispatch outcome without claiming acquisition completion."""
+    job_id = str(getattr(event, "job_id", "unknown"))
+    job_name = SCHEDULER_JOB_NAMES.get(job_id, job_id)
+    timestamp = _event_timestamp(event)
+    event_code = getattr(event, "code", None)
+    values = {
+        "prev_run_timestamp": timestamp,
+        "prev_run_datetime": datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc).isoformat(),
+        "last_run_completed": "True",
+    }
+    if event_code == EVENT_JOB_EXECUTED:
+        values.update(
+            {
+                "status": DispatchState.ACCEPTED.value,
+                "last_success_timestamp": timestamp,
+                "last_error": None,
+            }
+        )
+    elif event_code == EVENT_JOB_ERROR:
+        values.update(
+            {
+                "status": DispatchState.ERROR.value,
+                "last_failure_timestamp": timestamp,
+                "last_error": sanitize_job_error(getattr(event, "exception", None)),
+            }
+        )
+    elif event_code == EVENT_JOB_MISSED:
+        values.update(
+            {
+                "status": DispatchState.MISSED.value,
+                "last_failure_timestamp": timestamp,
+                "last_error": "Scheduled run was missed.",
+            }
+        )
+    elif event_code == EVENT_JOB_MAX_INSTANCES:
+        values.update(
+            {
+                "status": DispatchState.MAX_INSTANCES.value,
+                "last_failure_timestamp": timestamp,
+                "last_error": "Scheduled run was blocked by the max-instance limit.",
+            }
+        )
+    else:
+        return False
+    db.upsert("jobhistory", values, {"JobName": job_name})
+    return True
+
+
+def register_scheduler_health_listener(scheduler):
+    """Register the durable listener once per scheduler instance."""
+    if scheduler.__dict__.get("_comicarr_health_listener", False):
+        return False
+    mask = EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES
+    scheduler.add_listener(persist_scheduler_event, mask)
+    scheduler._comicarr_health_listener = True
+    return True
+
+
+def get_startup_diagnostics(ctx, include_acquisition=True):
     """Return startup diagnostics (db empty, migration dismissed).
 
     db_empty is computed live so it reflects the current library state rather
@@ -728,10 +890,22 @@ def get_startup_diagnostics(ctx):
         logger.warn("[DIAGNOSTICS] Live db_empty check failed, falling back to startup flag: %s" % e)
         db_empty = comicarr.DB_EMPTY
 
-    return {
+    result = {
         "db_empty": db_empty,
         "migration_dismissed": getattr(ctx.config, "MIGRATION_DISMISSED", False) if ctx.config else False,
+        "build": get_build_identity(ctx),
     }
+    if include_acquisition:
+        try:
+            from comicarr.app.search.health import get_search_health
+
+            result["acquisition"] = get_search_health(
+                ctx.config,
+                provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
+            )
+        except Exception as e:
+            result["acquisition"] = {"blocked": True, "reason": "health_unavailable", "error": sanitize_job_error(e)}
+    return result
 
 
 def preview_migration(ctx, path):
@@ -749,7 +923,7 @@ def preview_migration(ctx, path):
 
 
 def start_migration(ctx, path):
-    """Start a migration in a background thread."""
+    """Start a migration only after globally fencing acquisition work."""
     import comicarr as _comicarr
 
     if not path:
@@ -759,23 +933,114 @@ def start_migration(ctx, path):
         return {"success": False, "error": "Migration already in progress"}
 
     import threading
+    import time
+    import uuid
 
     from comicarr import migration
+    from comicarr.app.acquisition.maintenance import (
+        MaintenanceConflict,
+        MaintenanceController,
+        set_reconciliation_state,
+    )
 
     m = migration.Mylar3Migration(path)
     result = m.validate()
     if not result.get("valid"):
         return {"success": False, "error": "Invalid Mylar3 data path"}
 
-    t = threading.Thread(target=m.execute, name="MigrationThread")
+    controller = MaintenanceController(db.get_engine())
+    initial = controller.status()
+    if initial.active and (initial.owner != "migration" or not str(initial.run_id or "").startswith("migration-")):
+        return {"success": False, "error": "Acquisition maintenance is owned by another operation", "status_code": 423}
+    if initial.active_leases and not initial.active:
+        # Avoid taking a fence merely to report an existing busy worker. A
+        # race after this check is handled by the fenced thread below.
+        return {"success": False, "error": "Acquisition workers must drain before migration", "status_code": 423}
+
+    run_id = "migration-%s" % uuid.uuid4()
+    try:
+        fence = controller.acquire_fence("migration", run_id, "Mylar3 migration")
+    except MaintenanceConflict as e:
+        return {"success": False, "error": str(e), "status_code": 423}
+
+    set_reconciliation_state("migrating", "Mylar3 migration is waiting for acquisition quiescence", db.get_engine())
+
+    def _run_fenced_migration():
+        success = False
+        try:
+            _comicarr.MIGRATION_STATUS = "waiting_for_quiescence"
+            # Existing side effects predate the fence and must finish. New
+            # claims are blocked by it. Heartbeat while waiting so diagnostics
+            # distinguish an intentional drain from an abandoned fence.
+            deadline = time.monotonic() + 300
+            while not controller.status().drained:
+                controller.heartbeat_fence("migration", run_id, fence.epoch)
+                if time.monotonic() >= deadline:
+                    _comicarr.MIGRATION_STATUS = "blocked"
+                    _comicarr.MIGRATION_ERROR = "Acquisition workers did not drain before migration"
+                    set_reconciliation_state(
+                        "failed",
+                        "Acquisition workers did not drain before migration; operator review required",
+                        db.get_engine(),
+                    )
+                    return
+                time.sleep(0.25)
+            success = bool(m.execute())
+            if not success:
+                set_reconciliation_state(
+                    "failed",
+                    "Mylar3 migration failed; operator review required before acquisition resumes",
+                    db.get_engine(),
+                )
+        except Exception as e:
+            logger.error("[MIGRATION] Fenced migration runner failed: %s" % e)
+            _comicarr.MIGRATION_STATUS = "error"
+            _comicarr.MIGRATION_ERROR = "Migration runner failed"
+            try:
+                set_reconciliation_state(
+                    "failed",
+                    "Mylar3 migration runner failed; operator review required",
+                    db.get_engine(),
+                )
+            except Exception as state_error:
+                logger.error("[MIGRATION] Unable to record runner failure: %s" % state_error)
+        finally:
+            status = controller.status()
+            if status.active and status.owner == "migration" and status.run_id == run_id and status.drained:
+                try:
+                    controller.release_fence("migration", run_id, status.epoch)
+                except MaintenanceConflict as e:
+                    logger.error("[MIGRATION] Unable to release migration fence: %s" % e)
+            try:
+                from comicarr.app.acquisition.maintenance import get_reconciliation_status, refresh_runtime_state
+
+                gate = refresh_runtime_state(ctx.config, db.get_engine())
+                _comicarr.MIGRATION_RECONCILIATION = get_reconciliation_status(db.get_engine())
+                if gate.blocked:
+                    logger.info("[MIGRATION] Acquisition remains blocked: %s" % gate.reason)
+            except Exception as gate_error:
+                _comicarr.ACQUISITION_WORKERS_BLOCKED = True
+                _comicarr.ACQUISITION_BLOCK_REASON = "migration_reconciliation_gate_unavailable"
+                logger.error("[MIGRATION] Unable to refresh acquisition reconciliation gate: %s" % gate_error)
+
+    t = threading.Thread(target=_run_fenced_migration, name="MigrationThread")
     t.daemon = True
     t.start()
-    return {"status": "started"}
+    return {"status": "started", "run_id": run_id}
 
 
 def get_migration_progress(ctx):
     """Return current migration progress."""
     import comicarr as _comicarr
+
+    try:
+        from comicarr.app.acquisition.maintenance import get_reconciliation_status
+
+        reconciliation = get_reconciliation_status(db.get_engine())
+        _comicarr.MIGRATION_RECONCILIATION = reconciliation
+    except Exception as e:
+        reconciliation = {"state": "unavailable", "reason": "reconciliation status unavailable"}
+        logger.error("[MIGRATION] Unable to read reconciliation state: %s" % e)
 
     return {
         "status": _comicarr.MIGRATION_STATUS,
@@ -783,7 +1048,280 @@ def get_migration_progress(ctx):
         "tables_complete": _comicarr.MIGRATION_TABLES_COMPLETE,
         "tables_total": _comicarr.MIGRATION_TABLES_TOTAL,
         "error": _comicarr.MIGRATION_ERROR,
+        "reconciliation": reconciliation,
     }
+
+
+def mark_reconciliation_ready(ctx, *, actor, reason):
+    """Explicitly lift the durable post-migration acquisition gate."""
+    if not reason or not str(reason).strip():
+        return {"success": False, "error": "a reconciliation release reason is required", "status_code": 400}
+    try:
+        from comicarr.app.acquisition.maintenance import (
+            MaintenanceController,
+            get_reconciliation_status,
+            refresh_runtime_state,
+            set_reconciliation_state,
+        )
+
+        controller = MaintenanceController(db.get_engine())
+        if controller.status().active:
+            return {
+                "success": False,
+                "error": "release acquisition maintenance before resuming automatic work",
+                "status_code": 423,
+            }
+        current = get_reconciliation_status(db.get_engine())
+        if current["state"] == "migrating":
+            return {"success": False, "error": "migration is still running", "status_code": 409}
+        reconciliation = set_reconciliation_state(
+            "ready",
+            "operator %s: %s" % (str(actor)[:80], str(reason)[:160]),
+            db.get_engine(),
+        )
+        gate = refresh_runtime_state(ctx.config, db.get_engine())
+        try:
+            runtime = comicarr.resume_acquisition_runtime(ctx.config)
+        except Exception as e:
+            reconciliation = set_reconciliation_state(
+                "failed",
+                "automatic acquisition resume failed: %s" % type(e).__name__,
+                db.get_engine(),
+            )
+            gate = refresh_runtime_state(ctx.config, db.get_engine())
+            comicarr.MIGRATION_RECONCILIATION = reconciliation
+            logger.error("[MIGRATION] Automatic acquisition resume failed closed: %s" % type(e).__name__)
+            return {
+                "success": False,
+                "error": "automatic acquisition could not be resumed; the gate remains closed",
+                "status_code": 500,
+                "reconciliation": reconciliation,
+                "gate": gate.as_dict(),
+            }
+        comicarr.MIGRATION_RECONCILIATION = reconciliation
+        return {
+            "success": True,
+            "reconciliation": reconciliation,
+            "gate": gate.as_dict(),
+            "runtime": runtime,
+        }
+    except Exception as e:
+        logger.error("[MIGRATION] Unable to mark reconciliation ready: %s" % e)
+        return {"success": False, "error": "unable to resume acquisition", "status_code": 500}
+
+
+def abort_acquisition_maintenance(ctx, *, actor, reason, force_stale_leases=False):
+    """Audited escape hatch for a drained, abandoned repair/migration fence."""
+
+    if not reason or not str(reason).strip():
+        return {"success": False, "error": "a maintenance abort reason is required", "status_code": 400}
+    try:
+        from comicarr.app.acquisition.maintenance import (
+            MaintenanceBlocked,
+            MaintenanceConflict,
+            MaintenanceController,
+        )
+
+        controller = MaintenanceController(db.get_engine())
+        status = controller.abort_fence(str(actor), str(reason).strip(), force_stale_leases=bool(force_stale_leases))
+        from comicarr.app.acquisition.maintenance import (
+            get_reconciliation_status,
+            refresh_runtime_state,
+            set_reconciliation_state,
+        )
+
+        reconciliation = get_reconciliation_status(db.get_engine())
+        if reconciliation["state"] == "migrating":
+            reconciliation = set_reconciliation_state(
+                "failed",
+                "migration fence aborted by operator %s: %s" % (str(actor)[:80], str(reason)[:160]),
+                db.get_engine(),
+            )
+        gate = refresh_runtime_state(ctx.config, db.get_engine())
+        return {
+            "success": True,
+            "maintenance": {
+                "active": status.active,
+                "epoch": status.epoch,
+                "owner": status.owner,
+                "run_id": status.run_id,
+                "reason": status.reason,
+                "heartbeat_at": status.heartbeat_at,
+                "active_leases": status.active_leases,
+            },
+            "reconciliation": reconciliation,
+            "gate": gate.as_dict(),
+        }
+    except (MaintenanceBlocked, MaintenanceConflict) as e:
+        return {"success": False, "error": str(e), "status_code": 423}
+    except Exception as e:
+        logger.error("[MAINTENANCE] Unable to abort acquisition maintenance: %s" % e)
+        return {"success": False, "error": "unable to abort acquisition maintenance", "status_code": 500}
+
+
+# ---------------------------------------------------------------------------
+# Acquisition repair (session-bound, owner only)
+# ---------------------------------------------------------------------------
+
+
+def _repair_service():
+    from comicarr.app.system.acquisition_repair import RepairService
+
+    return RepairService(db.get_engine())
+
+
+def _repair_error_response(exc):
+    from comicarr.app.system.acquisition_repair import (
+        RepairBlocked,
+        RepairConfirmationError,
+        RepairError,
+    )
+
+    if isinstance(exc, KeyError):
+        return {"success": False, "error": str(exc) or "not found", "status_code": 404}
+    if isinstance(exc, RepairConfirmationError):
+        return {"success": False, "error": str(exc), "status_code": 409}
+    if isinstance(exc, RepairBlocked):
+        return {"success": False, "error": str(exc), "status_code": 423}
+    if isinstance(exc, (RepairError, ValueError)):
+        return {"success": False, "error": str(exc), "status_code": 400}
+    logger.error("[REPAIR] Unexpected repair failure: %s" % exc)
+    return {"success": False, "error": "repair failed", "status_code": 500}
+
+
+def preview_acquisition_repair(ctx, series_id, *, actor, session_id):
+    """Create a read-only series-scoped repair preview and one-shot token."""
+    try:
+        result = _repair_service().preview_series(series_id, actor=actor, session_id=session_id)
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def confirm_acquisition_repair(
+    ctx,
+    run_id,
+    *,
+    actor,
+    session_id,
+    preview_token,
+    fingerprint,
+    selected_optional_keys=None,
+    canary_entity_key=None,
+):
+    """Freeze an immutable repair manifest with the one-shot preview token."""
+    try:
+        result = _repair_service().confirm(
+            run_id,
+            preview_token=preview_token,
+            fingerprint=fingerprint,
+            actor=actor,
+            session_id=session_id,
+            selected_optional_keys=selected_optional_keys or (),
+            canary_entity_key=canary_entity_key,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def apply_acquisition_repair(
+    ctx,
+    run_id,
+    *,
+    actor,
+    session_id,
+    max_items=None,
+    canary_only=False,
+):
+    """Apply a confirmed repair manifest under the maintenance fence."""
+    try:
+        result = _repair_service().apply(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            max_items=max_items,
+            canary_only=bool(canary_only),
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def get_acquisition_repair_run(ctx, run_id, *, actor, session_id, include_items=True):
+    """Return a repair run and its ordered items for the owning session."""
+    try:
+        service = _repair_service()
+        projection = service.read_public_run(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            include_items=bool(include_items),
+        )
+        if projection is None:
+            return {"success": False, "error": "unknown repair run", "status_code": 404}
+        return {"success": True, **projection}
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def rollback_acquisition_repair(ctx, run_id, *, actor, session_id, reason):
+    """Conditionally roll back applied repair values when they have not drifted."""
+    try:
+        result = _repair_service().rollback(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            reason=reason,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def authorize_acquisition_canary(ctx, run_id, *, actor, session_id, release_key, route):
+    """Authorize one named, restart-safe external handoff under maintenance."""
+    try:
+        result = _repair_service().authorize_acquisition_canary(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            release_key=release_key,
+            route=route,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def get_acquisition_canary(ctx, permit_id, *, actor, session_id):
+    """Return the terminally audited state of the named handoff canary."""
+    try:
+        result = _repair_service().get_acquisition_canary(permit_id, actor=actor, session_id=session_id)
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def release_acquisition_canary(ctx, permit_id, *, actor, session_id, reason):
+    """Release the canary fence only after inspection or explicit cancellation."""
+    try:
+        result = _repair_service().release_acquisition_canary(
+            permit_id,
+            actor=actor,
+            session_id=session_id,
+            reason=reason,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
 
 
 # --- Extracted from helpers.py ---
@@ -1091,14 +1629,18 @@ def job_management(
                 was_running = jstatus == "Running"
                 jstatus = "Waiting"
                 recovery_values = {"status": jstatus}
-                if "weekly" in ji["JobName"].lower():
-                    if was_running:
-                        recovery_values.update(
-                            {
-                                "last_failure_timestamp": ji["prev_run_timestamp"],
-                                "last_error": "Previous weekly refresh was interrupted by restart.",
-                            }
-                        )
+                if was_running:
+                    if "weekly" in ji["JobName"].lower():
+                        interrupted_error = "Previous weekly refresh was interrupted by restart."
+                    else:
+                        interrupted_error = "Previous %s run was interrupted by restart." % ji["JobName"]
+                    recovery_values.update(
+                        {
+                            "status": "Interrupted",
+                            "last_failure_timestamp": ji["prev_run_timestamp"],
+                            "last_error": interrupted_error,
+                        }
+                    )
                 db.upsert("jobhistory", recovery_values, {"JobName": ji["JobName"]})
             if "update" in ji["JobName"].lower():
                 if comicarr.SCHED_DBUPDATE_LAST is None:
@@ -1280,10 +1822,41 @@ def job_management(
         else:
             updateCtrl = {"JobName": job}
             if current_run is not None:
-                pr_datetime = datetime.datetime.utcfromtimestamp(current_run)
+                pr_datetime = datetime.datetime.fromtimestamp(current_run, tz=datetime.timezone.utc)
                 pr_datetime = pr_datetime.replace(microsecond=0)
-                updateVals = {"prev_run_timestamp": current_run, "prev_run_datetime": pr_datetime, "status": status}
+                updateVals = {
+                    "prev_run_timestamp": current_run,
+                    "prev_run_datetime": pr_datetime.isoformat(),
+                    "status": status,
+                }
             elif last_run_completed is not None:
+                # Persist the terminal fact before scheduler inspection, date
+                # presentation, or logging. Those secondary operations must
+                # never be able to mask a completed/failed dispatch.
+                terminal_datetime = datetime.datetime.fromtimestamp(
+                    last_run_completed, tz=datetime.timezone.utc
+                ).replace(microsecond=0)
+                terminal_values = {
+                    "prev_run_timestamp": last_run_completed,
+                    "prev_run_datetime": terminal_datetime.isoformat(),
+                    "last_run_completed": "True",
+                    "status": status,
+                }
+                if failure:
+                    terminal_values.update(
+                        {
+                            "last_failure_timestamp": last_run_completed,
+                            "last_error": sanitize_job_error(failure_message),
+                        }
+                    )
+                else:
+                    terminal_values.update(
+                        {
+                            "last_success_timestamp": last_run_completed,
+                            "last_error": None,
+                        }
+                    )
+                db.upsert("jobhistory", terminal_values, updateCtrl)
                 if any(
                     [
                         job == "DB Updater",
@@ -1396,27 +1969,27 @@ def job_management(
                             if job == "Weekly Pullist":
                                 nextrun_date = getattr(jobstore, "next_run_time", None)
                             else:
-                                nextrun_date = datetime.datetime.utcfromtimestamp(nextrun_stamp)
+                                nextrun_date = datetime.datetime.fromtimestamp(nextrun_stamp, tz=datetime.timezone.utc)
                                 jobstore.modify(next_run_time=nextrun_date)
                             if nextrun_date is not None:
                                 nextrun_date = nextrun_date.replace(microsecond=0)
                     else:
                         # if the rss is enabled after startup, we have to re-set it up...
                         nextrun_stamp = utctimestamp() + (int(comicarr.CONFIG.RSS_CHECKINTERVAL) * 60)
-                        nextrun_date = datetime.datetime.utcfromtimestamp(nextrun_stamp)
+                        nextrun_date = datetime.datetime.fromtimestamp(nextrun_stamp, tz=datetime.timezone.utc)
                         comicarr.SCHED_RSS_LAST = last_run_completed
 
                 if nextrun_date is not None:
                     logger.fdebug("ReScheduled job: %s to %s" % (job, comicarr.helpers.utc_date_to_local(nextrun_date)))
-                lastrun_comp = datetime.datetime.utcfromtimestamp(last_run_completed)
+                lastrun_comp = datetime.datetime.fromtimestamp(last_run_completed, tz=datetime.timezone.utc)
                 lastrun_comp = lastrun_comp.replace(microsecond=0)
                 # if it's completed, then update the last run time to the ending time of the job
                 updateVals = {
                     "prev_run_timestamp": last_run_completed,
-                    "prev_run_datetime": lastrun_comp,
+                    "prev_run_datetime": lastrun_comp.isoformat(),
                     "last_run_completed": "True",
                     "next_run_timestamp": nextrun_stamp,
-                    "next_run_datetime": nextrun_date,
+                    "next_run_datetime": nextrun_date.isoformat() if nextrun_date is not None else None,
                     "status": status,
                 }
                 if failure:

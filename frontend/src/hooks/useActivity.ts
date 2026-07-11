@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import type { PaginationMeta } from "@/types";
 
@@ -38,6 +38,11 @@ export interface QueueItem {
 interface QueueResponse {
   queue: QueueItem[];
   pagination: PaginationMeta;
+}
+
+interface RequeueDownloadResult {
+  success: boolean;
+  error?: string;
 }
 
 interface ActivityQuery {
@@ -83,5 +88,30 @@ export function useDownloadQueue(query: ActivityQuery) {
       ),
     staleTime: 10 * 1000, // 10 seconds — queue data is transient
     refetchInterval: 15 * 1000, // Poll every 15 seconds
+  });
+}
+
+/**
+ * Requeue only a failed DDL queue item through the server's validated retry
+ * endpoint. Other downloader states deliberately have no client-side retry.
+ */
+export function useRequeueDownload() {
+  const queryClient = useQueryClient();
+  return useMutation<RequeueDownloadResult, Error, string>({
+    mutationFn: async (itemId) => {
+      const result = await apiRequest<RequeueDownloadResult>(
+        "POST",
+        `/api/downloads/${encodeURIComponent(itemId)}/requeue`,
+      );
+      if (!result.success) {
+        throw new Error(
+          result.error || "Unable to requeue the direct download.",
+        );
+      }
+      return result;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["downloads", "queue"] });
+    },
   });
 }

@@ -7,7 +7,48 @@ export type SeriesStatus = "Active" | "Paused" | "Ended" | "Loading" | "Error";
 
 /** Issue status */
 export type IssueStatus =
-  "Downloaded" | "Wanted" | "Skipped" | "Snatched" | "Archived" | "Failed";
+  | "Downloaded"
+  | "Wanted"
+  | "Skipped"
+  | "Ignored"
+  | "Reserved"
+  | "Snatched"
+  | "Archived"
+  | "Failed";
+
+/** User or policy intent, independent of the acquisition evidence. */
+export type AcquisitionIntent = "policy" | "wanted" | "skipped" | "ignored";
+
+/** Evidence-backed acquisition state, independent of user intent. */
+export type FulfillmentState =
+  | "unknown"
+  | "missing"
+  | "reserved"
+  | "snatched"
+  | "downloaded"
+  | "archived"
+  | "failed";
+
+/** Compact state shown in issue tables and filters. */
+export type IssueDisplayState =
+  | "Unknown"
+  | "Missing"
+  | "Wanted"
+  | "Skipped"
+  | "Ignored"
+  | "Reserved"
+  | "Snatched"
+  | "Downloaded"
+  | "Archived"
+  | "Failed";
+
+/** The policy explanation included with the canonical issue projection. */
+export interface IssueEligibility {
+  eligible: boolean;
+  reason: string;
+  date: string | null;
+  source: "releaseDate" | "digitalDate" | "issueDate" | null;
+}
 
 /** Comic series entity from getIndex/getComic */
 export interface Comic {
@@ -53,15 +94,196 @@ export interface Issue {
   // Chapter/Volume fields for manga support
   chapterNumber?: string | null;
   volumeNumber?: string | null;
+  // Canonical acquisition projection fields (series detail / search-missing)
+  legacyStatus?: string | null;
+  rawAcquisitionIntent?: string | null;
+  displayState?: IssueDisplayState | null;
+  acquisitionIntent?: AcquisitionIntent | null;
+  intentExplicit?: boolean;
+  fulfillment?: FulfillmentState | null;
+  fulfillmentEvidence?: string | null;
+  eligible?: boolean;
+  eligibility?: IssueEligibility;
+  eligibilityDate?: string | null;
+  eligibilityDateSource?: "releaseDate" | "digitalDate" | "issueDate" | null;
+  owned?: boolean;
+  physicalOwned?: boolean;
+  archived?: boolean;
+  inFlight?: boolean;
+  future?: boolean;
+  deferred?: boolean;
+  missing?: boolean;
+  monitored?: boolean;
+  eligibilityReason?: string | null;
+  annual?: boolean;
   // Alternative property names used in some API responses
   id?: string;
-  number?: string;
-  name?: string;
-  releaseDate?: string;
+  number?: string | null;
+  name?: string | null;
+  releaseDate?: string | null;
   issueDate?: string | null;
-  status?: string;
+  status?: string | null;
   imageURL?: string | null;
-  comicName?: string;
+  location?: string | null;
+  digitalDate?: string | null;
+  comicId?: string;
+  comicName?: string | null;
+}
+
+/** Aggregated issue projection counts from series detail */
+export interface SeriesIssueSummary {
+  total?: number;
+  issues?: number;
+  annuals?: number;
+  owned?: number;
+  physicalOwned?: number;
+  archived?: number;
+  inFlight?: number;
+  missing?: number;
+  monitored?: number;
+  wanted?: number;
+  skipped?: number;
+  ignored?: number;
+  failed?: number;
+  unknown?: number;
+  future?: number;
+  eligible?: number;
+  deferred?: number;
+  completionPercent?: number;
+}
+
+/** Preview row for search-all-missing */
+export interface SearchMissingPreviewItem {
+  issueId: string;
+  issueNumber?: string | null;
+  entityType?: "issue" | "annual";
+  displayState?: IssueDisplayState | null;
+  reason?: string | null;
+  eligibilityReason?: string | null;
+}
+
+/** Route readiness snippet on search-missing preview */
+export interface SearchMissingRoute {
+  viable: boolean;
+  reason?: string | null;
+}
+
+/** GET /api/series/{id}/search-missing/preview */
+export interface SearchMissingPreview {
+  success: boolean;
+  comicId?: string;
+  eligibleCount: number;
+  excludedCount: number;
+  eligible?: SearchMissingPreviewItem[];
+  excluded?: SearchMissingPreviewItem[];
+  route?: SearchMissingRoute;
+  summary?: SeriesIssueSummary;
+  canSearch: boolean;
+  preview_token?: string;
+  fingerprint?: string;
+  error?: string;
+}
+
+/** Input used by the UI to confirm a one-shot Search all missing preview. */
+export interface SearchMissingConfirmationInput {
+  comicId: string;
+  previewToken: string;
+  fingerprint: string;
+}
+
+/** POST /api/series/{id}/search-missing */
+export interface SearchMissingResult {
+  success: boolean;
+  status?:
+    | "accepted"
+    | "blocked"
+    | "noop"
+    | "pending_dispatch"
+    | "stale_preview"
+    | "invalid_preview"
+    | "failed";
+  accepted?: number;
+  rejected?: number;
+  run_id?: string | null;
+  idempotent?: boolean;
+  message?: string;
+  error?: string;
+  preview?: SearchMissingPreview;
+}
+
+export interface SearchRunRetryResult {
+  success: boolean;
+  status?: "accepted" | "partial" | "failed";
+  run_id: string;
+  dispatched: number;
+  errors: string[];
+  message?: string;
+  run?: SearchRun;
+  error?: string;
+}
+
+/** Scheduler acceptance state for a durable search run. */
+export type SearchRunDispatchState =
+  "pending" | "accepted" | "error" | "missed" | "max_instances";
+
+/** Completion state calculated from the run's individual issue outcomes. */
+export type SearchRunCompletionState =
+  "pending" | "running" | "completed" | "partial" | "blocked" | "failed";
+
+export type SearchRunItemState =
+  | "accepted"
+  | "running"
+  | "succeeded"
+  | "no_match"
+  | "blocked"
+  | "failed"
+  | "quarantined"
+  | "cancelled";
+
+/** Sanitized durable search run returned by GET /api/search/runs/{id}. */
+export interface SearchRun {
+  run_id: string;
+  command_kind: "search";
+  trigger: string;
+  scope_type: string | null;
+  scope_id: string | null;
+  dispatch_state: SearchRunDispatchState;
+  completion_state: SearchRunCompletionState;
+  accepted_count: number;
+  terminal_count: number;
+  succeeded_count: number;
+  no_match_count: number;
+  blocked_count: number;
+  failed_count: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface SearchRunItem {
+  entity_type: string;
+  entity_id: string;
+  state: SearchRunItemState;
+  attempt_count: number;
+  reason: string | null;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface SearchRunResult {
+  success: boolean;
+  run: SearchRun;
+  items: SearchRunItem[];
+}
+
+/** POST /api/search/force outcome */
+export interface ForceSearchResult {
+  success: boolean;
+  status?: "accepted" | "partial" | "no_match" | "blocked" | "failed";
+  run_id?: string;
+  accepted?: number;
+  message?: string;
+  error?: string;
 }
 
 /** Search result from findComic */
@@ -109,6 +331,7 @@ export interface SeriesDetail {
   comic: Comic[] | Comic;
   issues: Issue[];
   annuals?: Issue[];
+  summary?: SeriesIssueSummary;
 }
 
 /** Content type for comic/manga distinction */

@@ -294,7 +294,9 @@ def _read_get_wanted(StoryArcID):
                 ctrlVal = {"IssueID": st["IssueID"]}
                 db.upsert("issues", newVal, ctrlVal)
     for item in add_to_search_queue:
-        comicarr.SEARCH_QUEUE.put(item)
+        from comicarr.app.search.commands import enqueue_search_command
+
+        enqueue_search_command(item, trigger="storyarc_wanted")
 
 
 def _arc_watchlist(StoryArcID=None):

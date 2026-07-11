@@ -1,54 +1,199 @@
 import { useState } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
+  MoreHorizontal,
   Pause,
   Play,
   RefreshCw,
-  Trash2,
   Search,
-  MoreHorizontal,
+  Trash2,
 } from "lucide-react";
+import StatusBadge from "@/components/StatusBadge";
+import { Button } from "@/components/ui/button";
 import {
-  useSeriesDetail,
-  usePauseSeries,
-  useResumeSeries,
-  useRefreshSeries,
-  useDeleteSeries,
-} from "@/hooks/useSeries";
-import { useToast } from "@/components/ui/toast";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { ComicOrManga, Issue } from "@/types";
+import { useToast } from "@/components/ui/toast";
+import {
+  useConfirmSearchMissing,
+  useDeleteSeries,
+  usePauseSeries,
+  useRefreshSeries,
+  useRetrySearchRun,
+  useResumeSeries,
+  useSearchMissingPreview,
+  useSearchRun,
+  useSeriesDetail,
+} from "@/hooks/useSeries";
+import type {
+  ComicOrManga,
+  Issue,
+  SearchMissingPreview,
+  SearchMissingResult,
+} from "@/types";
 
 type IssueFilter = "all" | "have" | "missing" | "monitored";
+
+function getIssueStatus(issue: Issue): string {
+  return issue.displayState ?? issue.status ?? issue.Status ?? "Unknown";
+}
+
+function isIssueOwned(issue: Issue): boolean {
+  if (typeof issue.owned === "boolean") return issue.owned;
+  const status = getIssueStatus(issue).toLowerCase();
+  return status === "downloaded" || status === "archived";
+}
+
+function isIssueInFlight(issue: Issue): boolean {
+  if (typeof issue.inFlight === "boolean") return issue.inFlight;
+  const status = getIssueStatus(issue).toLowerCase();
+  return status === "reserved" || status === "snatched";
+}
+
+function isIssueMissing(issue: Issue): boolean {
+  if (typeof issue.missing === "boolean") return issue.missing;
+  return !isIssueOwned(issue) && !isIssueInFlight(issue);
+}
+
+function isIssueMonitored(issue: Issue): boolean {
+  if (typeof issue.monitored === "boolean") return issue.monitored;
+  const intent = issue.acquisitionIntent?.toLowerCase();
+  return intent !== "skipped" && intent !== "ignored";
+}
+
+function getSeparateIntent(issue: Issue): string | null {
+  const intent = issue.acquisitionIntent?.toLowerCase();
+  if (!intent || intent === "policy" || issue.intentExplicit === false) {
+    return null;
+  }
+  return getIssueStatus(issue).toLowerCase() === intent ? null : intent;
+}
+
+function formatRouteReason(reason?: string | null): string {
+  if (!reason) return "No safe acquisition route is currently ready.";
+  return reason.replace(/_/g, " ");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : "Unable to load the search preview.";
+}
+
+function pluralize(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
 
 export default function SeriesDetailPage() {
   const { comicId } = useParams<{ comicId: string }>();
   const navigate = useNavigate();
+  const { addToast } = useToast();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [filter, setFilter] = useState<IssueFilter>("all");
-  const { addToast } = useToast();
+  const [searchDialogOpen, setSearchDialogOpen] = useState(false);
+  const [preview, setPreview] = useState<SearchMissingPreview | null>(null);
+  const [searchOutcome, setSearchOutcome] =
+    useState<SearchMissingResult | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchRunId, setSearchRunId] = useState<string | null>(null);
 
   const { data: seriesData, isLoading, error } = useSeriesDetail(comicId);
   const pauseMutation = usePauseSeries();
   const resumeMutation = useResumeSeries();
   const refreshMutation = useRefreshSeries();
   const deleteMutation = useDeleteSeries();
+  const searchPreview = useSearchMissingPreview(comicId);
+  const confirmSearch = useConfirmSearchMissing();
+  const searchRun = useSearchRun(searchRunId);
+  const retrySearchRun = useRetrySearchRun();
+
+  const fetchSearchPreview = async () => {
+    setPreview(null);
+    setSearchError(null);
+    setSearchOutcome(null);
+    setSearchRunId(null);
+    try {
+      const result = await searchPreview.refetch();
+      if (result.error) {
+        setSearchError(errorMessage(result.error));
+      } else if (result.data) {
+        setPreview(result.data);
+      } else {
+        setSearchError("The search preview did not return a result.");
+      }
+    } catch (previewError) {
+      setSearchError(errorMessage(previewError));
+    }
+  };
+
+  const handleOpenSearch = () => {
+    setSearchDialogOpen(true);
+    void fetchSearchPreview();
+  };
+
+  const handleSearchDialogChange = (open: boolean) => {
+    setSearchDialogOpen(open);
+    if (!open) setSearchRunId(null);
+  };
+
+  const handleConfirmSearch = async () => {
+    if (!comicId || !preview?.preview_token || !preview.fingerprint) return;
+    setSearchError(null);
+    try {
+      const result = await confirmSearch.mutateAsync({
+        comicId,
+        previewToken: preview.preview_token,
+        fingerprint: preview.fingerprint,
+      });
+      setSearchOutcome(result);
+      setSearchRunId(result.run_id ?? null);
+    } catch (confirmationError) {
+      setSearchError(errorMessage(confirmationError));
+    }
+  };
+
+  const handleRetrySearch = async () => {
+    if (!searchRunId) return;
+    setSearchError(null);
+    try {
+      const result = await retrySearchRun.mutateAsync(searchRunId);
+      setSearchOutcome((current) =>
+        current
+          ? {
+              ...current,
+              status:
+                result.status === "partial"
+                  ? "pending_dispatch"
+                  : result.success
+                    ? "accepted"
+                    : "failed",
+              message: result.message,
+            }
+          : current,
+      );
+    } catch (retryError) {
+      setSearchError(errorMessage(retryError));
+    }
+  };
 
   if (isLoading) {
     return (
       <div className="p-5 space-y-4">
         <Skeleton className="h-6 w-64" />
-        <div
-          className="grid gap-7"
-          style={{ gridTemplateColumns: "140px 1fr 260px" }}
-        >
+        <div className="grid gap-7 md:grid-cols-[140px_minmax(0,1fr)] xl:grid-cols-[140px_minmax(0,1fr)_260px]">
           <Skeleton className="aspect-[2/3] w-[140px]" />
           <div className="space-y-3">
             <Skeleton className="h-8 w-2/3" />
             <Skeleton className="h-4 w-full" />
             <Skeleton className="h-4 w-4/5" />
           </div>
-          <Skeleton className="h-40 w-full" />
+          <Skeleton className="h-40 w-full md:col-span-2 xl:col-span-1" />
         </div>
       </div>
     );
@@ -66,13 +211,13 @@ export default function SeriesDetailPage() {
             color: "var(--status-error)",
           }}
         >
-          <div className="font-semibold mb-1">Failed to load series</div>
+          <div className="mb-1 font-semibold">Failed to load series</div>
           <div className="text-[12px]">
             {error?.message || "Series not found."}
           </div>
           <Link
             to="/library"
-            className="inline-block mt-3 font-mono text-[11px] underline"
+            className="mt-3 inline-block font-mono text-[11px] underline"
           >
             ← back to library
           </Link>
@@ -84,37 +229,46 @@ export default function SeriesDetailPage() {
   const comic: ComicOrManga = Array.isArray(seriesData.comic)
     ? seriesData.comic[0]
     : seriesData.comic;
-  const issues: Issue[] = seriesData.issues || [];
+  const issues = seriesData.issues ?? [];
+  const annuals = seriesData.annuals ?? [];
+  const allIssues = [
+    ...issues.map((issue) => ({ ...issue, annual: Boolean(issue.annual) })),
+    ...annuals.map((issue) => ({ ...issue, annual: true })),
+  ];
+  const summary = seriesData.summary;
+  const total = summary?.total ?? allIssues.length;
+  const have = summary?.owned ?? allIssues.filter(isIssueOwned).length;
+  const missing = summary?.missing ?? allIssues.filter(isIssueMissing).length;
+  const monitored =
+    summary?.monitored ?? allIssues.filter(isIssueMonitored).length;
+  const inFlight =
+    summary?.inFlight ?? allIssues.filter(isIssueInFlight).length;
+  const annualCount =
+    summary?.annuals ?? allIssues.filter((issue) => issue.annual).length;
+  const completionPct =
+    summary?.completionPercent ??
+    (total > 0 ? Math.round((have / total) * 100) : 0);
   const isPaused = comic.Status?.toLowerCase() === "paused";
-
   const isManga =
     comic.ContentType === "manga" ||
     comicId?.startsWith("md-") ||
     comicId?.startsWith("mal-");
-
-  const have = comic.Have || 0;
-  const total = comic.Total || 0;
-  const missing = Math.max(0, total - have);
-  const completionPct = total > 0 ? Math.round((have / total) * 100) : 0;
   const slug = (comic.ComicName || "").toLowerCase().replace(/\s+/g, "-");
-
-  const getStatus = (i: Issue) => i.status ?? i.Status;
-  const haveCount = issues.filter((i) => getStatus(i) === "Downloaded").length;
-  const missingCount = issues.filter(
-    (i) => getStatus(i) !== "Downloaded",
-  ).length;
-  const monitoredCount = issues.filter(
-    (i) => getStatus(i) !== "Skipped",
-  ).length;
-
-  const filteredIssues =
-    filter === "have"
-      ? issues.filter((i) => getStatus(i) === "Downloaded")
-      : filter === "missing"
-        ? issues.filter((i) => getStatus(i) !== "Downloaded")
-        : filter === "monitored"
-          ? issues.filter((i) => getStatus(i) !== "Skipped")
-          : issues;
+  const filteredIssues = allIssues.filter((issue) => {
+    if (filter === "have") return isIssueOwned(issue);
+    if (filter === "missing") return isIssueMissing(issue);
+    if (filter === "monitored") return isIssueMonitored(issue);
+    return true;
+  });
+  const routeViable = preview?.route?.viable !== false;
+  const canConfirm = Boolean(
+    preview?.canSearch &&
+    preview.preview_token &&
+    preview.fingerprint &&
+    routeViable &&
+    !searchError,
+  );
+  const run = searchRun.data?.run;
 
   const handlePauseResume = async () => {
     if (!comicId) return;
@@ -158,61 +312,56 @@ export default function SeriesDetailPage() {
   };
 
   const ghostBtn =
-    "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] border text-[12px] hover:bg-secondary/50 transition-colors";
+    "inline-flex items-center gap-1.5 rounded-[5px] border px-3 py-1.5 text-[12px] transition-colors hover:bg-secondary/50";
 
   return (
-    <div className="h-full flex flex-col page-transition">
-      {/* Breadcrumb bar */}
+    <div className="flex h-full flex-col page-transition">
       <div
-        className="px-5 py-3.5 border-b flex items-center gap-2.5 font-mono text-[11px]"
+        className="flex items-center gap-2.5 border-b px-5 py-3.5 font-mono text-[11px]"
         style={{
           borderColor: "var(--border)",
           color: "var(--muted-foreground)",
         }}
       >
-        <Link to="/library" className="hover:text-foreground transition-colors">
+        <Link to="/library" className="transition-colors hover:text-foreground">
           library
         </Link>
         <span style={{ color: "var(--text-muted)" }}>/</span>
         <span>{isManga ? "manga" : "comics"}</span>
         <span style={{ color: "var(--text-muted)" }}>/</span>
-        <span style={{ color: "var(--foreground)" }}>{slug}</span>
-        <span className="ml-auto">
+        <span className="truncate" style={{ color: "var(--foreground)" }}>
+          {slug}
+        </span>
+        <span className="ml-auto hidden shrink-0 sm:inline">
           cv:{comic.ComicID} ·{" "}
           {comic.LatestDate ? `last sync ${comic.LatestDate}` : "unsynced"}
         </span>
       </div>
 
-      {/* Hero */}
       <div
-        className="px-5 py-6 border-b grid gap-7"
-        style={{
-          borderColor: "var(--border)",
-          gridTemplateColumns: "140px 1fr 260px",
-        }}
+        className="grid gap-7 border-b px-5 py-6 md:grid-cols-[140px_minmax(0,1fr)] xl:grid-cols-[140px_minmax(0,1fr)_260px]"
+        style={{ borderColor: "var(--border)" }}
       >
-        {/* Cover */}
         <div
-          className="aspect-[2/3] rounded-[5px] overflow-hidden border"
+          className="aspect-[2/3] w-[112px] overflow-hidden rounded-[5px] border md:w-[140px]"
           style={{ borderColor: "var(--border)" }}
         >
           {comic.ComicImage && (
             <img
               src={comic.ComicImage}
               alt={comic.ComicName}
-              className="w-full h-full object-cover"
-              onError={(e: React.SyntheticEvent<HTMLImageElement>) => {
-                e.currentTarget.style.display = "none";
+              className="h-full w-full object-cover"
+              onError={(event) => {
+                event.currentTarget.style.display = "none";
               }}
             />
           )}
         </div>
 
-        {/* Info */}
         <div className="min-w-0">
-          <div className="flex items-center gap-2 mb-2 font-mono text-[10px] tracking-[0.08em] uppercase">
+          <div className="mb-2 flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-[0.08em]">
             <span
-              className="px-1.5 py-0.5 rounded-[3px]"
+              className="rounded-[3px] px-1.5 py-0.5"
               style={{
                 background:
                   "color-mix(in oklab, var(--primary) 14%, transparent)",
@@ -246,31 +395,31 @@ export default function SeriesDetailPage() {
             <span style={{ color: "var(--muted-foreground)" }}>monitored</span>
           </div>
 
-          <h1 className="text-[28px] font-bold tracking-[-0.02em] leading-tight mb-2">
+          <h1 className="mb-2 text-[28px] font-bold leading-tight tracking-[-0.02em]">
             {comic.ComicName}
           </h1>
 
           {comic.Description && (
             <p
-              className="text-[13px] leading-relaxed mb-3.5 max-w-[640px]"
+              className="mb-3.5 max-w-[640px] text-[13px] leading-relaxed"
               style={{ color: "var(--muted-foreground)" }}
             >
               {comic.Description}
             </p>
           )}
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled
-              title="Bulk search is not yet wired up"
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-[5px] text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={handleOpenSearch}
+              disabled={!comicId || searchPreview.isFetching}
+              className="inline-flex items-center gap-1.5 rounded-[5px] px-3.5 py-1.5 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-60"
               style={{
                 background: "var(--primary)",
                 color: "var(--primary-foreground)",
               }}
             >
-              <Search className="w-3.5 h-3.5" />
+              <Search className="h-3.5 w-3.5" />
               Search all missing
             </button>
             <button
@@ -281,7 +430,7 @@ export default function SeriesDetailPage() {
               style={{ borderColor: "var(--border)" }}
             >
               <RefreshCw
-                className={`w-3.5 h-3.5 ${refreshMutation.isPending ? "animate-spin" : ""}`}
+                className={`h-3.5 w-3.5 ${refreshMutation.isPending ? "animate-spin" : ""}`}
               />
               Refresh
             </button>
@@ -293,9 +442,9 @@ export default function SeriesDetailPage() {
               style={{ borderColor: "var(--border)" }}
             >
               {isPaused ? (
-                <Play className="w-3.5 h-3.5" />
+                <Play className="h-3.5 w-3.5" />
               ) : (
-                <Pause className="w-3.5 h-3.5" />
+                <Pause className="h-3.5 w-3.5" />
               )}
               {isPaused ? "Resume" : "Pause"}
             </button>
@@ -310,7 +459,7 @@ export default function SeriesDetailPage() {
                 }}
                 aria-label="More actions"
               >
-                <MoreHorizontal className="w-3.5 h-3.5" />
+                <MoreHorizontal className="h-3.5 w-3.5" />
               </button>
             ) : (
               <>
@@ -318,10 +467,10 @@ export default function SeriesDetailPage() {
                   type="button"
                   onClick={handleDelete}
                   disabled={deleteMutation.isPending}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[5px] text-[12px] font-semibold"
+                  className="inline-flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-[12px] font-semibold"
                   style={{ background: "var(--status-error)", color: "white" }}
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <Trash2 className="h-3.5 w-3.5" />
                   Confirm delete
                 </button>
                 <button
@@ -337,20 +486,19 @@ export default function SeriesDetailPage() {
           </div>
         </div>
 
-        {/* Status card */}
         <div
-          className="rounded-[6px] border"
+          className="rounded-[6px] border md:col-span-2 xl:col-span-1"
           style={{ borderColor: "var(--border)", background: "var(--card)" }}
         >
           <div
-            className="px-3 py-2.5 border-b font-mono text-[10px] tracking-[0.1em] uppercase"
+            className="border-b px-3 py-2.5 font-mono text-[10px] uppercase tracking-[0.1em]"
             style={{ borderColor: "var(--border)", color: "var(--text-muted)" }}
           >
             Status
           </div>
           <div className="px-3 py-2.5">
-            <div className="flex items-baseline gap-2 mb-1.5">
-              <div className="text-[28px] font-bold tracking-[-0.02em] leading-none">
+            <div className="mb-1.5 flex items-baseline gap-2">
+              <div className="text-[28px] font-bold leading-none tracking-[-0.02em]">
                 {completionPct}%
               </div>
               <div
@@ -366,7 +514,7 @@ export default function SeriesDetailPage() {
               </div>
             </div>
             <div
-              className="h-1 rounded-full overflow-hidden mb-2.5"
+              className="mb-2.5 h-1 overflow-hidden rounded-full"
               style={{ background: "var(--border)" }}
             >
               <div
@@ -386,14 +534,14 @@ export default function SeriesDetailPage() {
                   ["have", String(have)],
                   ["total", String(total)],
                   ["missing", String(missing)],
-                  ["status", isPaused ? "paused" : "active"],
+                  ["in flight", String(inFlight)],
                 ] as const
-              ).map(([label, value], i) => (
+              ).map(([label, value], index) => (
                 <div
                   key={label}
                   className="flex justify-between py-1"
                   style={{
-                    borderTop: i > 1 ? "1px solid var(--border)" : "none",
+                    borderTop: index > 1 ? "1px solid var(--border)" : "none",
                   }}
                 >
                   <span style={{ color: "var(--text-muted)" }}>{label}</span>
@@ -405,27 +553,26 @@ export default function SeriesDetailPage() {
         </div>
       </div>
 
-      {/* Issues header */}
       <div
-        className="px-5 py-2.5 border-b flex items-center gap-3"
+        className="flex flex-wrap items-center gap-3 border-b px-5 py-2.5"
         style={{ borderColor: "var(--border)" }}
       >
         <div className="text-[13px] font-semibold">
           {isManga ? "Chapters" : "Issues"}
         </div>
         <div
-          className="font-mono text-[10px] tracking-[0.08em] uppercase"
+          className="font-mono text-[10px] uppercase tracking-[0.08em]"
           style={{ color: "var(--text-muted)" }}
         >
-          {total} · grouped by arc
+          {total} · {annualCount ? `annuals: ${annualCount}` : "grouped by arc"}
         </div>
-        <div className="ml-auto flex gap-1.5 font-mono text-[10px]">
+        <div className="ml-auto flex flex-wrap gap-1.5 font-mono text-[10px]">
           {(
             [
               ["all", `All ${total}`],
-              ["have", `Have ${haveCount}`],
-              ["missing", `Missing ${missingCount}`],
-              ["monitored", `Monitored ${monitoredCount}`],
+              ["have", `Have ${have}`],
+              ["missing", `Missing ${missing}`],
+              ["monitored", `Monitored ${monitored}`],
             ] as const
           ).map(([key, label]) => {
             const active = filter === key;
@@ -433,8 +580,8 @@ export default function SeriesDetailPage() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setFilter(key as IssueFilter)}
-                className="px-2 py-0.5 rounded-full border transition-colors"
+                onClick={() => setFilter(key)}
+                className="rounded-full border px-2 py-0.5 transition-colors"
                 style={{
                   borderColor: active ? "var(--primary)" : "var(--border)",
                   color: active ? "var(--primary)" : "var(--muted-foreground)",
@@ -450,108 +597,338 @@ export default function SeriesDetailPage() {
         </div>
       </div>
 
-      {/* Issues table */}
       <div className="flex-1 overflow-auto">
-        <div
-          className="px-5 py-2 grid gap-3 font-mono text-[10px] tracking-[0.1em] uppercase border-b"
-          style={{
-            gridTemplateColumns: "40px 40px 1fr 140px 110px 110px",
-            borderColor: "var(--border)",
-            color: "var(--text-muted)",
-            background: "var(--card)",
-          }}
-        >
-          <div />
-          <div>#</div>
-          <div>title</div>
-          <div>arc</div>
-          <div>date</div>
-          <div>status</div>
-        </div>
-
-        {filteredIssues.length === 0 ? (
+        <div className="min-w-[720px]">
           <div
-            className="px-5 py-8 text-center font-mono text-[11px]"
-            style={{ color: "var(--text-muted)" }}
+            className="grid grid-cols-[54px_42px_minmax(220px,1fr)_130px_110px_190px] gap-3 border-b px-5 py-2 font-mono text-[10px] uppercase tracking-[0.1em]"
+            style={{
+              borderColor: "var(--border)",
+              color: "var(--text-muted)",
+              background: "var(--card)",
+            }}
           >
-            no issues to display
+            <div>type</div>
+            <div>#</div>
+            <div>title</div>
+            <div>arc</div>
+            <div>date</div>
+            <div>state</div>
           </div>
-        ) : (
-          filteredIssues.map((issue) => {
-            const status = getStatus(issue);
-            const haveIt = status === "Downloaded";
-            const wanted = status === "Wanted";
-            const issueId = issue.id ?? issue.IssueID;
-            const issueNumber = issue.number ?? issue.Issue_Number;
-            const issueName = issue.name ?? issue.IssueName;
-            const issueDate = issue.issueDate ?? issue.IssueDate;
-            const arc = issue.Arc || "—";
-            return (
+
+          {filteredIssues.length === 0 ? (
+            <div
+              className="px-5 py-8 text-center font-mono text-[11px]"
+              style={{ color: "var(--text-muted)" }}
+            >
+              no issues to display
+            </div>
+          ) : (
+            filteredIssues.map((issue) => {
+              const issueId = issue.id ?? issue.IssueID;
+              const issueNumber = issue.number ?? issue.Issue_Number;
+              const issueName = issue.name ?? issue.IssueName;
+              const issueDate =
+                issue.releaseDate ??
+                issue.ReleaseDate ??
+                issue.issueDate ??
+                issue.IssueDate;
+              const status = getIssueStatus(issue);
+              const separateIntent = getSeparateIntent(issue);
+              return (
+                <div
+                  key={`${issue.annual ? "annual" : "issue"}-${issueId}`}
+                  className="grid grid-cols-[54px_42px_minmax(220px,1fr)_130px_110px_190px] items-center gap-3 border-b px-5 py-2 text-[12px]"
+                  style={{ borderColor: "var(--border)" }}
+                >
+                  <div>
+                    {issue.annual && (
+                      <span
+                        className="rounded-[3px] px-1.5 py-0.5 font-mono text-[9px] uppercase"
+                        style={{
+                          background:
+                            "color-mix(in oklab, var(--primary) 12%, transparent)",
+                          color: "var(--primary)",
+                        }}
+                      >
+                        Annual
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    className="font-mono"
+                    style={{ color: "var(--muted-foreground)" }}
+                  >
+                    #{String(issueNumber ?? "").padStart(2, "0")}
+                  </div>
+                  <div className="min-w-0 truncate">
+                    <Link
+                      to={`/library/${comicId}/issue/${issueId}`}
+                      className="transition-colors hover:text-primary"
+                    >
+                      {issueName ||
+                        `${issue.annual ? "Annual" : "Issue"} ${issueNumber}`}
+                    </Link>
+                  </div>
+                  <div
+                    className="truncate text-[11px]"
+                    style={{ color: "var(--muted-foreground)" }}
+                  >
+                    {issue.Arc || "—"}
+                  </div>
+                  <div
+                    className="font-mono text-[10px]"
+                    style={{ color: "var(--muted-foreground)" }}
+                  >
+                    {issueDate || "—"}
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <StatusBadge status={status} />
+                    {separateIntent && (
+                      <span
+                        className="font-mono text-[9px] lowercase"
+                        style={{ color: "var(--muted-foreground)" }}
+                      >
+                        intent: {separateIntent}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      <Dialog open={searchDialogOpen} onOpenChange={handleSearchDialogChange}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Search missing issues</DialogTitle>
+            <DialogDescription>
+              Review the current selection before Comicarr creates one durable
+              search run.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3" aria-live="polite">
+            {searchPreview.isFetching && (
+              <>
+                <Skeleton className="h-16 w-full" />
+                <Skeleton className="h-10 w-3/4" />
+              </>
+            )}
+
+            {searchError && (
               <div
-                key={issueId}
-                className="px-5 py-2 grid gap-3 items-center border-b text-[12px]"
+                role="alert"
+                className="rounded-[5px] border p-3 text-[12px]"
                 style={{
-                  gridTemplateColumns: "40px 40px 1fr 140px 110px 110px",
-                  borderColor: "var(--border)",
+                  borderColor:
+                    "color-mix(in oklab, var(--status-error) 35%, transparent)",
+                  background: "var(--status-error-bg)",
+                  color: "var(--status-error)",
                 }}
               >
-                <div
-                  className="w-3 h-3 rounded-sm border"
-                  style={{ borderColor: "var(--border)" }}
-                />
-                <div
-                  className="font-mono"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  #{String(issueNumber ?? "").padStart(2, "0")}
+                <div className="font-semibold">
+                  Unable to confirm this search
                 </div>
-                <div className="truncate">
-                  <Link
-                    to={`/library/${comicId}/issue/${issueId}`}
-                    className="hover:text-primary transition-colors"
-                  >
-                    {issueName || `Issue ${issueNumber}`}
-                  </Link>
-                </div>
+                <div className="mt-1">{searchError}</div>
+              </div>
+            )}
+
+            {preview && !searchOutcome && !searchPreview.isFetching && (
+              <>
                 <div
-                  className="text-[11px] truncate"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  {arc}
-                </div>
-                <div
-                  className="font-mono text-[10px]"
-                  style={{ color: "var(--muted-foreground)" }}
-                >
-                  {issueDate || "—"}
-                </div>
-                <div
-                  className="inline-flex items-center gap-1.5 font-mono text-[10px]"
+                  className="rounded-[5px] border p-3 text-[12px]"
                   style={{
-                    color: haveIt
-                      ? "var(--status-active)"
-                      : wanted
-                        ? "var(--primary)"
-                        : "var(--text-muted)",
+                    borderColor: "var(--border)",
+                    background: "var(--card)",
                   }}
                 >
-                  <span
-                    className="w-[5px] h-[5px] rounded-full"
-                    style={{
-                      background: haveIt
-                        ? "var(--status-active)"
-                        : wanted
-                          ? "var(--primary)"
-                          : "var(--text-muted)",
-                    }}
-                  />
-                  {haveIt ? "have" : wanted ? "wanted" : "skipped"}
+                  <div className="font-semibold">
+                    {pluralize(preview.eligibleCount, "eligible issue")} will be
+                    searched.
+                  </div>
+                  <div
+                    className="mt-1"
+                    style={{ color: "var(--muted-foreground)" }}
+                  >
+                    {pluralize(preview.excludedCount, "issue")} are excluded
+                    from this run.
+                  </div>
+                  {preview.eligible?.some(
+                    (item) => item.entityType === "annual",
+                  ) && (
+                    <div
+                      className="mt-2 font-mono text-[10px]"
+                      style={{ color: "var(--primary)" }}
+                    >
+                      Includes annuals when they are eligible.
+                    </div>
+                  )}
                 </div>
+
+                {!routeViable ? (
+                  <div
+                    role="alert"
+                    className="rounded-[5px] border p-3 text-[12px]"
+                    style={{
+                      borderColor:
+                        "color-mix(in oklab, var(--status-paused) 35%, transparent)",
+                      background: "var(--status-paused-bg)",
+                    }}
+                  >
+                    <div className="font-semibold">
+                      Search configuration needs attention
+                    </div>
+                    <div
+                      className="mt-1"
+                      style={{ color: "var(--muted-foreground)" }}
+                    >
+                      Configure a safe download route, then refresh this
+                      preview.
+                    </div>
+                    {preview.route?.reason && (
+                      <div
+                        className="mt-2 font-mono text-[10px]"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        {formatRouteReason(preview.route.reason)}
+                      </div>
+                    )}
+                  </div>
+                ) : preview.eligibleCount === 0 ? (
+                  <div
+                    className="rounded-[5px] border p-3 text-[12px]"
+                    style={{
+                      borderColor: "var(--border)",
+                      color: "var(--muted-foreground)",
+                    }}
+                  >
+                    No eligible missing issues remain to search.
+                  </div>
+                ) : (
+                  <p
+                    className="text-[12px]"
+                    style={{ color: "var(--muted-foreground)" }}
+                  >
+                    Confirmation queues this exact preview once. The run owns
+                    retries and outcome tracking.
+                  </p>
+                )}
+              </>
+            )}
+
+            {searchOutcome && (
+              <div
+                className="rounded-[5px] border p-3 text-[12px]"
+                style={{
+                  borderColor: "var(--border)",
+                  background: "var(--card)",
+                }}
+              >
+                <div className="font-semibold">
+                  {searchOutcome.run_id
+                    ? "Search run accepted"
+                    : "Search result"}
+                </div>
+                <div
+                  className="mt-1"
+                  style={{ color: "var(--muted-foreground)" }}
+                >
+                  {searchOutcome.message ||
+                    (searchOutcome.status === "noop"
+                      ? "No eligible missing issues remain to search."
+                      : "The search request was recorded.")}
+                </div>
+                {run && (
+                  <div
+                    className="mt-3 rounded-[4px] border px-2.5 py-2 font-mono text-[10px]"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span style={{ color: "var(--text-muted)" }}>
+                        run state
+                      </span>
+                      <span>{run.completion_state}</span>
+                    </div>
+                    <div
+                      className="mt-1"
+                      style={{ color: "var(--muted-foreground)" }}
+                    >
+                      {run.succeeded_count} matched · {run.no_match_count} no
+                      match
+                      {run.failed_count ? ` · ${run.failed_count} failed` : ""}
+                      {run.blocked_count
+                        ? ` · ${run.blocked_count} blocked`
+                        : ""}
+                    </div>
+                  </div>
+                )}
+                {searchRun.isLoading && (
+                  <div
+                    className="mt-3 font-mono text-[10px]"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Checking run outcome…
+                  </div>
+                )}
+                {searchRun.isError && (
+                  <div
+                    role="alert"
+                    className="mt-3"
+                    style={{ color: "var(--status-error)" }}
+                  >
+                    Unable to refresh the run outcome. It remains recorded and
+                    can be checked from Activity.
+                  </div>
+                )}
+                {searchOutcome.status === "pending_dispatch" && searchRunId && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="mt-3"
+                    onClick={() => void handleRetrySearch()}
+                    disabled={retrySearchRun.isPending}
+                  >
+                    {retrySearchRun.isPending
+                      ? "Retrying queue handoff…"
+                      : "Retry queue handoff"}
+                  </Button>
+                )}
               </div>
-            );
-          })
-        )}
-      </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => handleSearchDialogChange(false)}
+            >
+              {searchOutcome ? "Close" : "Cancel"}
+            </Button>
+            {!searchOutcome && (searchError || !routeViable) && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void fetchSearchPreview()}
+                disabled={searchPreview.isFetching}
+              >
+                Refresh preview
+              </Button>
+            )}
+            {!searchOutcome && preview && (
+              <Button
+                type="button"
+                onClick={() => void handleConfirmSearch()}
+                disabled={!canConfirm || confirmSearch.isPending}
+              >
+                {confirmSearch.isPending ? "Confirming…" : "Confirm search"}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

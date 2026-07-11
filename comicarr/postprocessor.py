@@ -32,6 +32,7 @@ from sqlalchemy import Integer, and_, delete, func, inspect, or_, select
 
 import comicarr
 from comicarr import db, filechecker, getimage, helpers, logger, notifiers, updater, weeklypull
+from comicarr.app.downloads.pp_commands import safe_walk
 from comicarr.config import get_manga_destination
 from comicarr.manga_parser import parse_manga_filename
 from comicarr.tables import (
@@ -3833,7 +3834,7 @@ class PostProcessor(object):
                             _, ext = os.path.splitext(ofilename)
                         else:
                             # os.walk the location to get the filename...(coming from sab kinda thing) where it just passes the path.
-                            for root, _dirnames, filenames in os.walk(odir, followlinks=True):
+                            for root, _dirnames, filenames in safe_walk(odir):
                                 for filename in filenames:
                                     if filename.lower().endswith(self.extensions):
                                         ofilename = orig_filename = filename
@@ -4185,7 +4186,7 @@ class PostProcessor(object):
 
                     clocation = cloc
                     if os.path.isdir(cloc):
-                        for root, _dirnames, filenames in os.walk(cloc, followlinks=True):
+                        for root, _dirnames, filenames in safe_walk(cloc):
                             for filename in filenames:
                                 if filename.lower().endswith(self.extensions):
                                     clocation = os.path.join(root, filename)
@@ -4334,7 +4335,7 @@ class PostProcessor(object):
                 return self.queue.put(self.valreturn)
 
         manga_files = []
-        for root, _dirs, files in os.walk(nzb_dir):
+        for root, _dirs, files in safe_walk(nzb_dir):
             for f in files:
                 if any(f.lower().endswith(ext) for ext in self.extensions):
                     manga_files.append(os.path.join(root, f))
@@ -4864,7 +4865,7 @@ class PostProcessor(object):
 
         # if it's a Manual Run, use the ml['ComicLocation'] for the exact filename.
         if ml is None:
-            for root, _dirnames, filenames in os.walk(self.nzb_folder, followlinks=True):
+            for root, _dirnames, filenames in safe_walk(self.nzb_folder):
                 for filename in filenames:
                     if filename.lower().endswith(self.extensions):
                         odir = root

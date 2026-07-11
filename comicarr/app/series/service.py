@@ -18,11 +18,15 @@ import os
 import re
 import shutil
 import threading
+from collections.abc import Mapping
 
 import sqlalchemy
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.acquisition.evidence import has_verified_library_file
+from comicarr.app.acquisition.models import AcquisitionIntent, Fulfillment
+from comicarr.app.acquisition.policy import EligibilityInput, evaluate_eligibility, project_legacy_state
 from comicarr.app.common.filesystem import is_path_within_allowed_dirs
 from comicarr.app.series import queries as series_queries
 from comicarr.tables import annuals, comics, issues, oneoffhistory, storyarcs, weekly
@@ -45,6 +49,173 @@ _LIBRARY_ROOT_CONFIG_KEYS = (
 # gap between accepting an API request and the worker acquiring that lock.
 _COMIC_SCAN_START_LOCK = threading.Lock()
 _MANGA_SCAN_START_LOCK = threading.Lock()
+
+_DISPLAY_BY_FULFILLMENT = {
+    Fulfillment.RESERVED: "Reserved",
+    Fulfillment.SNATCHED: "Snatched",
+    Fulfillment.DOWNLOADED: "Downloaded",
+    Fulfillment.ARCHIVED: "Archived",
+    Fulfillment.FAILED: "Failed",
+}
+_DISPLAY_BY_INTENT = {
+    AcquisitionIntent.WANTED: "Wanted",
+    AcquisitionIntent.SKIPPED: "Skipped",
+    AcquisitionIntent.IGNORED: "Ignored",
+}
+_DATE_SOURCE_NAMES = {
+    "release_date": "releaseDate",
+    "digital_date": "digitalDate",
+    "issue_date": "issueDate",
+}
+
+
+def _row_value(row, *keys):
+    for key in keys:
+        if key in row:
+            return row[key]
+    return None
+
+
+def _optional_text(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value if value and value.lower() != "none" else None
+
+
+def _display_state(projection, *, eligibility_reason=None):
+    if projection.fulfillment in _DISPLAY_BY_FULFILLMENT:
+        return _DISPLAY_BY_FULFILLMENT[projection.fulfillment]
+    if projection.intent in _DISPLAY_BY_INTENT:
+        return _DISPLAY_BY_INTENT[projection.intent]
+    if projection.fulfillment is Fulfillment.MISSING:
+        # A future policy row is deferred rather than an actionable missing
+        # item. Preserve the compact legacy label while surfacing the explicit
+        # eligibility reason alongside it in the canonical projection.
+        if eligibility_reason == "future":
+            return "Skipped"
+        return "Missing"
+    return "Unknown"
+
+
+def project_issue_state(row, *, series_status, today=None, annual=False, series_location=None):
+    """Return one canonical intent, fulfillment, eligibility, and UI projection."""
+    values = dict(row)
+    legacy_status = _row_value(values, "status", "Status")
+    acquisition_intent = _row_value(values, "acquisitionIntent", "AcquisitionIntent")
+    projection = project_legacy_state(acquisition_intent, legacy_status)
+    location = _optional_text(_row_value(values, "location", "Location"))
+
+    fulfillment = projection.fulfillment
+    verified_file = has_verified_library_file(series_location, location)
+    if verified_file and fulfillment is not Fulfillment.ARCHIVED:
+        fulfillment = Fulfillment.DOWNLOADED
+        evidence = "verified_location"
+    elif fulfillment is Fulfillment.DOWNLOADED:
+        # Legacy Downloaded plus a stale/missing path is not a safely owned
+        # issue. Keep it visible for repair instead of excluding it forever.
+        fulfillment = Fulfillment.UNKNOWN
+        evidence = "unverified_downloaded"
+    elif legacy_status is not None and str(legacy_status).strip():
+        evidence = "legacy_status"
+    else:
+        evidence = "none"
+
+    normalized_series_status = str(series_status or "").strip().lower()
+    decision = evaluate_eligibility(
+        EligibilityInput(
+            series_active=normalized_series_status in {"active", "loading", "paused"},
+            paused=normalized_series_status == "paused",
+            intent=projection.intent,
+            fulfillment=fulfillment,
+            release_date=_row_value(values, "releaseDate", "ReleaseDate"),
+            digital_date=_row_value(values, "digitalDate", "DigitalDate"),
+            issue_date=_row_value(values, "issueDate", "IssueDate"),
+        ),
+        today=today,
+    )
+    display_state = _display_state(
+        projection.__class__(projection.intent, fulfillment, projection.intent_is_explicit),
+        eligibility_reason=decision.reason,
+    )
+    owned = fulfillment.is_owned
+    in_flight = fulfillment.is_in_flight
+    missing = not owned and not in_flight
+    monitored = projection.intent not in {AcquisitionIntent.SKIPPED, AcquisitionIntent.IGNORED}
+    selected_date = decision.selected_date.isoformat() if decision.selected_date else None
+    date_source = _DATE_SOURCE_NAMES.get(decision.date_source, decision.date_source)
+
+    values.update(
+        {
+            "legacyStatus": legacy_status,
+            "rawAcquisitionIntent": acquisition_intent,
+            "acquisitionIntent": projection.intent.value,
+            "intentExplicit": projection.intent_is_explicit,
+            "fulfillment": fulfillment.value,
+            "fulfillmentEvidence": evidence,
+            "displayState": display_state,
+            "eligible": decision.eligible,
+            "eligibilityReason": decision.reason,
+            "eligibilityDate": selected_date,
+            "eligibilityDateSource": date_source,
+            "eligibility": {
+                "eligible": decision.eligible,
+                "reason": decision.reason,
+                "date": selected_date,
+                "source": date_source,
+            },
+            "owned": owned,
+            "physicalOwned": bool(verified_file),
+            "archived": fulfillment is Fulfillment.ARCHIVED,
+            "inFlight": in_flight,
+            "missing": missing,
+            "monitored": monitored,
+            "future": decision.reason == "future",
+            "deferred": missing and not decision.eligible,
+            "annual": bool(annual),
+        }
+    )
+    return values
+
+
+def _issue_summary(projected):
+    total = len(projected)
+    owned = sum(bool(row["owned"]) for row in projected)
+    return {
+        "total": total,
+        "issues": sum(not row["annual"] for row in projected),
+        "annuals": sum(bool(row["annual"]) for row in projected),
+        "owned": owned,
+        "physicalOwned": sum(bool(row["physicalOwned"]) for row in projected),
+        "archived": sum(bool(row["archived"]) for row in projected),
+        "inFlight": sum(bool(row["inFlight"]) for row in projected),
+        "missing": sum(bool(row["missing"]) for row in projected),
+        "monitored": sum(bool(row["monitored"]) for row in projected),
+        "wanted": sum(row["displayState"] == "Wanted" for row in projected),
+        "skipped": sum(row["acquisitionIntent"] == AcquisitionIntent.SKIPPED.value for row in projected),
+        "ignored": sum(row["acquisitionIntent"] == AcquisitionIntent.IGNORED.value for row in projected),
+        "failed": sum(row["fulfillment"] == Fulfillment.FAILED.value for row in projected),
+        "unknown": sum(row["fulfillment"] == Fulfillment.UNKNOWN.value for row in projected),
+        "future": sum(bool(row["future"]) for row in projected),
+        "eligible": sum(bool(row["eligible"]) for row in projected),
+        "deferred": sum(bool(row["deferred"]) for row in projected),
+        "completionPercent": round((owned / total) * 100) if total else 0,
+    }
+
+
+def project_issue_collection(rows, *, series_status, today=None, annual=False, series_location=None):
+    """Project a homogeneous issue collection and its internally consistent summary."""
+    projected = [
+        project_issue_state(
+            row,
+            series_status=series_status,
+            today=today,
+            annual=annual,
+            series_location=series_location,
+        )
+        for row in rows
+    ]
+    return projected, _issue_summary(projected)
 
 
 def _start_library_scan(scanner, status_attr, worker, start_lock, scan_label, scan_dir, thread_name):
@@ -133,12 +304,31 @@ def list_comics(ctx, limit=None, offset=None):
 def get_comic_detail(ctx, comic_id):
     """Get a single comic with its issues and annuals."""
     comic = series_queries.get_comic(comic_id)
-    issues = series_queries.get_issues(comic_id)
+    issue_rows = series_queries.get_issues(comic_id)
 
     annuals_on = getattr(ctx.config, "ANNUALS_ON", False) if ctx.config else False
-    annuals_list = series_queries.get_annuals(comic_id) if annuals_on else []
+    annual_rows = series_queries.get_annuals(comic_id) if annuals_on else []
+    series_status = comic[0].get("Status") if comic else None
+    series_location = comic[0].get("ComicLocation") if comic else None
+    projected_issues, _ = project_issue_collection(
+        issue_rows,
+        series_status=series_status,
+        series_location=series_location,
+    )
+    projected_annuals, _ = project_issue_collection(
+        annual_rows,
+        series_status=series_status,
+        annual=True,
+        series_location=series_location,
+    )
+    summary = _issue_summary(projected_issues + projected_annuals)
 
-    return {"comic": comic, "issues": issues, "annuals": annuals_list}
+    return {
+        "comic": comic,
+        "issues": projected_issues,
+        "annuals": projected_annuals,
+        "summary": summary,
+    }
 
 
 def add_comic(ctx, comic_id):
@@ -226,6 +416,26 @@ def resume_comic(ctx, comic_id):
     return {"success": True}
 
 
+def _refresh_queue_contains(comic_id):
+    refresh_queue = comicarr.REFRESH_QUEUE
+    mutex = getattr(refresh_queue, "mutex", None)
+    if mutex is not None:
+        with mutex:
+            pending = list(refresh_queue.queue)
+    else:
+        pending = list(getattr(refresh_queue, "queue", ()))
+
+    expected = str(comic_id)
+    for item in pending:
+        if isinstance(item, Mapping):
+            values = {str(key).lower(): value for key, value in item.items()}
+            if str(values.get("comicid")) == expected:
+                return True
+        elif str(item) == expected:
+            return True
+    return False
+
+
 def refresh_comic(ctx, comic_id):
     """Refresh comic metadata in the background."""
     from comicarr import importer
@@ -244,10 +454,16 @@ def refresh_comic(ctx, comic_id):
         chkdb = series_queries.get_comic_for_refresh(cid)
         if not chkdb:
             notfound.append({"comicid": cid})
-        elif cid in comicarr.REFRESH_QUEUE.queue:
+        elif _refresh_queue_contains(cid):
             already_added.append({"comicid": cid, "comicname": chkdb["ComicName"]})
         else:
-            watch.append({"comicid": cid, "comicname": chkdb["ComicName"]})
+            watch.append(
+                {
+                    "comicid": cid,
+                    "comicname": chkdb["ComicName"],
+                    "seriesyear": chkdb["ComicYear"],
+                }
+            )
 
     if notfound:
         return {"success": False, "error": "Unable to locate IDs for Refreshing: %s" % notfound}
@@ -271,19 +487,275 @@ def refresh_comic(ctx, comic_id):
 # ---------------------------------------------------------------------------
 
 
-def queue_issue(ctx, issue_id):
+def queue_issue(ctx, issue_id, audit_identity):
     """Mark an issue as Wanted and trigger search."""
-    from comicarr import search
+    from comicarr.app.search.commands import enqueue_search_command
 
-    series_queries.queue_issue(issue_id)
-    search.searchforissue(issue_id)
-    return {"success": True}
+    series_queries.queue_issue(issue_id, audit_identity)
+    command = enqueue_search_command({"issueid": issue_id}, trigger="issue_wanted")
+    return {"success": True, "run_id": command.run_id}
 
 
-def unqueue_issue(ctx, issue_id):
+def unqueue_issue(ctx, issue_id, audit_identity):
     """Mark an issue as Skipped."""
-    series_queries.unqueue_issue(issue_id)
+    series_queries.unqueue_issue(issue_id, audit_identity)
     return {"success": True}
+
+
+def _search_missing_preview_state(ctx, comic_id):
+    """Build the current public preview and private CAS selection once."""
+    detail = get_comic_detail(ctx, comic_id)
+    comic_rows = detail.get("comic") or []
+    comic = comic_rows[0] if isinstance(comic_rows, list) and comic_rows else comic_rows
+    if not comic:
+        return None, {"success": False, "error": "Series not found", "status_code": 404}
+
+    def _issue_id(row):
+        return row.get("id") or row.get("issueId") or row.get("IssueID")
+
+    def _issue_number(row):
+        return row.get("number") or row.get("issueNumber") or row.get("Issue_Number")
+
+    rows = list(detail.get("issues") or []) + list(detail.get("annuals") or [])
+    eligible = [row for row in rows if row.get("eligible") and not row.get("owned") and not row.get("inFlight")]
+    excluded = []
+    for row in rows:
+        if row in eligible:
+            continue
+        reason = row.get("eligibilityReason") or ("owned" if row.get("owned") else "excluded")
+        if row.get("owned"):
+            reason = "owned"
+        elif row.get("inFlight"):
+            reason = "in_flight"
+        elif row.get("acquisitionIntent") == AcquisitionIntent.SKIPPED.value:
+            reason = "explicit_skip"
+        elif row.get("acquisitionIntent") == AcquisitionIntent.IGNORED.value:
+            reason = "explicit_ignore"
+        elif row.get("future"):
+            reason = "future"
+        excluded.append(
+            {
+                "issueId": _issue_id(row),
+                "issueNumber": _issue_number(row),
+                "reason": reason,
+                "displayState": row.get("displayState"),
+            }
+        )
+
+    route = {"viable": True, "reason": None}
+    try:
+        from comicarr.app.search.health import get_search_health
+
+        health = get_search_health(
+            ctx.config,
+            provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
+        )
+        routes = health.get("routes") or {}
+        viable = bool(health.get("viable_route")) or any(
+            bool((routes.get(name) or {}).get("ready") or (routes.get(name) or {}).get("viable"))
+            for name in ("ddl", "nzb", "torrent")
+        )
+        if health.get("blocked") or not viable:
+            route = {
+                "viable": False,
+                "reason": health.get("reason") or "no_viable_acquisition_route",
+            }
+    except Exception as e:
+        logger.warn("[SERIES] Route readiness unavailable for bulk search preview: %s" % e)
+        route = {"viable": False, "reason": "route_health_unavailable"}
+
+    from comicarr.app.search.bulk import selection_from_detail
+
+    summary = detail.get("summary") or {}
+    return selection_from_detail(detail), {
+        "success": True,
+        "comicId": comic_id,
+        "eligibleCount": len(eligible),
+        "excludedCount": len(excluded),
+        "eligible": [
+            {
+                "issueId": _issue_id(row),
+                "issueNumber": _issue_number(row),
+                "entityType": "annual" if row.get("annual") else "issue",
+                "displayState": row.get("displayState"),
+                "eligibilityReason": row.get("eligibilityReason"),
+            }
+            for row in eligible
+        ],
+        "excluded": excluded,
+        "route": route,
+        "summary": summary,
+        "canSearch": bool(eligible) and bool(route.get("viable")),
+    }
+
+
+def preview_search_all_missing(ctx, comic_id, *, actor=None, session_id=None):
+    """Preview eligible work and, for browsers, mint a one-shot confirm token."""
+    selection, preview = _search_missing_preview_state(ctx, comic_id)
+    if not preview.get("success"):
+        return preview
+    if actor is not None or session_id is not None:
+        if not actor or not session_id:
+            return {
+                "success": False,
+                "error": "authenticated session is required for bulk search preview",
+                "status_code": 401,
+            }
+        if selection:
+            from comicarr.app.search.bulk import create_preview
+
+            preview.update(
+                create_preview(
+                    db.get_engine(),
+                    series_id=comic_id,
+                    actor=actor,
+                    session_id=session_id,
+                    selection=selection,
+                )
+            )
+    return preview
+
+
+def search_all_missing(
+    ctx,
+    comic_id,
+    audit_identity,
+    *,
+    confirm=False,
+    preview_token=None,
+    fingerprint=None,
+    session_id=None,
+):
+    """Create one durable, session-bound series search from a fresh preview."""
+    if not confirm:
+        return {"success": False, "error": "explicit confirmation is required", "status_code": 400}
+    if not preview_token or not fingerprint or not session_id:
+        return {
+            "success": False,
+            "error": "a current bulk search preview token is required",
+            "status_code": 400,
+        }
+
+    from comicarr.app.search.bulk import (
+        SearchMissingConfirmationError,
+        SearchMissingStalePreview,
+        confirm_preview,
+        read_preview,
+    )
+
+    try:
+        stored_preview = read_preview(
+            db.get_engine(),
+            actor=audit_identity,
+            session_id=session_id,
+            preview_token=preview_token,
+            supplied_fingerprint=fingerprint,
+        )
+        if stored_preview["series_id"] != str(comic_id):
+            raise SearchMissingConfirmationError("bulk search preview belongs to a different series")
+    except SearchMissingConfirmationError as e:
+        return {
+            "success": False,
+            "status": "invalid_preview",
+            "error": str(e),
+            "status_code": 409,
+        }
+
+    selection, preview = _search_missing_preview_state(ctx, comic_id)
+    if not preview.get("success"):
+        return preview
+
+    # A committed preview has already crossed the only mutation boundary.
+    # Let its owner retrieve the same run even if the current route becomes
+    # unavailable or the original selection is now Wanted/in-flight.
+    if stored_preview["state"] == "accepted":
+        try:
+            result = confirm_preview(
+                db.get_engine(),
+                series_id=comic_id,
+                actor=audit_identity,
+                session_id=session_id,
+                preview_token=preview_token,
+                supplied_fingerprint=fingerprint,
+                current_selection=selection,
+            )
+        except SearchMissingConfirmationError as e:
+            return {
+                "success": False,
+                "status": "invalid_preview",
+                "error": str(e),
+                "status_code": 409,
+            }
+        return {
+            "success": True,
+            "status": "accepted" if not result["dispatch_error"] else "pending_dispatch",
+            "accepted": result["accepted"],
+            "rejected": preview.get("excludedCount") or 0,
+            "run_id": result["run_id"],
+            "idempotent": True,
+            "message": (
+                "Queued %s missing issue(s) for search" % result["accepted"]
+                if not result["dispatch_error"]
+                else "Search is durable but waiting for queue handoff retry"
+            ),
+            "preview": preview,
+        }
+
+    if not preview.get("route", {}).get("viable"):
+        return {
+            "success": False,
+            "error": preview.get("route", {}).get("reason") or "no_viable_acquisition_route",
+            "status": "blocked",
+            "status_code": 409,
+            "preview": preview,
+        }
+    if not selection:
+        return {
+            "success": True,
+            "status": "noop",
+            "accepted": 0,
+            "rejected": preview.get("excludedCount") or 0,
+            "run_id": None,
+            "message": "No eligible missing issues to search",
+            "preview": preview,
+        }
+
+    try:
+        result = confirm_preview(
+            db.get_engine(),
+            series_id=comic_id,
+            actor=audit_identity,
+            session_id=session_id,
+            preview_token=preview_token,
+            supplied_fingerprint=fingerprint,
+            current_selection=selection,
+        )
+    except SearchMissingStalePreview as e:
+        return {
+            "success": False,
+            "status": "stale_preview",
+            "error": str(e),
+            "status_code": 409,
+            "preview": preview,
+        }
+    except SearchMissingConfirmationError as e:
+        return {
+            "success": False,
+            "status": "invalid_preview",
+            "error": str(e),
+            "status_code": 409,
+        }
+
+    return {
+        "success": True,
+        "status": "accepted" if not result["dispatch_error"] else "pending_dispatch",
+        "accepted": result["accepted"],
+        "rejected": preview.get("excludedCount") or 0,
+        "run_id": result["run_id"],
+        "idempotent": result["idempotent"],
+        "message": "Queued %s missing issue(s) for search" % result["accepted"],
+        "preview": preview,
+    }
 
 
 def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False):

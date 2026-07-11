@@ -32,12 +32,14 @@ Covers the U4 contract:
 import queue as queuelib
 import threading
 import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import select
 
 import comicarr
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import journal, service
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.postprocessor import PostProcessor
@@ -56,7 +58,7 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(
         comicarr,
         "CONFIG",
-        types.SimpleNamespace(HIGHCOUNT=0, POST_PROCESSING=True),
+        types.SimpleNamespace(HIGHCOUNT=0, POST_PROCESSING=True, MANUAL_PP_FOLDER=str(tmp_path)),
         raising=False,
     )
     monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
@@ -66,6 +68,8 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(comicarr, "APILOCK", fake_lock, raising=False)
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
+    (tmp_path / "dl").mkdir()
     yield
     shutdown_engine()
 
@@ -100,7 +104,7 @@ def _pp_item(issueid="I1", comicid="C1", nzb_name="Saga.001.cbz", **extra):
     see _stamped_pp_item / the producer/consumer contract tests below."""
     item = {
         "nzb_name": nzb_name,
-        "nzb_folder": "/tmp/dl",
+        "nzb_folder": str(Path(comicarr.DATA_DIR) / "dl"),
         "failed": False,
         "issueid": issueid,
         "comicid": comicid,
@@ -166,27 +170,26 @@ def test_claim_is_cas_not_read_then_process():
     results = []
     barrier = threading.Barrier(2)
 
+    def _fake_factory(*a, **k):
+        inst = MagicMock()
+        inst.post_process.return_value = None
+        results.append(k.get("journal_release_key"))
+        return inst
+
     def worker():
         q = queuelib.Queue()
         q.put(_pp_item(issueid="Iccas"))
         q.put("exit")
-
-        def _fake_factory(*a, **k):
-            inst = MagicMock()
-            inst.post_process.return_value = None
-            results.append(k.get("journal_release_key"))
-            return inst
-
         barrier.wait()
-        with patch.object(service.process, "Process", side_effect=_fake_factory):
-            service.postprocess_main(q)
+        service.postprocess_main(q)
 
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    with patch.object(service.process, "Process", side_effect=_fake_factory):
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
 
     # Exactly one thread reached process.Process — the CAS winner.
     assert len(results) == 1
@@ -253,7 +256,7 @@ def test_release_key_identical_on_8arg_and_2arg_paths():
     eight_arg = _pp_item(issueid="Isame", download_info={"provider": "DDL", "id": "x"}, ddl=True)
     two_arg_shape = {
         "nzb_name": "Saga.001.cbz",
-        "nzb_folder": "/tmp/dl",
+        "nzb_folder": str(Path(comicarr.DATA_DIR) / "dl"),
         "failed": False,
         "issueid": "Isame",
         "comicid": "C1",

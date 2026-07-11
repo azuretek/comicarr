@@ -39,7 +39,8 @@ import comicarr
 from comicarr import db, logger
 from comicarr.app.downloads import journal, recovery_classify
 from comicarr.app.downloads.ddl_commands import DDLCommand, DDLCommandError
-from comicarr.tables import nzblog, snatched, storyarcs
+from comicarr.app.downloads.pp_commands import PostProcessCommandError, validate_postprocess_item
+from comicarr.tables import ddl_info, nzblog, pipeline_journal, snatched, storyarcs
 
 # Small inter-enqueue pause so the replay burst does not contend the SQLite
 # single-writer against the concurrent PP workers and exhaust the journal's
@@ -56,6 +57,55 @@ _ENQUEUE_THROTTLE_SECONDS = 0.05
 # this is safe and only defers, never drops). `moved`/done/still/gone paths
 # are cheap and NOT capped.
 _MAX_INLINE_PP_REDRIVE_PER_PASS = 5
+
+
+def _reconcile_legacy_ddl_downloading():
+    """Quarantine legacy Downloading rows that have no exact journal anchor."""
+    rows = db.select_all(select(ddl_info).where(ddl_info.c.status == "Downloading")) or []
+    reviewed = 0
+    for ddl_row in rows:
+        ddl_id = ddl_row.get("ID")
+        candidates = db.select_all(
+            select(pipeline_journal).where(
+                pipeline_journal.c.issueid == str(ddl_row.get("issueid")),
+                pipeline_journal.c.downloader_type == "ddl",
+            )
+        )
+        anchored = False
+        for candidate in candidates or []:
+            payload = journal.load_payload(candidate.get("payload_json")) or {}
+            di = payload.get("download_info") or {}
+            if str(payload.get("ddl_id") or payload.get("id") or di.get("id") or "") == str(ddl_id):
+                anchored = True
+                break
+        if anchored:
+            continue
+
+        rkey = journal.release_key(
+            ddl_row.get("issueid"),
+            "DDL",
+            nzbname=ddl_row.get("filename"),
+            discriminant=ddl_id,
+        )
+        journal.mark_manual_review(
+            rkey,
+            "legacy_downloading_without_correlation",
+            payload={
+                "issueid": ddl_row.get("issueid"),
+                "comicid": ddl_row.get("comicid"),
+                "provider": "DDL",
+                "ddl_id": ddl_id,
+                "filename": ddl_row.get("filename"),
+                "ddl": True,
+            },
+            issueid=ddl_row.get("issueid"),
+            provider="DDL",
+            downloader_type="ddl",
+            nzbname=ddl_row.get("filename"),
+        )
+        db.upsert("ddl_info", {"status": "Manual Review"}, {"ID": ddl_id})
+        reviewed += 1
+    return reviewed
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +413,12 @@ def _resume_item_from_row(row, payload):
         or str(di.get("provider") or "").upper() == "DDL"
     )
     if is_ddl:
-        ddl_id = payload.get("id") or di.get("id") or row.get("ddl_id")
+        ddl_id = payload.get("ddl_id") or payload.get("id") or di.get("id") or row.get("ddl_id")
         try:
-            return "ddl", DDLCommand.from_mapping(payload).to_queue_item()
+            command = DDLCommand.from_mapping(payload).to_queue_item()
+            if row.get("release_key"):
+                command["journal_release_key"] = row.get("release_key")
+            return "ddl", command
         except DDLCommandError:
             # Prefer the durable ddl_info row when the journal payload predates
             # the canonical command contract (or is incomplete).
@@ -376,7 +429,10 @@ def _resume_item_from_row(row, payload):
 
                 durable = dl_queries.get_ddl_item(ddl_id)
                 if durable:
-                    return "ddl", DDLCommand.from_mapping(durable).to_queue_item()
+                    command = DDLCommand.from_mapping(durable).to_queue_item()
+                    if row.get("release_key"):
+                        command["journal_release_key"] = row.get("release_key")
+                    return "ddl", command
             except DDLCommandError:
                 pass
             except Exception as e:
@@ -394,6 +450,7 @@ def _resume_item_from_row(row, payload):
             "site": payload.get("site"),
             "link": payload.get("link"),
             "ddl": True,
+            "journal_release_key": row.get("release_key"),
         }
 
     if downloader == "torrent" or row.get("hash"):
@@ -403,13 +460,36 @@ def _resume_item_from_row(row, payload):
             "hash": payload.get("hash") or row.get("hash"),
             "provider": payload.get("provider") or row.get("provider"),
             "nzbname": payload.get("nzbname") or row.get("nzbname"),
+            "journal_release_key": row.get("release_key"),
+            "clientmode": downloader,
         }
-    # SAB / NZBGet: re-feed the identity so cdh/nzb_monitor can historycheck.
-    item = dict(payload)
-    item.setdefault("issueid", row.get("issueid"))
-    item.setdefault("comicid", payload.get("comicid"))
-    item.setdefault("apicall", True)
-    item.setdefault("download_info", payload.get("download_info") or {"provider": row.get("provider")})
+    # SAB / NZBGet: rebuild the sender monitor shape with CURRENT protected
+    # credentials in memory. No queue/auth material is persisted in payload.
+    route = str(payload.get("route") or downloader or "").lower()
+    item = {
+        "issueid": payload.get("issueid") or row.get("issueid"),
+        "comicid": payload.get("comicid"),
+        "apicall": True,
+        "download_info": payload.get("download_info") or {"provider": row.get("provider")},
+        "journal_release_key": row.get("release_key"),
+        "clientmode": route,
+    }
+    if route in {"sab", "sabnzbd"}:
+        nzo_id = payload.get("nzo_id") or di.get("nzo_id")
+        item.update(
+            {
+                "nzo_id": nzo_id,
+                "clientmode": "sabnzbd",
+                "queue": {
+                    "mode": "queue",
+                    "search": nzo_id,
+                    "output": "json",
+                    "apikey": comicarr.CONFIG.SAB_APIKEY,
+                },
+            }
+        )
+    elif route == "nzbget":
+        item["NZBID"] = payload.get("NZBID") or di.get("NZBID")
     return "nzb", item
 
 
@@ -522,36 +602,73 @@ def finalize_post_processing(row, payload=None):
 
     if stage == journal.POST_PROCESSING:
         item = _pp_item_from_row(row, payload or {})
+        from comicarr.app.downloads.service import _configured_postprocess_roots
+
+        try:
+            item = validate_postprocess_item(
+                item,
+                roots=_configured_postprocess_roots(),
+            )
+        except PostProcessCommandError as e:
+            journal.mark_manual_review(
+                rkey,
+                "invalid_recovered_postprocess_command:%s" % type(e).__name__,
+                payload=payload,
+                issueid=row.get("issueid"),
+                provider=row.get("provider"),
+            )
+            logger.error("[RECOVERY] %s PP command is unsafe; quarantined: %s" % (rkey, e))
+            return "post_processing-manual-review"
         logger.info(
             "[RECOVERY] %s was `post_processing` (no `moved` — move did NOT "
             "commit, source intact) — re-driving PP in full." % rkey
         )
         from comicarr import process
+        from comicarr.app.acquisition.maintenance import MaintenanceController
 
+        controller = MaintenanceController()
         try:
-            pprocess = process.Process(
-                item["nzb_name"],
-                item["nzb_folder"],
-                item["failed"],
-                item["issueid"],
-                item["comicid"],
-                item["apicall"],
-                item["ddl"],
-                item["download_info"],
-                journal_release_key=rkey,
-            )
+            with controller.lease(
+                "startup-recovery",
+                "postprocess-redrive",
+                entity_type="release",
+                entity_id=rkey,
+            ) as lease:
+                controller.assert_lease_current(lease)
+                try:
+                    pprocess = process.Process(
+                        item["nzb_name"],
+                        item["nzb_folder"],
+                        item["failed"],
+                        item["issueid"],
+                        item["comicid"],
+                        item["apicall"],
+                        item["ddl"],
+                        item["download_info"],
+                        journal_release_key=rkey,
+                    )
+                except (KeyError, TypeError) as e:
+                    logger.fdebug("[RECOVERY] extended process.Process construction failed, using fallback: %s" % e)
+                    pprocess = process.Process(
+                        item["nzb_name"],
+                        item["nzb_folder"],
+                        item["failed"],
+                        item["issueid"],
+                        item["comicid"],
+                        item["apicall"],
+                        journal_release_key=rkey,
+                    )
+                pprocess.post_process()
         except Exception as e:
-            logger.fdebug("[RECOVERY] 8-arg process.Process construction failed, using fallback: %s" % e)
-            pprocess = process.Process(
-                item["nzb_name"],
-                item["nzb_folder"],
-                item["failed"],
-                item["issueid"],
-                item["comicid"],
-                item["apicall"],
-                journal_release_key=rkey,
+            journal.mark_manual_review(
+                rkey,
+                "recovered_postprocess_error:%s" % type(e).__name__,
+                payload=payload,
+                issueid=row.get("issueid"),
+                provider=row.get("provider"),
             )
-        pprocess.post_process()
+            logger.error("[RECOVERY] %s PP redrive failed and was quarantined: %s" % (rkey, type(e).__name__))
+            return "post_processing-manual-review"
         return "post_processing-redrive"
 
     # Caller only routes `moved`/`post_processing` here; anything else is a
@@ -602,6 +719,22 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
     # it 3-6x. None ⇒ no payload (callees treat as {}).
     payload = journal.load_payload(row.get("payload_json"))
 
+    # A reservation proves only that an external handoff was about to happen;
+    # it carries no accepted client correlation id. Restart cannot distinguish
+    # "sender never ran" from "sender accepted but persistence failed", so
+    # automatic resubmission would duplicate work. Quarantine for an explicit
+    # operator decision before any done-signal or downloader probe.
+    if cur_stage == journal.RESERVED:
+        journal.mark_manual_review(
+            rkey,
+            "reserved_without_persisted_acceptance",
+            payload=payload,
+            issueid=row.get("issueid"),
+            provider=row.get("provider"),
+            downloader_type=row.get("downloader_type"),
+        )
+        return "reserved-manual-review"
+
     # --- two-marker finalizer (moved / post_processing) -------------------
     # moved -> cheap DB-facts only (NOT capped). post_processing -> a FULL
     # inline process.Process; capped per pass so a large backlog cannot delay
@@ -619,6 +752,29 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
         if pp_cap is not None:
             pp_cap["count"] = pp_cap.get("count", 0) + 1
         return finalize_post_processing(row, payload=payload)
+
+    # Once a validated artifact command is durable, the downloader's state is
+    # irrelevant and may have been pruned. Hand directly to PP without a
+    # second probe or a second external download.
+    if cur_stage == journal.DOWNLOADED:
+        item = _pp_item_from_row(row, payload)
+        from comicarr.app.downloads.service import _configured_postprocess_roots
+
+        try:
+            item = validate_postprocess_item(item, roots=_configured_postprocess_roots())
+        except PostProcessCommandError as e:
+            journal.mark_manual_review(
+                rkey,
+                "downloaded_invalid_artifact_command:%s" % type(e).__name__,
+                payload=payload,
+                issueid=row.get("issueid"),
+                provider=row.get("provider"),
+            )
+            logger.error("[RECOVERY] %s downloaded artifact command is unsafe; quarantined: %s" % (rkey, e))
+            return "downloaded-manual-review"
+        comicarr.PP_QUEUE.put(item)
+        logger.info("[RECOVERY] %s has a durable downloaded artifact; enqueued directly for PP." % rkey)
+        return "downloaded-pp-enqueued"
 
     # --- authoritative done-check (history-eviction safe) -----------------
     if recovery_classify.has_done_signal(row):
@@ -687,21 +843,26 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
                 "SNATCHED_QUEUE so the live torrent monitor resumes." % rkey
             )
         elif kind == "ddl":
-            # P2-5(a): DDL `still` resumes on DDL_QUEUE (the ddl_downloader
-            # worker), NOT NZB_QUEUE — cdh/nzb_monitor cannot historycheck a
-            # DDL item and the item would otherwise strand with no owner.
-            from comicarr.app.downloads.service import _enqueue_ddl_queue_item
+            # A direct DDL sender has no durable client identity or monitor
+            # protocol. After a crash, a live link proves only that the old
+            # side effect may still exist; re-sending would duplicate it.
+            journal.mark_manual_review(
+                rkey,
+                "ambiguous_ddl_acceptance_after_restart",
+                payload=payload,
+                issueid=row.get("issueid"),
+                provider=row.get("provider"),
+                downloader_type="ddl",
+            )
+            ddl_id = item.get("id")
+            if ddl_id:
+                from comicarr.app.downloads import queries as dl_queries
 
-            if _enqueue_ddl_queue_item(comicarr.DDL_QUEUE, item):
-                logger.info(
-                    "[RECOVERY] %s -> STILL (downloading) — re-enqueued onto "
-                    "DDL_QUEUE so the ddl_downloader worker resumes." % rkey
-                )
-            else:
-                logger.fdebug(
-                    "[RECOVERY] %s -> STILL (downloading) — DDL id already owned "
-                    "by this process queue/worker; skip duplicate put." % rkey
-                )
+                dl_queries.update_ddl_status(ddl_id, "Manual Review")
+            logger.warn(
+                "[RECOVERY] %s -> MANUAL REVIEW (ambiguous DDL acceptance after restart); "
+                "no duplicate sender call." % rkey
+            )
         else:
             comicarr.NZB_QUEUE.put(item)
             logger.info(
@@ -730,9 +891,19 @@ def replay_pipeline(probes=None):
 
     Returns a small summary dict (counts) for logging/tests.
     """
+    summary = {"reconstructed": 0, "legacy_ddl_review": 0, "open": 0, "actions": {}}
+
+    if getattr(comicarr, "ACQUISITION_WORKERS_BLOCKED", False):
+        summary["actions"]["blocked"] = 1
+        logger.warn("[RECOVERY] Startup recovery replay skipped because acquisition workers are fenced.")
+        return summary
+
     logger.info("[RECOVERY] Startup recovery replay starting (post-start, lock-free).")
 
-    summary = {"reconstructed": 0, "open": 0, "actions": {}}
+    try:
+        summary["legacy_ddl_review"] = _reconcile_legacy_ddl_downloading()
+    except Exception as e:
+        logger.error("[RECOVERY] legacy DDL reconciliation failed; continuing: %s" % type(e).__name__)
 
     # 1. Anchor reconstruction FIRST (U2 residual window).
     try:
@@ -776,7 +947,12 @@ def replay_pipeline(probes=None):
         # Throttle the enqueue burst so replay does not contend the SQLite
         # single-writer against concurrent PP workers and exhaust the
         # journal's 5-retry cap (modelled on job_management/ddl_health_check).
-        if action in ("complete-pp-enqueued", "still-reenqueued", "post_processing-redrive"):
+        if action in (
+            "complete-pp-enqueued",
+            "downloaded-pp-enqueued",
+            "still-reenqueued",
+            "post_processing-redrive",
+        ):
             time.sleep(_ENQUEUE_THROTTLE_SECONDS)
 
     logger.info("[RECOVERY] Startup recovery replay complete: %s" % summary)

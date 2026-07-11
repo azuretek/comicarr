@@ -262,9 +262,9 @@ def get_logs(ctx: AppContext = Depends(get_context)):
 
 
 @router.get("/system/jobs", dependencies=[Depends(require_session)])
-def get_jobs(ctx: AppContext = Depends(get_context)):
+def get_jobs(include_acquisition: bool = True, ctx: AppContext = Depends(get_context)):
     """Return scheduled job information."""
-    return system_service.get_job_info(ctx)
+    return system_service.get_job_info(ctx, include_acquisition=include_acquisition)
 
 
 # ---------------------------------------------------------------------------
@@ -273,9 +273,9 @@ def get_jobs(ctx: AppContext = Depends(get_context)):
 
 
 @router.get("/system/diagnostics", dependencies=[Depends(require_session)])
-def get_startup_diagnostics(ctx: AppContext = Depends(get_context)):
+def get_startup_diagnostics(include_acquisition: bool = True, ctx: AppContext = Depends(get_context)):
     """Return startup diagnostics (db empty, migration dismissed)."""
-    return system_service.get_startup_diagnostics(ctx)
+    return system_service.get_startup_diagnostics(ctx, include_acquisition=include_acquisition)
 
 
 @router.post("/system/migration/preview", dependencies=[Depends(require_session)])
@@ -296,7 +296,7 @@ async def start_migration(request: Request, ctx: AppContext = Depends(get_contex
     path = body.get("path", "")
     result = await asyncio.to_thread(system_service.start_migration, ctx, path)
     if result.get("success") is False:
-        return JSONResponse(status_code=400, content=result)
+        return JSONResponse(status_code=int(result.get("status_code") or 400), content=result)
     return result
 
 
@@ -304,3 +304,235 @@ async def start_migration(request: Request, ctx: AppContext = Depends(get_contex
 def get_migration_progress(ctx: AppContext = Depends(get_context)):
     """Return current migration progress."""
     return system_service.get_migration_progress(ctx)
+
+
+@router.post("/system/acquisition/reconciliation/ready", dependencies=[Depends(require_session)])
+async def mark_reconciliation_ready(
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Explicitly resume acquisition after the operator records reconciliation."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        body = {}
+    result = await asyncio.to_thread(
+        system_service.mark_reconciliation_ready,
+        ctx,
+        actor=username,
+        reason=body.get("reason"),
+    )
+    return _repair_response(result)
+
+
+@router.post("/system/acquisition/maintenance/abort", dependencies=[Depends(require_session)])
+async def abort_acquisition_maintenance(
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Audit and release a drained fence that an operator has abandoned."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        body = {}
+    result = await asyncio.to_thread(
+        system_service.abort_acquisition_maintenance,
+        ctx,
+        actor=username,
+        reason=body.get("reason"),
+    )
+    return _repair_response(result)
+
+
+# ---------------------------------------------------------------------------
+# Acquisition repair — owner session only (never API-key)
+# ---------------------------------------------------------------------------
+
+
+def _session_identity(request: Request, username: str):
+    """Bind repair tokens to the current browser session cookie."""
+    return request.cookies.get(COOKIE_NAME) or username
+
+
+def _repair_response(result):
+    if result.get("success") is False:
+        return JSONResponse(status_code=int(result.get("status_code") or 400), content=result)
+    return result
+
+
+@router.post("/system/acquisition/repair/preview", dependencies=[Depends(require_session)])
+async def preview_acquisition_repair(
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Create a read-only series repair preview and one-shot confirmation token."""
+    body = await request.json()
+    series_id = body.get("series_id") or body.get("comic_id")
+    if not series_id:
+        return JSONResponse(status_code=400, content={"success": False, "error": "series_id is required"})
+    result = await asyncio.to_thread(
+        system_service.preview_acquisition_repair,
+        ctx,
+        series_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+    )
+    return _repair_response(result)
+
+
+@router.post("/system/acquisition/repair/{run_id}/confirm", dependencies=[Depends(require_session)])
+async def confirm_acquisition_repair(
+    run_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Freeze the immutable repair manifest with the one-shot preview token."""
+    body = await request.json()
+    result = await asyncio.to_thread(
+        system_service.confirm_acquisition_repair,
+        ctx,
+        run_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+        preview_token=body.get("preview_token") or body.get("token"),
+        fingerprint=body.get("fingerprint"),
+        selected_optional_keys=body.get("selected_optional_keys") or body.get("selectedOptionalKeys") or (),
+        canary_entity_key=body.get("canary_entity_key") or body.get("canaryEntityKey"),
+    )
+    return _repair_response(result)
+
+
+@router.post("/system/acquisition/repair/{run_id}/apply", dependencies=[Depends(require_session)])
+async def apply_acquisition_repair(
+    run_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Apply a confirmed repair manifest under the maintenance fence."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(body, dict):
+        body = {}
+    result = await asyncio.to_thread(
+        system_service.apply_acquisition_repair,
+        ctx,
+        run_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+        max_items=body.get("max_items"),
+        canary_only=bool(body.get("canary_only") or body.get("canaryOnly")),
+    )
+    return _repair_response(result)
+
+
+@router.get("/system/acquisition/repair/{run_id}", dependencies=[Depends(require_session)])
+def get_acquisition_repair_run(
+    run_id: str,
+    request: Request,
+    include_items: bool = True,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Poll a repair run owned by the current session."""
+    result = system_service.get_acquisition_repair_run(
+        ctx,
+        run_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+        include_items=include_items,
+    )
+    return _repair_response(result)
+
+
+@router.post("/system/acquisition/repair/{run_id}/rollback", dependencies=[Depends(require_session)])
+async def rollback_acquisition_repair(
+    run_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Conditionally roll back applied repair values that have not drifted."""
+    body = await request.json()
+    reason = body.get("reason")
+    if not reason:
+        return JSONResponse(status_code=400, content={"success": False, "error": "reason is required"})
+    result = await asyncio.to_thread(
+        system_service.rollback_acquisition_repair,
+        ctx,
+        run_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+        reason=reason,
+    )
+    return _repair_response(result)
+
+
+@router.post("/system/acquisition/repair/{run_id}/canary", dependencies=[Depends(require_session)])
+async def authorize_acquisition_canary(
+    run_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Authorize exactly one named downloader handoff while fenced."""
+    body = await request.json()
+    release_key = body.get("release_key") or body.get("releaseKey")
+    route = body.get("route")
+    if not release_key or not route:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "release_key and route are required"},
+        )
+    result = await asyncio.to_thread(
+        system_service.authorize_acquisition_canary,
+        ctx,
+        run_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+        release_key=release_key,
+        route=route,
+    )
+    return _repair_response(result)
+
+
+@router.get("/system/acquisition/canary/{permit_id}", dependencies=[Depends(require_session)])
+def get_acquisition_canary(
+    permit_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Poll the single permitted external handoff."""
+    return _repair_response(
+        system_service.get_acquisition_canary(
+            ctx,
+            permit_id,
+            actor=username,
+            session_id=_session_identity(request, username),
+        )
+    )
+
+
+@router.post("/system/acquisition/canary/{permit_id}/release", dependencies=[Depends(require_session)])
+async def release_acquisition_canary(
+    permit_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Release maintenance after the canary has been inspected."""
+    body = await request.json()
+    reason = body.get("reason")
+    if not reason:
+        return JSONResponse(status_code=400, content={"success": False, "error": "reason is required"})
+    result = await asyncio.to_thread(
+        system_service.release_acquisition_canary,
+        ctx,
+        permit_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+        reason=reason,
+    )
+    return _repair_response(result)

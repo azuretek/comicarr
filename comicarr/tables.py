@@ -120,6 +120,9 @@ issues = Table(
     Column("Issue_Number", Text),
     Column("DateAdded", Text),
     Column("Status", Text),
+    # Nullable by design. A NULL value means no auditable explicit intent is
+    # known; compatibility reads derive policy intent without mutating rows.
+    Column("AcquisitionIntent", String(16)),
     Column("Type", Text),
     Column("ComicID", Text),
     Column("ArtworkURL", Text),
@@ -151,6 +154,7 @@ annuals = Table(
     Column("IssueName", Text),
     Column("IssueDate", Text),
     Column("Status", Text),
+    Column("AcquisitionIntent", String(16)),
     Column("ComicID", Text),
     Column("GCDComicID", Text),
     Column("Location", Text),
@@ -690,6 +694,304 @@ pipeline_journal = Table(
 )
 
 # ---------------------------------------------------------------------------
+# acquisition schema + durable command ledgers
+# ---------------------------------------------------------------------------
+
+acquisition_schema_versions = Table(
+    "acquisition_schema_versions",
+    metadata,
+    Column("component", String(64), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("applied_at", String(40), nullable=False),
+    UniqueConstraint("component", "version", name="uq_acquisition_schema_component_version"),
+)
+
+acquisition_runs = Table(
+    "acquisition_runs",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("command_kind", String(32), nullable=False),
+    Column("trigger", String(64), nullable=False),
+    Column("scope_type", String(32)),
+    Column("scope_id", String(255)),
+    Column("dispatch_state", String(32), nullable=False),
+    Column("completion_state", String(32), nullable=False),
+    Column("accepted_count", Integer, nullable=False, server_default="0"),
+    Column("terminal_count", Integer, nullable=False, server_default="0"),
+    Column("succeeded_count", Integer, nullable=False, server_default="0"),
+    Column("no_match_count", Integer, nullable=False, server_default="0"),
+    Column("blocked_count", Integer, nullable=False, server_default="0"),
+    Column("failed_count", Integer, nullable=False, server_default="0"),
+    Column("created_at", String(40), nullable=False),
+    Column("updated_at", String(40), nullable=False),
+    Column("completed_at", String(40)),
+)
+
+acquisition_run_items = Table(
+    "acquisition_run_items",
+    metadata,
+    Column("item_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String(64), nullable=False),
+    Column("command_kind", String(32), nullable=False),
+    Column("entity_type", String(32), nullable=False),
+    Column("entity_id", String(255), nullable=False),
+    Column("state", String(32), nullable=False),
+    # Queue handoff state is independent of the worker lifecycle. A durable
+    # item can be accepted but not yet handed to the in-memory worker queue.
+    Column("dispatch_state", String(32), nullable=False, server_default="pending"),
+    # Validated, bounded JSON containing only the command-kind allowlist. It
+    # must never contain provider credentials or downloader secrets.
+    Column("payload_json", Text),
+    Column("attempt_count", Integer, nullable=False, server_default="0"),
+    Column("next_attempt_at", String(40)),
+    Column("reason", Text),
+    Column("created_at", String(40), nullable=False),
+    Column("updated_at", String(40), nullable=False),
+    Column("completed_at", String(40)),
+    UniqueConstraint(
+        "run_id",
+        "command_kind",
+        "entity_type",
+        "entity_id",
+        name="uq_acquisition_run_item_identity",
+    ),
+)
+
+# A Search all missing preview is an authenticated, short-lived intent to
+# create exactly one durable series-scoped search run.  It intentionally keeps
+# only a bounded canonical issue selection and token digest; request cookies,
+# provider configuration, and any downloader payload remain outside this
+# operational ledger.
+acquisition_search_previews = Table(
+    "acquisition_search_previews",
+    metadata,
+    Column("preview_id", String(64), primary_key=True),
+    Column("series_id", String(255), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("token_digest", String(64), nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("eligible_json", Text, nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("run_id", String(64)),
+    Column("created_at", String(40), nullable=False),
+    Column("expires_at", String(40), nullable=False),
+    Column("confirmed_at", String(40)),
+    Column("updated_at", String(40), nullable=False),
+    UniqueConstraint("token_digest", name="uq_acquisition_search_preview_token"),
+)
+
+# Migration completion is not enough to resume acquisition. This one-row
+# durable control records the operator-visible reconciliation gate across
+# container restarts.
+acquisition_reconciliation = Table(
+    "acquisition_reconciliation",
+    metadata,
+    Column("control_id", String(64), primary_key=True),
+    Column("state", String(32), nullable=False),
+    Column("reason", String(255)),
+    Column("updated_at", String(40), nullable=False),
+)
+
+# A repair canary is distinct from a repair-item canary: it authorizes exactly
+# one named external handoff while global maintenance remains active.
+acquisition_canary_permits = Table(
+    "acquisition_canary_permits",
+    metadata,
+    Column("permit_id", String(64), primary_key=True),
+    Column("repair_run_id", String(64), nullable=False),
+    Column("release_key", String(512), nullable=False),
+    Column("route", String(32), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    Column("expires_at", String(40), nullable=False),
+    Column("lease_id", String(64)),
+    Column("claimed_at", String(40)),
+    Column("completed_at", String(40)),
+    Column("outcome", String(64)),
+    UniqueConstraint("repair_run_id", "release_key", name="uq_acq_canary_repair_release"),
+)
+
+acquisition_maintenance = Table(
+    "acquisition_maintenance",
+    metadata,
+    Column("control_id", String(64), primary_key=True),
+    Column("epoch", Integer, nullable=False, server_default="0"),
+    Column("active", Integer, nullable=False, server_default="0"),
+    Column("owner", String(255)),
+    Column("run_id", String(64)),
+    Column("reason", Text),
+    Column("acquired_at", String(40)),
+    Column("heartbeat_at", String(40)),
+    Column("released_at", String(40)),
+)
+
+acquisition_maintenance_leases = Table(
+    "acquisition_maintenance_leases",
+    metadata,
+    Column("lease_id", String(64), primary_key=True),
+    Column("epoch", Integer, nullable=False),
+    Column("owner", String(255), nullable=False),
+    Column("work_kind", String(64), nullable=False),
+    Column("entity_type", String(32)),
+    Column("entity_id", String(255)),
+    Column("acquired_at", String(40), nullable=False),
+    Column("heartbeat_at", String(40), nullable=False),
+    Column("released_at", String(40)),
+)
+
+acquisition_maintenance_events = Table(
+    "acquisition_maintenance_events",
+    metadata,
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column("epoch", Integer, nullable=False),
+    Column("action", String(32), nullable=False),
+    Column("actor", String(255), nullable=False),
+    Column("run_id", String(64)),
+    Column("reason", Text, nullable=False),
+    Column("created_at", String(40), nullable=False),
+)
+
+# ---------------------------------------------------------------------------
+# acquisition repair manifests
+# ---------------------------------------------------------------------------
+# Repair is deliberately modelled separately from acquisition command runs.
+# A preview creates one durable run plus a complete ordered set of items;
+# confirmation freezes that set into a manifest.  JSON columns are never
+# indexed and contain bounded, canonical projections written by the repair
+# service.  Every identifier participating in a key/index uses a bounded
+# String so the schema remains portable to MySQL as well as SQLite/PostgreSQL.
+
+acquisition_repair_runs = Table(
+    "acquisition_repair_runs",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("scope_type", String(32), nullable=False),
+    Column("scope_id", String(255), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("preview_token_digest", String(64), nullable=False),
+    Column("token_expires_at", String(40), nullable=False),
+    Column("token_consumed_at", String(40)),
+    Column("preview_fingerprint", String(64), nullable=False),
+    Column("manifest_id", String(64)),
+    Column("maintenance_epoch", Integer),
+    Column("item_count", Integer, nullable=False, server_default="0"),
+    Column("selected_count", Integer, nullable=False, server_default="0"),
+    Column("applied_count", Integer, nullable=False, server_default="0"),
+    Column("conflict_count", Integer, nullable=False, server_default="0"),
+    Column("rollback_count", Integer, nullable=False, server_default="0"),
+    Column("rollback_conflict_count", Integer, nullable=False, server_default="0"),
+    Column("last_sequence", Integer, nullable=False, server_default="0"),
+    Column("created_at", String(40), nullable=False),
+    Column("confirmed_at", String(40)),
+    Column("started_at", String(40)),
+    Column("updated_at", String(40), nullable=False),
+    Column("completed_at", String(40)),
+)
+
+acquisition_repair_manifests = Table(
+    "acquisition_repair_manifests",
+    metadata,
+    Column("manifest_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False),
+    Column("preview_fingerprint", String(64), nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("item_count", Integer, nullable=False),
+    Column("selected_count", Integer, nullable=False),
+    Column("frozen_by", String(255), nullable=False),
+    Column("frozen_at", String(40), nullable=False),
+    UniqueConstraint("run_id", name="uq_acq_repair_manifest_run"),
+)
+
+acquisition_repair_items = Table(
+    "acquisition_repair_items",
+    metadata,
+    Column("item_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String(64), nullable=False),
+    Column("sequence", Integer, nullable=False),
+    Column("entity_type", String(32), nullable=False),
+    Column("entity_id", String(255), nullable=False),
+    Column("series_id", String(255), nullable=False),
+    Column("intent", String(16), nullable=False),
+    Column("fulfillment", String(32), nullable=False),
+    Column("reason", String(64), nullable=False),
+    Column("date_source", String(32)),
+    Column("selected_date", String(10)),
+    Column("evidence_json", Text, nullable=False),
+    Column("before_json", Text, nullable=False),
+    Column("proposed_json", Text, nullable=False),
+    Column("optional", Integer, nullable=False, server_default="0"),
+    Column("selected", Integer, nullable=False, server_default="0"),
+    Column("apply_state", String(32), nullable=False),
+    Column("apply_reason", String(255)),
+    Column("applied_json", Text),
+    Column("rollback_state", String(32), nullable=False),
+    Column("rollback_reason", String(255)),
+    Column("created_at", String(40), nullable=False),
+    Column("updated_at", String(40), nullable=False),
+    Column("applied_at", String(40)),
+    Column("rolled_back_at", String(40)),
+    UniqueConstraint("run_id", "sequence", name="uq_acq_repair_item_sequence"),
+    UniqueConstraint(
+        "run_id",
+        "entity_type",
+        "entity_id",
+        name="uq_acq_repair_item_entity",
+    ),
+)
+
+acquisition_repair_series = Table(
+    "acquisition_repair_series",
+    metadata,
+    Column("series_item_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String(64), nullable=False),
+    Column("series_id", String(255), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("dirty", Integer, nullable=False, server_default="0"),
+    Column("aggregate_selected", Integer, nullable=False, server_default="0"),
+    Column("before_have", Integer),
+    Column("before_total", Integer),
+    Column("final_have", Integer),
+    Column("final_total", Integer),
+    Column("conflict_reason", String(255)),
+    Column("updated_at", String(40), nullable=False),
+    UniqueConstraint("run_id", "series_id", name="uq_acq_repair_series_run"),
+)
+
+acquisition_repair_events = Table(
+    "acquisition_repair_events",
+    metadata,
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column("run_id", String(64), nullable=False),
+    Column("sequence", Integer),
+    Column("action", String(32), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("entity_type", String(32)),
+    Column("entity_id", String(255)),
+    Column("reason", String(255), nullable=False),
+    Column("created_at", String(40), nullable=False),
+)
+
+acquisition_repair_canaries = Table(
+    "acquisition_repair_canaries",
+    metadata,
+    Column("canary_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False),
+    Column("entity_type", String(32), nullable=False),
+    Column("entity_id", String(255), nullable=False),
+    Column("owner_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("confirmed_at", String(40), nullable=False),
+    Column("consumed_at", String(40)),
+    UniqueConstraint("run_id", name="uq_acq_repair_canary_run"),
+)
+
+# ---------------------------------------------------------------------------
 # Indexes
 # ---------------------------------------------------------------------------
 
@@ -709,6 +1011,46 @@ Index("failed_issueid", failed.c.IssueID)
 Index("upcoming_issuedate", upcoming.c.IssueDate)
 Index("upcoming_issueid", upcoming.c.IssueID)
 Index("pipeline_journal_stage", pipeline_journal.c.stage)
+Index("issues_acquisition_intent", issues.c.AcquisitionIntent)
+Index("annuals_acquisition_intent", annuals.c.AcquisitionIntent)
+Index("acquisition_runs_state", acquisition_runs.c.completion_state)
+Index("acquisition_run_items_run_state", acquisition_run_items.c.run_id, acquisition_run_items.c.state)
+Index(
+    "acquisition_run_items_entity",
+    acquisition_run_items.c.command_kind,
+    acquisition_run_items.c.entity_type,
+    acquisition_run_items.c.entity_id,
+)
+Index("acq_search_preview_series_state", acquisition_search_previews.c.series_id, acquisition_search_previews.c.state)
+Index("acq_search_preview_run", acquisition_search_previews.c.run_id)
+Index("acq_reconciliation_state", acquisition_reconciliation.c.state)
+Index("acq_canary_permit_state", acquisition_canary_permits.c.state, acquisition_canary_permits.c.expires_at)
+Index("acq_canary_permit_release", acquisition_canary_permits.c.release_key)
+Index(
+    "acquisition_maintenance_leases_active",
+    acquisition_maintenance_leases.c.released_at,
+    acquisition_maintenance_leases.c.epoch,
+)
+Index("acquisition_maintenance_events_epoch", acquisition_maintenance_events.c.epoch)
+Index("acq_repair_runs_state", acquisition_repair_runs.c.state)
+Index("acq_repair_manifest_run", acquisition_repair_manifests.c.run_id)
+Index(
+    "acq_repair_items_run_state",
+    acquisition_repair_items.c.run_id,
+    acquisition_repair_items.c.apply_state,
+)
+Index(
+    "acq_repair_items_entity",
+    acquisition_repair_items.c.entity_type,
+    acquisition_repair_items.c.entity_id,
+)
+Index(
+    "acq_repair_series_run_state",
+    acquisition_repair_series.c.run_id,
+    acquisition_repair_series.c.state,
+)
+Index("acq_repair_events_run", acquisition_repair_events.c.run_id, acquisition_repair_events.c.event_id)
+Index("acq_repair_canary_run", acquisition_repair_canaries.c.run_id)
 ddl_info_status_updated = Index("ddl_info_status_updated", ddl_info.c.status, ddl_info.c.updated_date)
 
 # Case-insensitive indexes (SQLite uses COLLATE NOCASE on column definition;
@@ -753,6 +1095,21 @@ TABLE_MAP = {
     "ai_metadata_history": ai_metadata_history,
     "ai_cache": ai_cache,
     "pipeline_journal": pipeline_journal,
+    "acquisition_schema_versions": acquisition_schema_versions,
+    "acquisition_runs": acquisition_runs,
+    "acquisition_run_items": acquisition_run_items,
+    "acquisition_search_previews": acquisition_search_previews,
+    "acquisition_reconciliation": acquisition_reconciliation,
+    "acquisition_canary_permits": acquisition_canary_permits,
+    "acquisition_maintenance": acquisition_maintenance,
+    "acquisition_maintenance_leases": acquisition_maintenance_leases,
+    "acquisition_maintenance_events": acquisition_maintenance_events,
+    "acquisition_repair_runs": acquisition_repair_runs,
+    "acquisition_repair_manifests": acquisition_repair_manifests,
+    "acquisition_repair_items": acquisition_repair_items,
+    "acquisition_repair_series": acquisition_repair_series,
+    "acquisition_repair_events": acquisition_repair_events,
+    "acquisition_repair_canaries": acquisition_repair_canaries,
 }
 
 

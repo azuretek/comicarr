@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   createColumnHelper,
@@ -12,6 +12,7 @@ import { RefreshCw } from "lucide-react";
 import {
   useDownloadHistory,
   useDownloadQueue,
+  useRequeueDownload,
   type HistoryItem,
   type QueueItem,
 } from "@/hooks/useActivity";
@@ -25,14 +26,35 @@ import EmptyState from "@/components/ui/EmptyState";
 import FilterField from "@/components/ui/FilterField";
 import RelativeTime from "@/components/ui/RelativeTime";
 import PageHeader, { Tab, TabRow } from "@/components/layout/PageHeader";
+import { useToast } from "@/components/ui/toast";
 import type { PaginationMeta } from "@/types";
 
 type ActivityView = "queue" | "history";
 const PAGE_SIZE = 25;
 
-function StatusPill({ status }: { status: string }) {
-  const normalized = (status || "").toLowerCase();
-  let color = "var(--muted-foreground)";
+function statusPillMeta(status: string) {
+  const normalized = (status || "").trim().toLowerCase();
+  if (normalized.includes("fail") || normalized.includes("error")) {
+    return {
+      label: "Failed",
+      description: "Terminal download failure.",
+      color: "var(--status-error)",
+    };
+  }
+  if (normalized === "unknown") {
+    return {
+      label: "Unknown",
+      description: "Manual review required; it will not retry automatically.",
+      color: "var(--status-paused)",
+    };
+  }
+  if (normalized.includes("manual") || normalized.includes("review")) {
+    return {
+      label: "Manual review",
+      description: "Requires attention and will not retry automatically.",
+      color: "var(--status-paused)",
+    };
+  }
   if (
     normalized.includes("down") ||
     normalized.includes("snatch") ||
@@ -40,27 +62,46 @@ function StatusPill({ status }: { status: string }) {
     normalized === "completed" ||
     normalized === "done"
   ) {
-    color = "var(--status-active)";
-  } else if (
+    return {
+      label: status || "—",
+      description: "Active download.",
+      color: "var(--status-active)",
+    };
+  }
+  if (
     normalized.includes("queue") ||
     normalized.includes("pend") ||
     normalized === "wanted"
   ) {
-    color = "var(--status-paused)";
-  } else if (normalized.includes("fail") || normalized.includes("error")) {
-    color = "var(--status-error)";
+    return {
+      label: status || "—",
+      description: "Waiting for a worker.",
+      color: "var(--status-paused)",
+    };
   }
+
+  return {
+    label: status || "—",
+    description: "Download state reported by the provider.",
+    color: "var(--muted-foreground)",
+  };
+}
+
+function StatusPill({ status }: { status: string }) {
+  const { label, description, color } = statusPillMeta(status);
 
   return (
     <span
       className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase"
       style={{ color }}
+      aria-label={`${label}: ${description}`}
+      title={description}
     >
       <span
         className="w-1.5 h-1.5 rounded-full"
         style={{ background: color }}
       />
-      {status || "—"}
+      {label}
     </span>
   );
 }
@@ -301,6 +342,38 @@ function QueueView() {
     order: activeSort.desc ? "desc" : "asc",
   });
   const queue = data?.queue ?? [];
+  const {
+    mutateAsync: requeueDownload,
+    isPending: isRequeuePending,
+    variables: requeueItemId,
+  } = useRequeueDownload();
+  const { addToast } = useToast();
+
+  const handleRequeue = useCallback(
+    async (item: QueueItem) => {
+      if (
+        !window.confirm(
+          "Requeue this failed direct download? It will be retried by the DDL worker.",
+        )
+      ) {
+        return;
+      }
+
+      try {
+        await requeueDownload(item.ID);
+        addToast({
+          type: "success",
+          message: "Direct download requeued.",
+        });
+      } catch (err) {
+        addToast({
+          type: "error",
+          message: `Unable to requeue direct download: ${err instanceof Error ? err.message : "Unknown error"}`,
+        });
+      }
+    },
+    [addToast, requeueDownload],
+  );
 
   const columns = useMemo(
     () => [
@@ -364,8 +437,32 @@ function QueueView() {
         ),
         cell: ({ getValue }) => <RelativeTime value={getValue()} />,
       }),
+      queueColumnHelper.display({
+        id: "actions",
+        header: "Actions",
+        cell: ({ row }) => {
+          const item = row.original;
+          const isFailed = item.status.trim().toLowerCase() === "failed";
+          if (!isFailed) return null;
+
+          const isRequeueing = isRequeuePending && requeueItemId === item.ID;
+          return (
+            <button
+              type="button"
+              onClick={() => void handleRequeue(item)}
+              disabled={isRequeueing}
+              className="rounded-[4px] border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-60"
+              style={{ borderColor: "var(--border)" }}
+              aria-label={`Requeue ${item.series || item.filename || "failed direct download"}`}
+              title="Requeue this failed direct download after confirmation"
+            >
+              {isRequeueing ? "requeueing…" : "requeue"}
+            </button>
+          );
+        },
+      }),
     ],
-    [],
+    [handleRequeue, isRequeuePending, requeueItemId],
   );
 
   const table = useReactTable({
@@ -394,7 +491,7 @@ function QueueView() {
       errorTitle="Unable to load download queue"
       emptyEyebrow="QUEUE"
       emptyTitle="No active downloads"
-      emptyDescription="Queued, downloading, and failed items will appear here."
+      emptyDescription="Queued and downloading direct downloads will appear here; failures stay visible for review."
       filteredTitle="No matching queue items"
       onRefresh={() => void refetch()}
       onNextPage={() => setPage((current) => current + 1)}

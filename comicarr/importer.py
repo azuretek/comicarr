@@ -29,6 +29,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from collections.abc import Mapping
 
 # import imghdr  # Removed - deprecated in Python 3.13+ and not used in this file
 import sqlalchemy.exc
@@ -2991,32 +2993,137 @@ def issue_watcher_thread(issuelist):
     list(map(comicarr.ISSUE_WATCH_LIST.put, issuelist))
 
 
-def refresh_thread(serieslist):
-    # refresh thread to queue up series to be refreshed
-    # serieslist = (28991, 38391, 93810)
+_REFRESH_WORKER_LOCK = threading.RLock()
 
-    if type(serieslist) != list:
-        serieslist = [(serieslist)]
 
-    threaded_call = True
-
-    list(map(comicarr.REFRESH_QUEUE.put, serieslist))
-
-    try:
-        if comicarr.MASS_REFRESH.is_alive():
-            logger.info(
-                "[MASS-REFRESH] MASS_REFRESH thread already running. Adding an additional %s items to existing queue"
-                % len(serieslist)
-            )
-            threaded_call = False
-    except Exception:
-        pass
-
-    if threaded_call is True:
+def _start_refresh_worker():
+    """Start the on-demand worker under the same lock used for retirement."""
+    with _REFRESH_WORKER_LOCK:
+        worker = getattr(comicarr, "MASS_REFRESH", None)
+        if worker is not None and getattr(worker, "is_alive", lambda: False)():
+            return False
         logger.info("[MASS-REFRESH] MASS_REFRESH thread not started. Started & submitting.")
         comicarr.MASS_REFRESH = threading.Thread(
             target=updater.addvialist, args=(comicarr.REFRESH_QUEUE,), name="mass-refresh"
         )
         comicarr.MASS_REFRESH.start()
-        if not comicarr.MASS_REFRESH:
-            comicarr.MASS_REFRESH.join(5)
+        return True
+
+
+def refresh_worker_should_retire(refresh_queue):
+    """Atomically decide whether an idle refresh worker may exit.
+
+    Producers hold the same lock while enqueueing and checking liveness, so a
+    command cannot land between the worker's empty check and its retirement.
+    """
+    with _REFRESH_WORKER_LOCK:
+        if not refresh_queue.empty():
+            return False
+        if getattr(comicarr, "MASS_REFRESH", None) is threading.current_thread():
+            comicarr.MASS_REFRESH = None
+        return True
+
+
+def _handoff_refresh_items(queue_items, *, start_worker, maintenance=None):
+    from comicarr.app.acquisition.maintenance import MaintenanceController
+
+    if not queue_items:
+        return
+    controller = maintenance or MaintenanceController()
+    with controller.lease(
+        "refresh-producer",
+        work_kind="refresh_queue_handoff",
+        entity_type="run",
+        entity_id=queue_items[0]["run_id"],
+    ) as lease:
+        controller.assert_lease_current(lease)
+        with _REFRESH_WORKER_LOCK:
+            for queue_item in queue_items:
+                comicarr.REFRESH_QUEUE.put(queue_item)
+            if start_worker:
+                _start_refresh_worker()
+
+
+def _refresh_payload(raw_values):
+    if not isinstance(raw_values, Mapping):
+        raise ValueError("refresh command must be an object")
+    values = {str(key).lower(): value for key, value in raw_values.items()}
+    comicid = values.get("comicid")
+    if comicid in (None, ""):
+        raise ValueError("refresh command is missing comicid")
+    payload = {
+        "comicid": str(comicid),
+        "comicname": values.get("comicname"),
+        "seriesyear": values.get("seriesyear"),
+    }
+    for field in ("r_mode", "calledfrom", "serieslast_updated", "manual_comicid"):
+        if field in values:
+            payload[field] = values[field]
+    return payload
+
+
+def refresh_thread(
+    serieslist,
+    *,
+    ledger=None,
+    run_id=None,
+    trigger="refresh_thread",
+    start_worker=True,
+    maintenance=None,
+):
+    """Persist refresh obligations before handing them to the worker queue."""
+    from comicarr.app.acquisition.models import DispatchState
+    from comicarr.app.acquisition.runs import RunLedger
+
+    if not isinstance(serieslist, list):
+        serieslist = [serieslist]
+    if not serieslist:
+        return None
+
+    ledger = ledger or RunLedger()
+    effective_run_id = str(run_id or uuid.uuid4())
+    ledger.create_run(effective_run_id, command_kind="refresh", trigger=trigger, scope_type="series_batch")
+    queued = []
+    for raw_item in serieslist:
+        payload = _refresh_payload(raw_item)
+        ledger.accept_item(
+            effective_run_id,
+            entity_type="series",
+            entity_id=payload["comicid"],
+            payload=payload,
+        )
+        queue_item = {**payload, "run_id": effective_run_id}
+        queued.append(queue_item)
+    try:
+        _handoff_refresh_items(queued, start_worker=start_worker, maintenance=maintenance)
+    except Exception:
+        ledger.record_dispatch(effective_run_id, DispatchState.ERROR)
+        raise
+    ledger.record_dispatch(effective_run_id, DispatchState.ACCEPTED)
+    return effective_run_id
+
+
+def replay_refresh_obligations(*, ledger=None, start_worker=True, maintenance=None):
+    """Restore accepted/running refresh obligations after a process restart."""
+    from comicarr.app.acquisition.models import DispatchState, ItemOutcome
+    from comicarr.app.acquisition.runs import RunLedger
+
+    ledger = ledger or RunLedger()
+    queue_items = []
+    replayed_run_ids = set()
+    for item in ledger.list_recoverable_items("refresh"):
+        run_id = item["run_id"]
+        entity_id = item["entity_id"]
+        try:
+            payload = _refresh_payload(item["payload"] or {})
+        except ValueError as e:
+            ledger.record_outcome(run_id, "series", entity_id, ItemOutcome.QUARANTINED, reason=str(e))
+            continue
+        if item["state"] == ItemOutcome.RUNNING.value:
+            ledger.record_requeue(run_id, "series", entity_id, reason="worker restart")
+        queue_items.append({**payload, "run_id": run_id})
+        replayed_run_ids.add(run_id)
+    _handoff_refresh_items(queue_items, start_worker=start_worker, maintenance=maintenance)
+    for run_id in replayed_run_ids:
+        ledger.record_dispatch(run_id, DispatchState.ACCEPTED)
+    return len(queue_items)

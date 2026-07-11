@@ -7,6 +7,7 @@ import {
   useBulkQueueIssues,
   useBulkUnqueueIssues,
 } from "@/hooks/useQueue";
+import { useRetrySearchRun } from "@/hooks/useSeries";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { useAiStatus } from "@/hooks/useAiStatus";
@@ -269,6 +270,8 @@ function MyReleasesView() {
     refetch,
   } = useUpcoming(includeDownloaded);
   const forceSearchMutation = useForceSearch();
+  const retrySearchMutation = useRetrySearchRun();
+  const [forceRunId, setForceRunId] = useState<string | null>(null);
   const bulkQueueMutation = useBulkQueueIssues();
   const bulkUnqueueMutation = useBulkUnqueueIssues();
   const { addToast } = useToast();
@@ -308,10 +311,16 @@ function MyReleasesView() {
   const handleForceSearch = async () => {
     if (window.confirm("Manual search may take several minutes. Continue?")) {
       try {
-        await forceSearchMutation.mutateAsync();
+        const result = await forceSearchMutation.mutateAsync();
+        setForceRunId(
+          result.status === "partial" ? (result.run_id ?? null) : null,
+        );
         addToast({
-          type: "info",
-          message: "Search started for all wanted issues",
+          type: result.success ? "info" : "error",
+          message:
+            result.message ||
+            result.error ||
+            "Search did not start for the wanted issues",
         });
       } catch (err) {
         addToast({
@@ -360,6 +369,36 @@ function MyReleasesView() {
             />
             refresh
           </button>
+          {forceRunId && (
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const result =
+                    await retrySearchMutation.mutateAsync(forceRunId);
+                  addToast({
+                    type: result.success ? "info" : "error",
+                    message: result.message || "Queue handoff retry completed",
+                  });
+                } catch (err) {
+                  addToast({
+                    type: "error",
+                    message: `Retry failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+                  });
+                }
+              }}
+              disabled={retrySearchMutation.isPending}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[5px] border text-[11px] font-mono disabled:opacity-60"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--muted-foreground)",
+              }}
+            >
+              {retrySearchMutation.isPending
+                ? "retrying…"
+                : "retry queue handoff"}
+            </button>
+          )}
 
           <button
             type="button"

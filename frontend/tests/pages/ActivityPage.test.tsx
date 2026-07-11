@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "../mocks/server";
@@ -22,6 +22,79 @@ const queueItem = {
 };
 
 describe("ActivityPage", () => {
+  it("labels terminal and manual-review queue rows truthfully and only retries failed DDL work after confirmation", async () => {
+    const queueRows = [
+      {
+        ...queueItem,
+        ID: "failed-ddl",
+        series: "Failed Series",
+        status: "Failed",
+      },
+      {
+        ...queueItem,
+        ID: "unknown-ddl",
+        series: "Unknown Series",
+        status: "Unknown",
+      },
+      {
+        ...queueItem,
+        ID: "manual-ddl",
+        series: "Manual Series",
+        status: "manual_review",
+      },
+      {
+        ...queueItem,
+        ID: "active-ddl",
+        series: "Active Series",
+        status: "Downloading",
+      },
+    ];
+    const confirm = vi.fn(() => true);
+    let requeueCalls = 0;
+    vi.stubGlobal("confirm", confirm);
+    server.use(
+      http.get("/api/downloads/queue", () =>
+        HttpResponse.json({
+          queue: queueRows,
+          pagination: { total: 4, limit: 25, offset: 0, has_more: false },
+        }),
+      ),
+      http.post("/api/downloads/failed-ddl/requeue", () => {
+        requeueCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<ActivityPage />, { route: "/activity", useMemoryRouter: true });
+
+    await screen.findByText("Failed Series");
+    expect(screen.getByLabelText(/failed: terminal/i)).toBeTruthy();
+    expect(
+      screen.getByLabelText(/unknown: manual review required/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText(/manual review: requires attention/i),
+    ).toBeTruthy();
+    expect(screen.getByLabelText(/downloading: active/i)).toBeTruthy();
+
+    expect(
+      screen.queryByRole("button", { name: /requeue unknown series/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /requeue manual series/i }),
+    ).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", { name: /requeue failed series/i }),
+    );
+
+    expect(confirm).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(requeueCalls).toBe(1);
+    });
+    expect(await screen.findByText("Direct download requeued.")).toBeTruthy();
+  });
+
   it("filters, sorts, and paginates the live queue through the API", async () => {
     const requests: URL[] = [];
     server.use(

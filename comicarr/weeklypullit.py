@@ -73,7 +73,7 @@ class Weekly:
                     failure_message=e,
                 )
                 comicarr.WEEKLY_STATUS = "Error"
-                return
+                raise
 
             _restore_manual_next_run()
             helpers.job_management(

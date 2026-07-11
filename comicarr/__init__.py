@@ -41,6 +41,7 @@ import webbrowser
 from datetime import timedelta
 
 import requests
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import inspect, text
@@ -124,6 +125,13 @@ PROG_DIR = None
 DATA_DIR = None
 FULL_PATH = None
 MAINTENANCE = False
+# Acquisition-specific fail-closed state. Unlike legacy MAINTENANCE this
+# leaves the authenticated web/diagnostics process available.
+ACQUISITION_SCHEMA_READY = False
+ACQUISITION_SCHEMA_VERSION = 0
+ACQUISITION_SCHEMA_ERROR = "acquisition schema has not been verified"
+ACQUISITION_WORKERS_BLOCKED = True
+ACQUISITION_BLOCK_REASON = "schema_unavailable"
 LOG_DIR = None
 LOGTYPE = "log"
 LOG_LANG = "en"
@@ -144,6 +152,7 @@ MAX_LOGSIZE = 5000000
 SAFESTART = False
 NOWEEKLY = False
 INIT_LOCK = threading.Lock()
+ACQUISITION_RESUME_LOCK = threading.Lock()
 IMPORTLOCK = False
 IMPORTBUTTON = False
 DONATEBUTTON = False
@@ -192,6 +201,7 @@ MIGRATION_CURRENT_TABLE = ""
 MIGRATION_TABLES_COMPLETE = 0
 MIGRATION_TABLES_TOTAL = 0
 MIGRATION_ERROR = None
+MIGRATION_RECONCILIATION = None
 UMASK = None
 WANTED_TAB_OFF = False
 PULLNEW = None
@@ -332,6 +342,19 @@ SCHED = BackgroundScheduler(
         "apscheduler.job_defaults.max_instances": "3",
         "apscheduler.timezone": "UTC",
     }
+)
+
+
+def _persist_scheduler_health_event(event):
+    """Late import avoids a package-initialization cycle while keeping every event durable."""
+    from comicarr.app.system.service import persist_scheduler_event
+
+    return persist_scheduler_event(event)
+
+
+SCHED.add_listener(
+    _persist_scheduler_health_event,
+    EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES,
 )
 BACKENDSTATUS_WS = "up"
 BACKENDSTATUS_CV = "up"
@@ -516,6 +539,18 @@ def initialize(config_file):
 
             # check to see if any db updates are required / new.
             chk.db_update_check()
+
+        # Keep the web process available for authenticated diagnostics even
+        # when only the acquisition schema/gate is unhealthy. Background
+        # acquisition startup remains fail-closed until this projection clears.
+        try:
+            from comicarr.app.acquisition.maintenance import refresh_runtime_state
+
+            refresh_runtime_state(comicarr.CONFIG)
+        except Exception as e:
+            comicarr.ACQUISITION_WORKERS_BLOCKED = True
+            comicarr.ACQUISITION_BLOCK_REASON = "maintenance_gate_unavailable"
+            logger.error("[ACQUISITION] Maintenance gate unavailable; workers remain blocked: %s" % e)
 
         # set the flag here whether to start it up in maintenance mode or not.
         # usually it will be based on if a field is present in the db or not.
@@ -816,6 +851,107 @@ def launch_browser(host, port, root):
         logger.error("Could not launch browser: %s" % e)
 
 
+def replay_acquisition_obligations():
+    """Restore durable search and refresh commands before workers start."""
+    from comicarr import importer as importer_module
+    from comicarr.app.search.commands import replay_search_obligations
+
+    search_count = replay_search_obligations(work_queue=SEARCH_QUEUE)
+    refresh_count = importer_module.replay_refresh_obligations(start_worker=True)
+    if search_count or refresh_count:
+        logger.info("[ACQUISITION] Replayed %s search and %s refresh obligations" % (search_count, refresh_count))
+    return {"search": search_count, "refresh": refresh_count}
+
+
+def resume_acquisition_runtime(config=None):
+    """Replay and restart acquisition-only work after an explicit gate release.
+
+    ``start()`` intentionally leaves the process alive but pauses producers
+    and consumers when the durable reconciliation gate is closed. Releasing
+    that gate from the authenticated operator flow must therefore restore the
+    same narrow runtime surface without requiring an undocumented container
+    restart or starting unrelated diagnostics work a second time.
+    """
+
+    from comicarr.app.acquisition.maintenance import refresh_runtime_state
+
+    config = config or CONFIG
+    with ACQUISITION_RESUME_LOCK:
+        gate = refresh_runtime_state(config)
+        if gate.blocked:
+            raise RuntimeError("acquisition remains blocked: %s" % (gate.reason or "unknown gate"))
+
+        try:
+            replayed = replay_acquisition_obligations()
+        except Exception as e:
+            comicarr.ACQUISITION_WORKERS_BLOCKED = True
+            comicarr.ACQUISITION_BLOCK_REASON = "obligation_replay_failed"
+            raise RuntimeError("durable acquisition replay failed") from e
+
+        queues_started = ["search_queue"]
+        queue_schedule("search_queue", "start")
+        if all(
+            [
+                bool(getattr(config, "ENABLE_TORRENTS", False)),
+                bool(getattr(config, "AUTO_SNATCH", False)),
+                OS_DETECT != "Windows",
+            ]
+        ) and getattr(config, "TORRENT_DOWNLOADER", None) in {2, 4}:
+            queue_schedule("snatched_queue", "start")
+            queues_started.append("snatched_queue")
+        if bool(getattr(config, "POST_PROCESSING", False)) and (
+            (
+                getattr(config, "NZB_DOWNLOADER", None) == 0
+                and bool(getattr(config, "SAB_CLIENT_POST_PROCESSING", False))
+            )
+            or (
+                getattr(config, "NZB_DOWNLOADER", None) == 1
+                and bool(getattr(config, "NZBGET_CLIENT_POST_PROCESSING", False))
+            )
+        ):
+            queue_schedule("nzb_queue", "start")
+            queues_started.append("nzb_queue")
+        if bool(getattr(config, "POST_PROCESSING", False)):
+            queue_schedule("pp_queue", "start")
+            queues_started.append("pp_queue")
+        if bool(getattr(config, "ENABLE_DDL", False)):
+            queue_schedule("ddl_queue", "start")
+            queues_started.append("ddl_queue")
+
+        scheduler_statuses = {
+            "dbupdater": UPDATER_STATUS,
+            "search": SEARCH_STATUS,
+            "weekly": WEEKLY_STATUS,
+            "rss": RSS_STATUS,
+            "monitor": MONITOR_STATUS,
+            "importinbox": IMPORTINBOX_STATUS,
+        }
+        resumed_jobs = []
+        for job_id, status in scheduler_statuses.items():
+            if status == "Paused":
+                continue
+            job = SCHED.get_job(job_id)
+            if job is None:
+                continue
+            job.resume()
+            resumed_jobs.append(job_id)
+
+        logger.info(
+            "[ACQUISITION] Resumed runtime: replayed %s search/%s refresh obligations; queues=%s; jobs=%s"
+            % (
+                replayed["search"],
+                replayed["refresh"],
+                ",".join(queues_started),
+                ",".join(resumed_jobs) or "none",
+            )
+        )
+        return {
+            "replayed": replayed,
+            "queues_started": queues_started,
+            "scheduler_jobs_resumed": resumed_jobs,
+        }
+
+
 def start():
 
     global _INITIALIZED, started
@@ -891,6 +1027,48 @@ def start():
                 trigger=IntervalTrigger(hours=0, minutes=int(CONFIG.IMPORT_SCAN_INTERVAL), timezone="UTC"),
             )
             IMPORTINBOX_SCHEDULER.pause()
+
+            # A schema failure, persistent repair fence, or explicit operator
+            # override suppresses every producer/consumer that can claim or
+            # hand off acquisition work. The scheduler itself still starts so
+            # authenticated job diagnostics remain available; the harmless
+            # version job may continue.
+            try:
+                from comicarr.app.acquisition.maintenance import refresh_runtime_state
+
+                acquisition_gate = refresh_runtime_state(comicarr.CONFIG)
+            except Exception as e:
+                acquisition_gate = None
+                comicarr.ACQUISITION_WORKERS_BLOCKED = True
+                comicarr.ACQUISITION_BLOCK_REASON = "maintenance_gate_unavailable"
+                logger.error("[ACQUISITION] Refusing worker startup because gate refresh failed: %s" % e)
+
+            if comicarr.ACQUISITION_WORKERS_BLOCKED:
+                if VERSION_STATUS != "Paused":
+                    VERSION_SCHEDULER.resume()
+                logger.warn(
+                    "[ACQUISITION] Background acquisition is blocked (%s); diagnostics remain available"
+                    % (acquisition_gate.reason if acquisition_gate else comicarr.ACQUISITION_BLOCK_REASON)
+                )
+                try:
+                    SCHED.start()
+                except Exception as e:
+                    logger.error("[ACQUISITION] Unable to start diagnostics scheduler: %s" % e)
+                started = True
+                return
+
+            try:
+                replay_acquisition_obligations()
+            except Exception as e:
+                comicarr.ACQUISITION_WORKERS_BLOCKED = True
+                comicarr.ACQUISITION_BLOCK_REASON = "obligation_replay_failed"
+                logger.error("[ACQUISITION] Durable obligation replay failed; workers remain blocked: %s" % e)
+                try:
+                    SCHED.start()
+                except Exception as scheduler_error:
+                    logger.error("[ACQUISITION] Unable to start diagnostics scheduler: %s" % scheduler_error)
+                started = True
+                return
 
             # load up the previous runs from the job sql table so we know stuff...
             monitors = helpers.job_management(startup=True)
@@ -1676,6 +1854,18 @@ def dbcheck():
 
     # --- Deduplicate and add UNIQUE constraints for upsert tables ---
     _migrate_unique_constraints(engine)
+
+    # Acquisition schema changes have their own forward-only version ledger.
+    # A failed verification blocks acquisition startup but deliberately does
+    # not prevent the authenticated FastAPI diagnostics surface from starting.
+    from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
+
+    acquisition_schema = ensure_acquisition_schema(engine)
+    if not acquisition_schema.ready:
+        logger.error(
+            "[ACQUISITION] Schema verification failed; acquisition workers will remain blocked: %s",
+            acquisition_schema.error,
+        )
 
     if dynamic_upgrade is True:
         logger.info("Updating db to include some important changes.")

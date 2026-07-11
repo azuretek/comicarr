@@ -13,7 +13,7 @@ Series domain queries — comics, issues, annuals, importresults tables.
 Uses SQLAlchemy Core via the existing db module.
 """
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, literal, or_, select
 
 from comicarr import db
 from comicarr.app.core.database import paginated_query  # noqa: F401 — re-exported
@@ -39,6 +39,7 @@ COMICS_COLUMNS = [
     t_comics.c.Total.label("Total"),
     t_comics.c.Have.label("Have"),
     t_comics.c.DetailURL.label("DetailURL"),
+    t_comics.c.ComicLocation.label("ComicLocation"),
     t_comics.c.ContentType.label("ContentType"),
 ]
 
@@ -50,6 +51,10 @@ ISSUES_COLUMNS = [
     t_issues.c.ReleaseDate.label("releaseDate"),
     t_issues.c.IssueDate.label("issueDate"),
     t_issues.c.Status.label("status"),
+    t_issues.c.AcquisitionIntent.label("acquisitionIntent"),
+    t_issues.c.Location.label("location"),
+    t_issues.c.DigitalDate.label("digitalDate"),
+    t_issues.c.ComicID.label("comicId"),
     t_issues.c.ComicName.label("comicName"),
     t_issues.c.ChapterNumber.label("chapterNumber"),
     t_issues.c.VolumeNumber.label("volumeNumber"),
@@ -62,6 +67,10 @@ ANNUALS_COLUMNS = [
     t_annuals.c.ReleaseDate.label("releaseDate"),
     t_annuals.c.IssueDate.label("issueDate"),
     t_annuals.c.Status.label("status"),
+    t_annuals.c.AcquisitionIntent.label("acquisitionIntent"),
+    t_annuals.c.Location.label("location"),
+    t_annuals.c.DigitalDate.label("digitalDate"),
+    t_annuals.c.ComicID.label("comicId"),
     t_annuals.c.ComicName.label("comicName"),
 ]
 
@@ -115,6 +124,41 @@ def get_comic_for_refresh(comic_id):
     return db.select_one(select(t_comics.c.ComicName, t_comics.c.ComicYear).where(t_comics.c.ComicID == comic_id))
 
 
+def get_search_candidate_state(issue_id, entity_type=None):
+    """Return current intent/fulfillment and series state for eligibility."""
+    sources = (
+        (t_issues, t_issues.c.IssueID, ()),
+        (
+            t_annuals,
+            t_annuals.c.IssueID,
+            (or_(t_annuals.c.Deleted.is_(None), t_annuals.c.Deleted != 1),),
+        ),
+        (t_storyarcs, t_storyarcs.c.IssueArcID, ()),
+    )
+    normalized_type = str(entity_type or "").strip().lower()
+    if normalized_type == "issue":
+        sources = sources[:1]
+    elif normalized_type == "annual":
+        sources = sources[1:2]
+    for table, identity, extra_conditions in sources:
+        acquisition_intent = (table.c.AcquisitionIntent if "AcquisitionIntent" in table.c else literal(None)).label(
+            "AcquisitionIntent"
+        )
+        stmt = (
+            select(
+                table.c.Status.label("LegacyStatus"),
+                acquisition_intent,
+                t_comics.c.Status.label("SeriesStatus"),
+            )
+            .select_from(table.outerjoin(t_comics, t_comics.c.ComicID == table.c.ComicID))
+            .where(identity == str(issue_id), *extra_conditions)
+        )
+        row = db.select_one(stmt)
+        if row is not None:
+            return row
+    return None
+
+
 def delete_comic(comic_id):
     """Delete a comic and its issues/upcoming entries in a single transaction."""
     with db.get_engine().begin() as conn:
@@ -146,17 +190,36 @@ def get_issues(comic_id):
 
 def get_annuals(comic_id):
     """Get all annuals for a comic."""
-    return db.select_all(select(*ANNUALS_COLUMNS).where(t_annuals.c.ComicID == comic_id))
+    return db.select_all(
+        select(*ANNUALS_COLUMNS).where(
+            t_annuals.c.ComicID == comic_id,
+            or_(t_annuals.c.Deleted.is_(None), t_annuals.c.Deleted != 1),
+        )
+    )
 
 
-def queue_issue(issue_id):
+def queue_issue(issue_id, audit_identity):
     """Mark an issue as Wanted."""
-    db.upsert("issues", {"Status": "Wanted"}, {"IssueID": issue_id})
+    from comicarr.app.acquisition.models import AcquisitionIntent
+    from comicarr.app.acquisition.policy import explicit_intent_values
+
+    db.upsert(
+        "issues",
+        explicit_intent_values(AcquisitionIntent.WANTED, audit_identity),
+        {"IssueID": issue_id},
+    )
 
 
-def unqueue_issue(issue_id):
+def unqueue_issue(issue_id, audit_identity):
     """Mark an issue as Skipped."""
-    db.upsert("issues", {"Status": "Skipped"}, {"IssueID": issue_id})
+    from comicarr.app.acquisition.models import AcquisitionIntent
+    from comicarr.app.acquisition.policy import explicit_intent_values
+
+    db.upsert(
+        "issues",
+        explicit_intent_values(AcquisitionIntent.SKIPPED, audit_identity),
+        {"IssueID": issue_id},
+    )
 
 
 # ---------------------------------------------------------------------------
