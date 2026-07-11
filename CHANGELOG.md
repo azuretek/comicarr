@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.3
+
+### Patch Changes
+
+- 743a908: Fix library scans so existing comic series are reconciled instead of reported as unmatched.
+
 ## 0.19.2
 
 ### Patch Changes
