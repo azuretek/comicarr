@@ -32,7 +32,7 @@ import time
 from sqlalchemy import select
 
 import comicarr
-from comicarr import db, logger
+from comicarr import db, logger, updater
 from comicarr.scanutil import COMIC_EXTENSIONS, find_best_match, normalize_title
 from comicarr.tables import comics
 
@@ -43,6 +43,7 @@ COMIC_SCAN_PROGRESS = {
     "processed_files": 0,
     "series_found": 0,
     "series_matched": 0,
+    "series_reconciled": 0,
     "current_series": None,
     "errors": [],
 }
@@ -86,6 +87,7 @@ def comicScan(scan_dir=None):
         "processed_files": 0,
         "series_found": 0,
         "series_matched": 0,
+        "series_reconciled": 0,
         "current_series": None,
         "errors": [],
     }
@@ -98,6 +100,7 @@ def comicScan(scan_dir=None):
         "status": "completed",
         "series_found": 0,
         "series_matched": 0,
+        "series_reconciled": 0,
         "scan_results": [],
         "errors": [],
     }
@@ -123,6 +126,9 @@ def comicScan(scan_dir=None):
                 if match_result.get("matched"):
                     results["series_matched"] += 1
                     COMIC_SCAN_PROGRESS["series_matched"] += 1
+                if match_result.get("reconciled"):
+                    results["series_reconciled"] += 1
+                    COMIC_SCAN_PROGRESS["series_reconciled"] += 1
             except Exception as e:
                 logger.error("[COMIC-SCAN] Error processing series '%s': %s" % (series_name, e))
                 error_entry = {
@@ -142,7 +148,8 @@ def comicScan(scan_dir=None):
         COMIC_SCAN_RESULTS = results["scan_results"]
 
         logger.info(
-            "[COMIC-SCAN] Scan complete. Matched: %d/%d series" % (results["series_matched"], results["series_found"])
+            "[COMIC-SCAN] Scan complete. Reconciled: %d, matched: %d/%d series"
+            % (results["series_reconciled"], results["series_matched"], results["series_found"])
         )
     except Exception as e:
         logger.error("[COMIC-SCAN] Fatal error during scan: %s" % e)
@@ -207,7 +214,7 @@ def _guess_series_from_filename(filename):
 
 
 def _load_existing_series():
-    """Load existing comic series from the library for de-duplication."""
+    """Index existing comic series by normalized display names."""
     existing = {}
     try:
         with db.get_engine().connect() as conn:
@@ -216,21 +223,69 @@ def _load_existing_series():
                 comics.c.ComicName,
                 comics.c.ComicSortName,
                 comics.c.DynamicName,
+                comics.c.ComicYear,
+                comics.c.ComicLocation,
             ).where(comics.c.ContentType != "manga")
             for row in conn.execute(stmt):
                 row_dict = dict(row._mapping)
-                name = row_dict.get("ComicName", "")
-                if name:
-                    existing[normalize_title(name)] = row_dict["ComicID"]
-                sort_name = row_dict.get("ComicSortName", "")
-                if sort_name:
-                    existing[normalize_title(sort_name)] = row_dict["ComicID"]
-                dynamic_name = row_dict.get("DynamicName", "")
-                if dynamic_name:
-                    existing[normalize_title(dynamic_name)] = row_dict["ComicID"]
+                for name in (
+                    row_dict.get("ComicName", ""),
+                    row_dict.get("ComicSortName", ""),
+                    row_dict.get("DynamicName", ""),
+                ):
+                    normalized_name = normalize_title(name) if name else ""
+                    if not normalized_name:
+                        continue
+                    candidates = existing.setdefault(normalized_name, [])
+                    if not any(candidate["ComicID"] == row_dict["ComicID"] for candidate in candidates):
+                        candidates.append(row_dict)
     except Exception as e:
         logger.error("[COMIC-SCAN] Error loading existing series: %s" % e)
     return existing
+
+
+def _split_trailing_year(series_name):
+    """Return a folder's display title and optional trailing series year."""
+    match = re.match(r"^(?P<title>.+?)\s*\((?P<year>\d{4})\)\s*$", series_name)
+    if not match:
+        return series_name, None
+    return match.group("title").strip(), match.group("year")
+
+
+def _find_existing_series(series_name, existing_series):
+    """Return one unambiguous existing series for a scanned folder name."""
+    title, folder_year = _split_trailing_year(series_name)
+    candidates = existing_series.get(normalize_title(title), [])
+    if folder_year:
+        candidates = [candidate for candidate in candidates if str(candidate.get("ComicYear") or "") == folder_year]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _series_directory(files):
+    """Return the scanned series directory shared by a group of files."""
+    if len(files) == 1:
+        return os.path.dirname(files[0])
+    return os.path.commonpath(files)
+
+
+def _reconcile_existing_series(existing_series, files):
+    """Point an existing series at scanned files, then reuse the issue rescan."""
+    comic_id = existing_series["ComicID"]
+    scanned_location = _series_directory(files)
+    previous_location = existing_series.get("ComicLocation")
+    changed_location = os.path.normcase(os.path.normpath(str(previous_location or ""))) != os.path.normcase(
+        os.path.normpath(scanned_location)
+    )
+
+    if changed_location:
+        db.upsert("comics", {"ComicLocation": scanned_location}, {"ComicID": comic_id})
+
+    try:
+        updater.forceRescan(comic_id)
+    except Exception:
+        if changed_location:
+            db.upsert("comics", {"ComicLocation": previous_location}, {"ComicID": comic_id})
+        raise
 
 
 def _match_series(series_name, files, existing_series):
@@ -249,11 +304,13 @@ def _match_series(series_name, files, existing_series):
     }
 
     # Check if series already exists in library
-    normalized = normalize_title(series_name)
-    if normalized in existing_series:
+    existing = _find_existing_series(series_name, existing_series)
+    if existing:
+        _reconcile_existing_series(existing, files)
         result["already_in_library"] = True
-        result["existing_comic_id"] = existing_series[normalized]
-        logger.info("[COMIC-SCAN] Series '%s' already in library" % series_name)
+        result["existing_comic_id"] = existing["ComicID"]
+        result["reconciled"] = True
+        logger.info("[COMIC-SCAN] Reconciled existing series '%s'" % series_name)
         return result
 
     # Search ComicVine
