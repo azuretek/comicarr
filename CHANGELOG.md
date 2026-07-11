@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.2
+
+### Patch Changes
+
+- 59fd790: Make library scan progress and import confirmation visible across the Dashboard and Import pages.
+- d5d338f: Keep search route loading visible, harden health diagnostics, and allow a single Wanted issue to be searched without forcing the backlog.
+- 0f19c09: Reconcile scanned comic folders with existing series and show the outcome in Import.
+
 ## 0.19.1
 
 ### Patch Changes
