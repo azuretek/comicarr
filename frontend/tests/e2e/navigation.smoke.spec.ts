@@ -6,6 +6,7 @@ const destinations = [
   { path: "/", label: "Dashboard" },
   { path: "/library", label: "Library" },
   { path: "/search", label: "Search" },
+  { path: "/wanted", label: "Wanted" },
   { path: "/activity", label: "Activity" },
   { path: "/settings", label: "Settings" },
 ];
@@ -27,8 +28,10 @@ test("protected core navigation renders without API regressions", async ({
 });
 
 test("SPA fallback serves authenticated deep links", async ({ page }) => {
-  await page.goto("/settings");
+  await page.goto("/wanted");
 
-  await expect(page).toHaveURL(/\/settings$/);
-  await expect(page.getByText("Settings").first()).toBeVisible();
+  await expect(page).toHaveURL(/\/wanted$/);
+  await expect(page.getByText("Wanted").first()).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("Wanted").first()).toBeVisible();
 });

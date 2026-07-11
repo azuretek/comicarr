@@ -502,6 +502,83 @@ def unqueue_issue(ctx, issue_id, audit_identity):
     return {"success": True}
 
 
+def _wanted_issue_selection(issue_id):
+    row = db.select_one(sqlalchemy.select(issues).where(issues.c.IssueID == issue_id))
+    if row is None or row.get("Status") != "Wanted":
+        return None, {"success": False, "error": "Wanted issue not found", "status_code": 404}
+    return [
+        {
+            "entity_type": "issue",
+            "entity_id": str(row["IssueID"]),
+            "issue_number": row.get("Issue_Number"),
+            "source": {
+                "status": row.get("Status"),
+                "intent": row.get("AcquisitionIntent"),
+                "location": row.get("Location"),
+                "release_date": row.get("ReleaseDate"),
+                "digital_date": row.get("DigitalDate"),
+                "issue_date": row.get("IssueDate"),
+            },
+        }
+    ], {"success": True, "comicId": str(row["ComicID"]), "issueId": str(row["IssueID"])}
+
+
+def preview_wanted_issue(issue_id, *, actor, session_id):
+    """Mint a session-bound, one-item preview for an already Wanted issue."""
+    selection, result = _wanted_issue_selection(issue_id)
+    if not result["success"]:
+        return result
+    from comicarr.app.search.bulk import create_preview
+
+    result.update(
+        create_preview(
+            db.get_engine(),
+            series_id=result["comicId"],
+            actor=actor,
+            session_id=session_id,
+            selection=selection,
+        )
+    )
+    return result
+
+
+def search_wanted_issue(issue_id, audit_identity, *, preview_token, fingerprint, session_id):
+    """Confirm exactly one Wanted item through the durable search ledger."""
+    if not preview_token or not fingerprint or not session_id:
+        return {"success": False, "error": "a current Wanted issue preview is required", "status_code": 400}
+
+    from comicarr.app.search.bulk import SearchMissingConfirmationError, SearchMissingStalePreview, confirm_preview
+
+    selection, preview = _wanted_issue_selection(issue_id)
+    if not preview["success"]:
+        return preview
+    try:
+        result = confirm_preview(
+            db.get_engine(),
+            series_id=preview["comicId"],
+            actor=audit_identity,
+            session_id=session_id,
+            preview_token=preview_token,
+            supplied_fingerprint=fingerprint,
+            current_selection=selection,
+            trigger="issue_wanted",
+            scope_type="issue",
+            scope_id=issue_id,
+        )
+    except SearchMissingStalePreview as e:
+        return {"success": False, "status": "stale_preview", "error": str(e), "status_code": 409}
+    except SearchMissingConfirmationError as e:
+        return {"success": False, "status": "invalid_preview", "error": str(e), "status_code": 409}
+    return {
+        "success": True,
+        "status": "accepted" if not result["dispatch_error"] else "pending_dispatch",
+        "accepted": result["accepted"],
+        "run_id": result["run_id"],
+        "idempotent": result["idempotent"],
+        "message": "Queued one Wanted issue for search",
+    }
+
+
 def _search_missing_preview_state(ctx, comic_id):
     """Build the current public preview and private CAS selection once."""
     detail = get_comic_detail(ctx, comic_id)

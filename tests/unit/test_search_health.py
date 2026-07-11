@@ -113,6 +113,34 @@ def test_health_explains_configured_but_unattempted_torznab_without_secrets(tmp_
     assert "top-secret-key" not in str(torrent)
 
 
+def test_health_tolerates_malformed_provider_and_history_timestamps(tmp_path):
+    routes = health.build_route_readiness(
+        _config(tmp_path),
+        provider_stats=[
+            {
+                "provider": "DDL(GetComics)",
+                "type": "ddl",
+                "active": False,
+                "lastrun": "not-a-timestamp",
+                "hits": 0,
+            }
+        ],
+        route_history={
+            "ddl": {
+                "prev_run_timestamp": "also-not-a-timestamp",
+                "last_failure_timestamp": "invalid-failure-time",
+                "last_error": "token=secret provider error",
+            }
+        },
+    )
+
+    ddl = routes["ddl"]
+    assert ddl["last_attempt"] is None
+    assert ddl["last_success"] is None
+    assert ddl["last_failure"] is None
+    assert "secret" not in str(ddl)
+
+
 def test_disabled_torrent_handoff_is_not_reported_as_executable(tmp_path):
     routes = health.build_route_readiness(
         _config(tmp_path, ENABLE_TORRENTS=False),

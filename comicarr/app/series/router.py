@@ -256,6 +256,44 @@ def unqueue_issue(
     return series_service.unqueue_issue(ctx, issue_id, audit_identity=username)
 
 
+@router.get("/series/issues/{issue_id}/search-preview", dependencies=[Depends(require_session)])
+def preview_wanted_issue_search(
+    issue_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+):
+    result = series_service.preview_wanted_issue(
+        issue_id,
+        actor=username,
+        session_id=_session_identity(request, username),
+    )
+    if result.get("success") is False:
+        return JSONResponse(status_code=int(result.get("status_code") or 400), content=result)
+    return result
+
+
+@router.post("/series/issues/{issue_id}/search", dependencies=[Depends(require_session)])
+async def search_one_wanted_issue(
+    issue_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = series_service.search_wanted_issue(
+        issue_id,
+        username,
+        preview_token=(body or {}).get("preview_token"),
+        fingerprint=(body or {}).get("fingerprint"),
+        session_id=_session_identity(request, username),
+    )
+    if result.get("success") is False:
+        return JSONResponse(status_code=int(result.get("status_code") or 400), content=result)
+    return result
+
+
 @router.get("/wanted", dependencies=[Depends(require_session)])
 def get_wanted(
     limit: int = Query(None),

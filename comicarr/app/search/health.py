@@ -10,6 +10,7 @@
 """Sanitized, restart-durable acquisition health projections."""
 
 import datetime
+import math
 import os
 import re
 import time
@@ -27,6 +28,15 @@ _ROUTES = ("ddl", "nzb", "torrent")
 
 def _truthy(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on", "running"}
+
+
+def _timestamp(value):
+    """Return a finite timestamp or ``None`` for legacy/malformed values."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    return timestamp if math.isfinite(timestamp) and timestamp > 0 else None
 
 
 def _sanitize(value, fallback=None):
@@ -231,10 +241,7 @@ def build_route_readiness(
         diagnostics = []
         for candidate in planned_by_route[route]:
             stat = stats_by_name.get(candidate.name.casefold()) or {}
-            try:
-                last_attempt = float(stat.get("lastrun") or 0) or None
-            except (TypeError, ValueError):
-                last_attempt = None
+            last_attempt = _timestamp(stat.get("lastrun"))
             diagnostics.append(
                 {
                     "name": candidate.name,
@@ -257,11 +264,8 @@ def build_route_readiness(
         all_blocked = bool(route_names) and len({name.lower() for name in route_blocks}) >= len(route_names)
         maintenance_reason = maintenance.get("reason") if maintenance.get("blocked") else None
         history = route_history.get(route, {})
-        try:
-            blocked_until = float(history.get("next_run_timestamp") or 0)
-        except (TypeError, ValueError):
-            blocked_until = 0
-        history_blocked = blocked_until > now and not route_blocks
+        blocked_until = _timestamp(history.get("next_run_timestamp"))
+        history_blocked = bool(blocked_until and blocked_until > now and not route_blocks)
         all_blocked = all_blocked or history_blocked
         ready = bool(enabled and downstream_ready and restart_safe and not all_blocked and not maintenance_reason)
         if not enabled:
@@ -278,14 +282,14 @@ def build_route_readiness(
             reason = "providers_temporarily_blocked"
         else:
             reason = "ready"
-        attempts = [float(row["lastrun"]) for row in route_stats if row.get("lastrun") is not None]
+        attempts = [timestamp for row in route_stats if (timestamp := _timestamp(row.get("lastrun"))) is not None]
         # A completed provider attempt is an operational route success even
         # when it returns zero matches. Acquisition matching is reported
         # separately by the run ledger's no_match/succeeded counters.
         latest_attempt = max(attempts) if attempts else None
-        last_failure = history.get("last_failure_timestamp")
-        last_success = history.get("last_success_timestamp")
-        if latest_attempt is not None and (last_failure is None or latest_attempt >= float(last_failure)):
+        last_failure = _timestamp(history.get("last_failure_timestamp"))
+        last_success = _timestamp(history.get("last_success_timestamp"))
+        if latest_attempt is not None and (last_failure is None or latest_attempt >= last_failure):
             last_success = latest_attempt
         running = any(_truthy(row.get("active")) for row in route_stats)
         routes[route] = {
@@ -294,7 +298,7 @@ def build_route_readiness(
             "active": running,
             "running": running,
             "blocked": bool(route_blocks) or history_blocked or bool(maintenance_reason),
-            "blocked_until": blocked_until or None,
+            "blocked_until": blocked_until,
             "blocked_provider_count": len(route_blocks),
             "downstream": client,
             "client_ready": client_ready,
@@ -303,7 +307,9 @@ def build_route_readiness(
             "restart_safe": restart_safe,
             "ready": ready,
             "reason": _sanitize(reason),
-            "last_attempt": latest_attempt if latest_attempt is not None else history.get("prev_run_timestamp"),
+            "last_attempt": latest_attempt
+            if latest_attempt is not None
+            else _timestamp(history.get("prev_run_timestamp")),
             "last_success": last_success,
             "last_failure": last_failure,
             "last_error": _sanitize(history.get("last_error")),
