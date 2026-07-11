@@ -97,6 +97,43 @@ describe("ImportPage", () => {
     );
   });
 
+  it("shows when an existing comic series was reconciled from disk", async () => {
+    server.use(
+      http.get("/api/import", () =>
+        HttpResponse.json({
+          imports: [],
+          pagination: { total: 0, limit: 50, offset: 0, has_more: false },
+          summary: { group_count: 0, file_count: 0 },
+        }),
+      ),
+      http.get("/api/import/comic/progress", () =>
+        HttpResponse.json({
+          status: "completed",
+          progress: { series_reconciled: 1 },
+          scan_id: "scan-1",
+          results: [
+            {
+              series_name: "Absolute Batman (2024)",
+              file_count: 22,
+              matched: false,
+              already_in_library: true,
+              reconciled: true,
+              existing_comic_id: "160294",
+              match: null,
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(<ImportPage />);
+
+    expect(await screen.findByText(/No new series found in directory/)).toBeTruthy();
+    expect(
+      screen.getByText("Reconciled 1 existing comic series."),
+    ).toBeTruthy();
+  });
+
   it("clears imported manga results and keeps a durable success summary", async () => {
     let scanStarted = false;
     let confirmed = false;

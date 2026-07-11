@@ -5,7 +5,6 @@ Tests cover directory walking, series matching against ComicVine,
 scan-then-select flow, and concurrent scan prevention.
 """
 
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -42,6 +41,7 @@ def comicsync():
         "processed_files": 0,
         "series_found": 0,
         "series_matched": 0,
+        "series_reconciled": 0,
         "current_series": None,
         "errors": [],
     }
@@ -156,6 +156,164 @@ class TestNameSimilarity:
 class TestComicScan:
     """Tests for the main comicScan function."""
 
+    def test_reconciles_existing_series_matched_by_folder_year(self, comicsync):
+        existing_series = {
+            "absolute batman": [
+                {
+                    "ComicID": "45678",
+                    "ComicName": "Absolute Batman",
+                    "ComicYear": "2024",
+                    "ComicLocation": "/old-library/Absolute Batman",
+                }
+            ]
+        }
+
+        with (
+            patch.object(
+                comicsync,
+                "_series_directory",
+                return_value="/comics/Absolute Batman (2024)",
+            ),
+            patch.object(comicsync.db, "upsert") as upsert,
+            patch.object(comicsync.updater, "forceRescan") as force_rescan,
+            patch("comicarr.mb.findComic") as find_comic,
+        ):
+            result = comicsync._match_series(
+                "Absolute Batman (2024)",
+                ["/comics/Absolute Batman (2024)/Absolute Batman 1.cbz"],
+                existing_series,
+            )
+
+        assert result["already_in_library"] is True
+        assert result["reconciled"] is True
+        assert result["existing_comic_id"] == "45678"
+        upsert.assert_called_once_with(
+            "comics",
+            {"ComicLocation": "/comics/Absolute Batman (2024)"},
+            {"ComicID": "45678"},
+        )
+        force_rescan.assert_called_once_with("45678")
+        find_comic.assert_not_called()
+
+    def test_scan_reports_reconciled_existing_series(self, comicsync):
+        existing_series = {
+            "absolute batman": [
+                {
+                    "ComicID": "45678",
+                    "ComicName": "Absolute Batman",
+                    "ComicYear": "2024",
+                    "ComicLocation": "/old-library/Absolute Batman",
+                }
+            ]
+        }
+
+        with (
+            patch("os.path.isdir", return_value=True),
+            patch.object(
+                comicsync,
+                "_collect_series_files",
+                return_value={"Absolute Batman (2024)": ["/comics/Absolute Batman (2024)/Absolute Batman 1.cbz"]},
+            ),
+            patch.object(comicsync, "_load_existing_series", return_value=existing_series),
+            patch.object(
+                comicsync,
+                "_series_directory",
+                return_value="/comics/Absolute Batman (2024)",
+            ),
+            patch.object(comicsync.db, "upsert"),
+            patch.object(comicsync.updater, "forceRescan"),
+        ):
+            result = comicsync.comicScan("/comics")
+
+        assert result["series_reconciled"] == 1
+        assert comicsync.COMIC_SCAN_PROGRESS["series_reconciled"] == 1
+        assert result["scan_results"][0]["reconciled"] is True
+
+    def test_existing_reconciliation_skips_unchanged_location(self, comicsync):
+        existing_series = {
+            "absolute batman": [
+                {
+                    "ComicID": "45678",
+                    "ComicName": "Absolute Batman",
+                    "ComicYear": "2024",
+                    "ComicLocation": "/comics/Absolute Batman (2024)/",
+                }
+            ]
+        }
+
+        with (
+            patch.object(
+                comicsync,
+                "_series_directory",
+                return_value="/comics/Absolute Batman (2024)",
+            ),
+            patch.object(comicsync.db, "upsert") as upsert,
+            patch.object(comicsync.updater, "forceRescan") as force_rescan,
+        ):
+            result = comicsync._match_series(
+                "Absolute Batman (2024)",
+                ["/comics/Absolute Batman (2024)/Absolute Batman 1.cbz"],
+                existing_series,
+            )
+
+        assert result["reconciled"] is True
+        upsert.assert_not_called()
+        force_rescan.assert_called_once_with("45678")
+
+    def test_existing_reconciliation_restores_location_after_rescan_failure(self, comicsync):
+        existing = {
+            "ComicID": "45678",
+            "ComicName": "Absolute Batman",
+            "ComicYear": "2024",
+            "ComicLocation": "/old-library/Absolute Batman",
+        }
+
+        with (
+            patch.object(
+                comicsync,
+                "_series_directory",
+                return_value="/comics/Absolute Batman (2024)",
+            ),
+            patch.object(comicsync.db, "upsert") as upsert,
+            patch.object(
+                comicsync.updater,
+                "forceRescan",
+                side_effect=RuntimeError("rescan failed"),
+            ),
+            pytest.raises(RuntimeError, match="rescan failed"),
+        ):
+            comicsync._reconcile_existing_series(
+                existing,
+                ["/comics/Absolute Batman (2024)/Absolute Batman 1.cbz"],
+            )
+
+        assert upsert.call_args_list == [
+            (("comics", {"ComicLocation": "/comics/Absolute Batman (2024)"}, {"ComicID": "45678"}), {}),
+            (("comics", {"ComicLocation": "/old-library/Absolute Batman"}, {"ComicID": "45678"}), {}),
+        ]
+
+    def test_does_not_reconcile_same_title_with_different_year(self, comicsync):
+        existing_series = {
+            "absolute batman": [
+                {
+                    "ComicID": "45678",
+                    "ComicName": "Absolute Batman",
+                    "ComicYear": "2025",
+                    "ComicLocation": "/comics/Absolute Batman (2025)",
+                }
+            ]
+        }
+
+        with patch("comicarr.mb.findComic", return_value={"results": []}) as find_comic:
+            result = comicsync._match_series(
+                "Absolute Batman (2024)",
+                ["/comics/Absolute Batman (2024)/Absolute Batman 1.cbz"],
+                existing_series,
+            )
+
+        assert result["already_in_library"] is False
+        find_comic.assert_called_once()
+
     def test_happy_path_matches_series(self, comicsync, _mock_globals):
         mock_engine = MagicMock()
         mock_conn = MagicMock()
@@ -181,9 +339,13 @@ class TestComicScan:
 
         with (
             patch("os.path.isdir", return_value=True),
-            patch.object(comicsync, "_collect_series_files", return_value={
-                "Batman": ["/comics/Batman/001.cbz", "/comics/Batman/002.cbz"],
-            }),
+            patch.object(
+                comicsync,
+                "_collect_series_files",
+                return_value={
+                    "Batman": ["/comics/Batman/001.cbz", "/comics/Batman/002.cbz"],
+                },
+            ),
             patch("comicarr.mb.findComic", return_value=cv_results),
         ):
             result = comicsync.comicScan("/comics")
@@ -216,9 +378,13 @@ class TestComicScan:
 
         with (
             patch("os.path.isdir", return_value=True),
-            patch.object(comicsync, "_collect_series_files", return_value={
-                "Batman": ["/comics/Batman/001.cbz"],
-            }),
+            patch.object(
+                comicsync,
+                "_collect_series_files",
+                return_value={
+                    "Batman": ["/comics/Batman/001.cbz"],
+                },
+            ),
             patch("comicarr.mb.findComic", side_effect=Exception("API unreachable")),
         ):
             result = comicsync.comicScan("/comics")

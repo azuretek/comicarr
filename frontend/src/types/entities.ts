@@ -486,6 +486,7 @@ export interface ScanResult {
   file_count: number;
   matched: boolean;
   already_in_library?: boolean;
+  reconciled?: boolean;
   existing_comic_id?: string;
   match?: ScanResultMatch | null;
   error?: string;
@@ -498,6 +499,7 @@ export interface ScanProgress {
     processed_files: number;
     series_found: number;
     series_matched: number;
+    series_reconciled?: number;
     current_series: string | null;
     errors: string[];
   };

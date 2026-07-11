@@ -24,6 +24,7 @@ export default function LibraryScanResults({
   const matchedResults = results.filter(
     (r) => r.matched && r.match?.comicid && !r.already_in_library,
   );
+  const reconciledResults = results.filter((r) => r.reconciled);
   const [selectedIds, setSelectedIds] = useState<string[]>(
     matchedResults.map((r) => r.match!.comicid),
   );
@@ -57,6 +58,11 @@ export default function LibraryScanResults({
       <div className="rounded-lg border border-border bg-muted/50 p-6 text-center text-muted-foreground">
         No new series found in directory. All series are already in your
         library.
+        {reconciledResults.length > 0 && (
+          <span className="block mt-1 text-foreground">
+            Reconciled {reconciledResults.length} existing {type} series.
+          </span>
+        )}
       </div>
     );
   }
@@ -67,6 +73,11 @@ export default function LibraryScanResults({
         <div className="text-sm text-muted-foreground">
           {matchedResults.length} matched of {importableResults.length} series
           found
+          {reconciledResults.length > 0 && (
+            <span className="ml-2">
+              {reconciledResults.length} existing {type} series reconciled
+            </span>
+          )}
           {selectedIds.length > 0 && (
             <span className="ml-2 font-medium text-foreground">
               ({selectedIds.length} selected)
