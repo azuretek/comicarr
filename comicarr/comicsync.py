@@ -29,7 +29,7 @@ import re
 import threading
 import time
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 import comicarr
 from comicarr import db, logger, updater
@@ -222,16 +222,16 @@ def _load_existing_series():
                 comics.c.ComicID,
                 comics.c.ComicName,
                 comics.c.ComicSortName,
-                comics.c.DynamicName,
+                comics.c.DynamicComicName,
                 comics.c.ComicYear,
                 comics.c.ComicLocation,
-            ).where(comics.c.ContentType != "manga")
+            ).where(or_(comics.c.ContentType.is_(None), comics.c.ContentType != "manga"))
             for row in conn.execute(stmt):
                 row_dict = dict(row._mapping)
                 for name in (
                     row_dict.get("ComicName", ""),
                     row_dict.get("ComicSortName", ""),
-                    row_dict.get("DynamicName", ""),
+                    row_dict.get("DynamicComicName", ""),
                 ):
                     normalized_name = normalize_title(name) if name else ""
                     if not normalized_name:
