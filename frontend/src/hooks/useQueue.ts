@@ -6,7 +6,12 @@ import {
   type UseMutationResult,
 } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
-import type { WantedIssue, UpcomingIssue, PaginationMeta } from "@/types";
+import type {
+  ForceSearchResult,
+  WantedIssue,
+  UpcomingIssue,
+  PaginationMeta,
+} from "@/types";
 
 interface WantedResponse {
   issues: WantedIssue[];
@@ -44,10 +49,15 @@ export function useWanted(
 }
 
 // Mutation Hooks
-export function useForceSearch(): UseMutationResult<unknown, Error, void> {
+export function useForceSearch(): UseMutationResult<
+  ForceSearchResult,
+  Error,
+  void
+> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => apiRequest("POST", "/api/search/force"),
+    mutationFn: () =>
+      apiRequest<ForceSearchResult>("POST", "/api/search/force"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wanted"] });
       queryClient.invalidateQueries({ queryKey: ["upcoming"] });

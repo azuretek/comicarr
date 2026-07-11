@@ -10,6 +10,7 @@ import { DownloadClientsTab } from "@/components/settings/DownloadClientsTab";
 import { AiTab } from "@/components/settings/AiTab";
 import { NotificationsTab } from "@/components/settings/NotificationsTab";
 import { MediaManagementTab } from "@/components/settings/MediaManagementTab";
+import { AcquisitionHealthTab } from "@/components/settings/AcquisitionHealthTab";
 import { SaveButton } from "@/components/settings/SaveButton";
 import PageHeader from "@/components/layout/PageHeader";
 import { prepareConfigSaveData } from "@/lib/configSave";
@@ -19,6 +20,7 @@ type SectionId =
   | "interface"
   | "api"
   | "search"
+  | "acquisition"
   | "media"
   | "notifications"
   | "clients"
@@ -30,6 +32,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "interface", label: "Interface" },
   { id: "api", label: "API & providers" },
   { id: "search", label: "Search" },
+  { id: "acquisition", label: "Acquisition" },
   { id: "media", label: "Media" },
   { id: "notifications", label: "Notifications" },
   { id: "clients", label: "Download clients" },
@@ -236,6 +239,7 @@ export default function SettingsPage() {
             {section === "interface" && <InterfaceTab {...tabProps} />}
             {section === "api" && <ApiTab {...apiTabProps} />}
             {section === "search" && <SearchTab {...tabProps} />}
+            {section === "acquisition" && <AcquisitionHealthTab />}
             {section === "media" && <MediaManagementTab {...tabProps} />}
             {section === "notifications" && <NotificationsTab {...tabProps} />}
             {section === "clients" && <DownloadClientsTab config={formData} />}

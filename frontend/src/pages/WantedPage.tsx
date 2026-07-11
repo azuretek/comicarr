@@ -55,11 +55,61 @@ export default function WantedPage() {
   const handleForceSearch = async () => {
     if (window.confirm("Manual search may take several minutes. Continue?")) {
       try {
-        await forceSearch.mutateAsync();
-        addToast({
-          type: "info",
-          message: "Search started for all wanted issues",
-        });
+        const result = await forceSearch.mutateAsync();
+        const withRunReference = (message: string) =>
+          result.run_id
+            ? `${message}${/[.!?]$/.test(message) ? "" : "."} Run ${result.run_id}.`
+            : message;
+
+        if (result.success && result.status === "no_match") {
+          addToast({
+            type: "info",
+            title: "Nothing to search",
+            message: withRunReference(
+              result.message ||
+                "No eligible wanted issues are ready to search.",
+            ),
+          });
+        } else if (
+          result.success &&
+          (result.status === "accepted" || result.status === undefined)
+        ) {
+          const accepted = result.accepted;
+          const acceptedMessage =
+            typeof accepted === "number"
+              ? `Search accepted — ${accepted} wanted issue${accepted === 1 ? "" : "s"} queued.`
+              : "Search accepted — wanted issues will be processed.";
+          addToast({
+            type: "info",
+            title: "Search accepted",
+            message: withRunReference(acceptedMessage),
+          });
+        } else if (result.success && result.status === "partial") {
+          addToast({
+            type: "info",
+            title: "Search partially accepted",
+            message: withRunReference(
+              result.message ||
+                "Some Wanted issues were queued, but others need attention.",
+            ),
+          });
+        } else if (result.status === "blocked") {
+          addToast({
+            type: "info",
+            title: "Search blocked",
+            message:
+              result.message ||
+              result.error ||
+              "Search is blocked until a complete acquisition route is ready.",
+          });
+        } else {
+          addToast({
+            type: "error",
+            title: "Search failed",
+            message:
+              result.message || result.error || "Search failed to start.",
+          });
+        }
       } catch (err) {
         addToast({
           type: "error",
