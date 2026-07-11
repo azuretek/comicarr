@@ -233,13 +233,13 @@ def _source_update_statement(item):
     return statement.values(AcquisitionIntent="wanted", Status="Wanted")
 
 
-def _create_run_values(run_id, series_id, now):
+def _create_run_values(run_id, series_id, now, *, trigger="search_all_missing", scope_type="series", scope_id=None):
     return {
         "run_id": run_id,
         "command_kind": "search",
-        "trigger": "search_all_missing",
-        "scope_type": "series",
-        "scope_id": str(series_id),
+        "trigger": trigger,
+        "scope_type": scope_type,
+        "scope_id": str(scope_id if scope_id is not None else series_id),
         "dispatch_state": DispatchState.PENDING.value,
         "completion_state": RunState.PENDING.value,
         "accepted_count": 0,
@@ -284,6 +284,9 @@ def confirm_preview(
     work_queue=None,
     maintenance=None,
     now=None,
+    trigger="search_all_missing",
+    scope_type="series",
+    scope_id=None,
 ):
     """Atomically create one source-intent + durable-run transaction.
 
@@ -359,7 +362,18 @@ def confirm_preview(
             else:
                 raise SearchMissingConfirmationError("bulk search preview was consumed concurrently")
         else:
-            conn.execute(insert(acquisition_runs).values(**_create_run_values(run_id, series_id, when)))
+            conn.execute(
+                insert(acquisition_runs).values(
+                    **_create_run_values(
+                        run_id,
+                        series_id,
+                        when,
+                        trigger=trigger,
+                        scope_type=scope_type,
+                        scope_id=scope_id,
+                    )
+                )
+            )
             for item, command in zip(selection, commands, strict=True):
                 if conn.execute(_source_update_statement(item)).rowcount != 1:
                     raise SearchMissingStalePreview("series acquisition state changed during confirmation")

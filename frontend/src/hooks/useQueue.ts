@@ -11,11 +11,17 @@ import type {
   WantedIssue,
   UpcomingIssue,
   PaginationMeta,
+  SearchMissingResult,
 } from "@/types";
 
 interface WantedResponse {
   issues: WantedIssue[];
   pagination: PaginationMeta;
+}
+
+interface WantedSearchPreview {
+  preview_token: string;
+  fingerprint: string;
 }
 
 // Query Hooks
@@ -58,6 +64,34 @@ export function useForceSearch(): UseMutationResult<
   return useMutation({
     mutationFn: () =>
       apiRequest<ForceSearchResult>("POST", "/api/search/force"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["wanted"] });
+      queryClient.invalidateQueries({ queryKey: ["upcoming"] });
+    },
+  });
+}
+
+export function useSearchWantedIssue(): UseMutationResult<
+  SearchMissingResult,
+  Error,
+  string
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (issueId) => {
+      const preview = await apiRequest<WantedSearchPreview>(
+        "GET",
+        `/api/series/issues/${issueId}/search-preview`,
+      );
+      return apiRequest<SearchMissingResult>(
+        "POST",
+        `/api/series/issues/${issueId}/search`,
+        {
+          preview_token: preview.preview_token,
+          fingerprint: preview.fingerprint,
+        },
+      );
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wanted"] });
       queryClient.invalidateQueries({ queryKey: ["upcoming"] });

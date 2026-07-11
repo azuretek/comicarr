@@ -1,4 +1,3 @@
-import { lazy, Suspense } from "react";
 import {
   BrowserRouter,
   Routes,
@@ -15,21 +14,46 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/layout/Layout";
 import { ToastProvider } from "@/components/ui/toast";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import { RouteLoader } from "@/components/RouteLoader";
 import { useServerEvents } from "@/hooks/useServerEvents";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
-const LoginPage = lazy(() => import("@/pages/LoginPage"));
-const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
-const SeriesListPage = lazy(() => import("@/pages/SeriesListPage"));
-const SeriesDetailPage = lazy(() => import("@/pages/SeriesDetailPage"));
-const SearchPage = lazy(() => import("@/pages/SearchPage"));
-const ReleasesPage = lazy(() => import("@/pages/ReleasesPage"));
-const WantedPage = lazy(() => import("@/pages/WantedPage"));
-const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
-const StoryArcsPage = lazy(() => import("@/pages/StoryArcsPage"));
-const StoryArcDetailPage = lazy(() => import("@/pages/StoryArcDetailPage"));
-const ImportPage = lazy(() => import("@/pages/ImportPage"));
-const ActivityPage = lazy(() => import("@/pages/ActivityPage"));
+const LoginPage = () => (
+  <RouteLoader load={() => import("@/pages/LoginPage")} />
+);
+const DashboardPage = () => (
+  <RouteLoader load={() => import("@/pages/DashboardPage")} />
+);
+const SeriesListPage = () => (
+  <RouteLoader load={() => import("@/pages/SeriesListPage")} />
+);
+const SeriesDetailPage = () => (
+  <RouteLoader load={() => import("@/pages/SeriesDetailPage")} />
+);
+const SearchPage = () => (
+  <RouteLoader load={() => import("@/pages/SearchPage")} />
+);
+const ReleasesPage = () => (
+  <RouteLoader load={() => import("@/pages/ReleasesPage")} />
+);
+const WantedPage = () => (
+  <RouteLoader load={() => import("@/pages/WantedPage")} />
+);
+const SettingsPage = () => (
+  <RouteLoader load={() => import("@/pages/SettingsPage")} />
+);
+const StoryArcsPage = () => (
+  <RouteLoader load={() => import("@/pages/StoryArcsPage")} />
+);
+const StoryArcDetailPage = () => (
+  <RouteLoader load={() => import("@/pages/StoryArcDetailPage")} />
+);
+const ImportPage = () => (
+  <RouteLoader load={() => import("@/pages/ImportPage")} />
+);
+const ActivityPage = () => (
+  <RouteLoader load={() => import("@/pages/ActivityPage")} />
+);
 
 // Create a client
 const queryClient = new QueryClient({
@@ -89,60 +113,51 @@ function AppContent() {
   return (
     <BrowserRouter>
       <NuqsAdapter>
-        <Suspense fallback={null}>
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route
-              path="/*"
-              element={
-                <ProtectedRoute>
-                  <Layout>
-                    <Suspense fallback={null}>
-                      <Routes>
-                        <Route path="/" element={<DashboardPage />} />
-                        <Route path="/library" element={<SeriesListPage />} />
-                        <Route
-                          path="/library/:comicId"
-                          element={<SeriesDetailPage />}
-                        />
-                        <Route
-                          path="/series/:comicId"
-                          element={<SeriesRedirect />}
-                        />
-                        <Route
-                          path="/series"
-                          element={<SeriesListRedirect />}
-                        />
-                        <Route path="/search" element={<SearchPage />} />
-                        <Route path="/releases" element={<ReleasesPage />} />
-                        <Route
-                          path="/upcoming"
-                          element={
-                            <Navigate to="/releases?view=mine" replace />
-                          }
-                        />
-                        <Route
-                          path="/weekly"
-                          element={<Navigate to="/releases?view=all" replace />}
-                        />
-                        <Route path="/wanted" element={<WantedPage />} />
-                        <Route path="/story-arcs" element={<StoryArcsPage />} />
-                        <Route
-                          path="/story-arcs/:storyArcId"
-                          element={<StoryArcDetailPage />}
-                        />
-                        <Route path="/activity" element={<ActivityPage />} />
-                        <Route path="/import" element={<ImportPage />} />
-                        <Route path="/settings" element={<SettingsPage />} />
-                        <Route path="*" element={<Navigate to="/" replace />} />
-                      </Routes>
-                    </Suspense>
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-          </Routes>
-        </Suspense>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/*"
+            element={
+              <ProtectedRoute>
+                <Layout>
+                  <Routes>
+                    <Route path="/" element={<DashboardPage />} />
+                    <Route path="/library" element={<SeriesListPage />} />
+                    <Route
+                      path="/library/:comicId"
+                      element={<SeriesDetailPage />}
+                    />
+                    <Route
+                      path="/series/:comicId"
+                      element={<SeriesRedirect />}
+                    />
+                    <Route path="/series" element={<SeriesListRedirect />} />
+                    <Route path="/search" element={<SearchPage />} />
+                    <Route path="/releases" element={<ReleasesPage />} />
+                    <Route
+                      path="/upcoming"
+                      element={<Navigate to="/releases?view=mine" replace />}
+                    />
+                    <Route
+                      path="/weekly"
+                      element={<Navigate to="/releases?view=all" replace />}
+                    />
+                    <Route path="/wanted" element={<WantedPage />} />
+                    <Route path="/story-arcs" element={<StoryArcsPage />} />
+                    <Route
+                      path="/story-arcs/:storyArcId"
+                      element={<StoryArcDetailPage />}
+                    />
+                    <Route path="/activity" element={<ActivityPage />} />
+                    <Route path="/import" element={<ImportPage />} />
+                    <Route path="/settings" element={<SettingsPage />} />
+                    <Route path="*" element={<Navigate to="/" replace />} />
+                  </Routes>
+                </Layout>
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
       </NuqsAdapter>
     </BrowserRouter>
   );

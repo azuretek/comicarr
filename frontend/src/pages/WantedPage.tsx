@@ -4,6 +4,7 @@ import {
   useWanted,
   useForceSearch,
   useBulkUnqueueIssues,
+  useSearchWantedIssue,
 } from "@/hooks/useQueue";
 import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -25,6 +26,7 @@ export default function WantedPage() {
   const pagination = data?.pagination;
 
   const forceSearch = useForceSearch();
+  const searchWantedIssue = useSearchWantedIssue();
   const bulkUnqueue = useBulkUnqueueIssues();
   const { addToast } = useToast();
 
@@ -116,6 +118,27 @@ export default function WantedPage() {
           message: `Failed to start search: ${err instanceof Error ? err.message : "Unknown error"}`,
         });
       }
+    }
+  };
+
+  const handleSearchSelected = async () => {
+    const issueId = selectedIds[0];
+    if (!issueId || !window.confirm("Search this one Wanted issue?")) return;
+    try {
+      const result = await searchWantedIssue.mutateAsync(issueId);
+      addToast({
+        type: result.success ? "info" : "error",
+        title: result.success ? "Search accepted" : "Search failed",
+        message:
+          result.message || result.error || "Unable to start this search.",
+      });
+      if (result.success) setSelectedIds([]);
+    } catch (err) {
+      addToast({
+        type: "error",
+        message:
+          err instanceof Error ? err.message : "Unable to start this search.",
+      });
     }
   };
 
@@ -217,7 +240,8 @@ export default function WantedPage() {
         selectedCount={selectedIds.length}
         onSkip={handleBulkUnqueue}
         onClear={() => setSelectedIds([])}
-        isLoading={bulkUnqueue.isPending}
+        onSearch={() => void handleSearchSelected()}
+        isLoading={bulkUnqueue.isPending || searchWantedIssue.isPending}
       />
     </div>
   );
