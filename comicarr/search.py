@@ -1760,6 +1760,44 @@ def verification(verified_matches, is_info):
     return is_info  # foundc
 
 
+def _search_source_for_issue(issueid, entity_type=None):
+    """Resolve an explicit durable entity identity without table-order ambiguity."""
+
+    normalized_type = str(entity_type or "").strip().lower()
+    if normalized_type == "annual":
+        return (
+            db.select_one(
+                select(annuals).where(
+                    annuals.c.IssueID == issueid,
+                    or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+                )
+            ),
+            "want_ann",
+            False,
+        )
+    if normalized_type == "issue":
+        return db.select_one(select(issues).where(issues.c.IssueID == issueid)), "want", False
+
+    result = db.select_one(select(issues).where(issues.c.IssueID == issueid))
+    if result is not None:
+        return result, "want", False
+
+    result = db.select_one(
+        select(annuals).where(
+            annuals.c.IssueID == issueid,
+            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+        )
+    )
+    if result is not None:
+        return result, "want_ann", False
+
+    result = db.select_one(select(storyarcs).where(storyarcs.c.IssueArcID == issueid))
+    if result is not None:
+        return result, "story_arc", True
+
+    return db.select_one(select(weekly).where(weekly.c.IssueID == issueid)), "pullwant", True
+
+
 def searchforissue(
     issueid=None,
     new=False,
@@ -1767,6 +1805,7 @@ def searchforissue(
     manual=False,
     acquisition_run_id=None,
     acquisition_trigger=None,
+    entity_type=None,
 ):
     """Queue or run searches while preserving an optional outer run identity.
 
@@ -2582,28 +2621,11 @@ def searchforissue(
         else:
             try:
                 comicarr.SEARCHLOCK.acquire()
-                result = db.select_one(select(issues).where(issues.c.IssueID == issueid))
-                smode = "want"
-                oneoff = False
+                result, smode, oneoff = _search_source_for_issue(issueid, entity_type=entity_type)
                 if result is None:
-                    result = db.select_one(
-                        select(annuals).where((annuals.c.IssueID == issueid) & (annuals.c.Deleted != 1))
-                    )
-                    smode = "want_ann"
-                    if result is None:
-                        result = db.select_one(select(storyarcs).where(storyarcs.c.IssueArcID == issueid))
-                        smode = "story_arc"
-                        oneoff = True
-                        if result is None:
-                            result = db.select_one(select(weekly).where(weekly.c.IssueID == issueid))
-                            smode = "pullwant"
-                            oneoff = True
-                            if result is None:
-                                logger.fdebug(
-                                    "Unable to locate IssueID - you probably should delete/refresh the series."
-                                )
-                                comicarr.SEARCHLOCK.release()
-                                return
+                    logger.fdebug("Unable to locate IssueID - you probably should delete/refresh the series.")
+                    comicarr.SEARCHLOCK.release()
+                    return
 
                 # if it's not manually initiated, make sure it's not already downloaded/snatched.
                 if not manual:
@@ -2616,7 +2638,12 @@ def searchforissue(
                         result["ReleaseDate"],
                         result["IssueDate"],
                         result["DigitalDate"],
-                        {"ComicName": result["ComicName"], "Issue_Number": issnumb, "ComicID": result["ComicID"]},
+                        {
+                            "ComicName": result["ComicName"],
+                            "Issue_Number": issnumb,
+                            "ComicID": result["ComicID"],
+                            "entity_type": "annual" if smode == "want_ann" else "issue",
+                        },
                     )
                     if checkit["status"] is False:
                         logger.fdebug(
@@ -4586,7 +4613,10 @@ def searchforissue_checker(issueid, storedate, issuedate, digitaldate, info):
         from comicarr.app.search.commands import evaluate_search_candidate
         from comicarr.app.series import queries as series_queries
 
-        candidate = info.get("candidate") or series_queries.get_search_candidate_state(issueid)
+        candidate = info.get("candidate") or series_queries.get_search_candidate_state(
+            issueid,
+            entity_type=info.get("entity_type"),
+        )
         if candidate is not None:
             return evaluate_search_candidate(
                 candidate,

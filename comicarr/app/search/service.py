@@ -899,7 +899,12 @@ def _process_search_command(command):
         comicid = None  # required for storyarcs to work
         issueid = None  # required for storyarcs to work
 
-    mofo = comicarr.filers.FileHandlers(ComicID=comicid, IssueID=issueid, arcID=arcid)
+    mofo = comicarr.filers.FileHandlers(
+        ComicID=comicid,
+        IssueID=issueid,
+        arcID=arcid,
+        entity_type=command.entity_type,
+    )
     local_check = mofo.walk_the_walk()
 
     if local_check["status"]:
@@ -925,7 +930,11 @@ def _process_search_command(command):
             }
         )
         return {"status": True, "source": "local"}
-    return comicarr.search.searchforissue(command.issueid, manual=command.manual)
+    return comicarr.search.searchforissue(
+        command.issueid,
+        manual=command.manual,
+        entity_type=command.entity_type,
+    )
 
 
 def _search_outcome(result):

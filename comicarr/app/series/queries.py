@@ -124,7 +124,7 @@ def get_comic_for_refresh(comic_id):
     return db.select_one(select(t_comics.c.ComicName, t_comics.c.ComicYear).where(t_comics.c.ComicID == comic_id))
 
 
-def get_search_candidate_state(issue_id):
+def get_search_candidate_state(issue_id, entity_type=None):
     """Return current intent/fulfillment and series state for eligibility."""
     sources = (
         (t_issues, t_issues.c.IssueID, ()),
@@ -135,6 +135,11 @@ def get_search_candidate_state(issue_id):
         ),
         (t_storyarcs, t_storyarcs.c.IssueArcID, ()),
     )
+    normalized_type = str(entity_type or "").strip().lower()
+    if normalized_type == "issue":
+        sources = sources[:1]
+    elif normalized_type == "annual":
+        sources = sources[1:2]
     for table, identity, extra_conditions in sources:
         acquisition_intent = (table.c.AcquisitionIntent if "AcquisitionIntent" in table.c else literal(None)).label(
             "AcquisitionIntent"

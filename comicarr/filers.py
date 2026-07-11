@@ -26,7 +26,7 @@ import pathlib
 import re
 import time
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 import comicarr
 from comicarr import db, filechecker, helpers, logger
@@ -34,7 +34,7 @@ from comicarr.tables import annuals, comics, issues, storyarcs, weekly
 
 
 class FileHandlers(object):
-    def __init__(self, comic=None, issue=None, ComicID=None, IssueID=None, arcID=None):
+    def __init__(self, comic=None, issue=None, ComicID=None, IssueID=None, arcID=None, entity_type=None):
 
         self.weekly = None
         if ComicID is not None:
@@ -55,12 +55,24 @@ class FileHandlers(object):
 
         if IssueID is not None:
             self.issueid = IssueID
-            self.issue = db.select_one(select(issues).where(issues.c.IssueID == IssueID))
+            if entity_type == "annual":
+                self.issue = db.select_one(
+                    select(annuals).where(
+                        annuals.c.IssueID == IssueID,
+                        or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+                    )
+                )
+            else:
+                self.issue = db.select_one(select(issues).where(issues.c.IssueID == IssueID))
+                if not self.issue and entity_type != "issue" and comicarr.CONFIG.ANNUALS_ON:
+                    self.issue = db.select_one(
+                        select(annuals).where(
+                            annuals.c.IssueID == IssueID,
+                            or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1),
+                        )
+                    )
             if not self.issue:
-                if comicarr.CONFIG.ANNUALS_ON:
-                    self.issue = db.select_one(select(annuals).where(annuals.c.IssueID == IssueID))
-                if not self.issue:
-                    self.issue = None
+                self.issue = None
         elif issue is not None:
             self.issue = issue
             self.issueid = None

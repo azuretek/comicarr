@@ -90,7 +90,7 @@ def test_unlocked_command_reaches_provider_search_once(monkeypatch):
 
     service.search_queue(work, maintenance=_OpenMaintenance())
 
-    provider_search.assert_called_once_with("issue-1", manual=False)
+    provider_search.assert_called_once_with("issue-1", manual=False, entity_type="issue")
 
 
 def test_held_lock_requeues_then_processes_one_command(monkeypatch):
@@ -132,7 +132,7 @@ def test_held_lock_requeues_then_processes_one_command(monkeypatch):
 
     assert not worker.is_alive()
     assert claims == 2
-    provider_search.assert_called_once_with("issue-1", manual=False)
+    provider_search.assert_called_once_with("issue-1", manual=False, entity_type="issue")
 
 
 def test_malformed_command_does_not_prevent_following_command(monkeypatch):
@@ -144,7 +144,7 @@ def test_malformed_command_does_not_prevent_following_command(monkeypatch):
 
     service.search_queue(work, maintenance=_OpenMaintenance())
 
-    provider_search.assert_called_once_with("issue-2", manual=False)
+    provider_search.assert_called_once_with("issue-2", manual=False, entity_type="issue")
 
 
 def test_enqueue_persists_obligation_before_queue_handoff(acquisition_ledger):
@@ -204,8 +204,56 @@ def test_annual_command_retains_its_durable_entity_identity(monkeypatch, acquisi
 
     service.search_queue(work, ledger=acquisition_ledger, maintenance=_OpenMaintenance())
 
-    provider_search.assert_called_once_with("annual-1", manual=False)
+    provider_search.assert_called_once_with("annual-1", manual=False, entity_type="annual")
     assert acquisition_ledger.get_item("annual-search-run", "annual", "annual-1") is not None
+
+
+def test_annual_command_preserves_entity_type_through_worker(monkeypatch):
+    provider_search = _configure_worker(monkeypatch)
+    captured = {}
+
+    class AnnualFileCheck:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def walk_the_walk(self):
+            return {"status": False}
+
+    monkeypatch.setattr(comicarr, "filers", SimpleNamespace(FileHandlers=AnnualFileCheck))
+    work = queue.Queue()
+    work.put({**_command("annual-1"), "entity_type": "annual"})
+    work.put("exit")
+
+    service.search_queue(work, maintenance=_OpenMaintenance())
+
+    assert captured["entity_type"] == "annual"
+    provider_search.assert_called_once_with("annual-1", manual=False, entity_type="annual")
+
+
+def test_explicit_annual_candidate_ignores_same_id_issue(acquisition_ledger):
+    with get_engine().begin() as conn:
+        conn.execute(comics.insert().values(ComicID="comic-1", Status="Active"))
+        conn.execute(
+            issues.insert().values(
+                IssueID="shared-id",
+                ComicID="comic-1",
+                Status="Downloaded",
+            )
+        )
+        conn.execute(
+            annuals.insert().values(
+                IssueID="shared-id",
+                ComicID="comic-1",
+                Status="Wanted",
+                AcquisitionIntent="wanted",
+                Deleted=None,
+            )
+        )
+
+    candidate = series_queries.get_search_candidate_state("shared-id", entity_type="annual")
+
+    assert candidate["LegacyStatus"] == "Wanted"
+    assert candidate["AcquisitionIntent"] == "wanted"
 
 
 def test_active_maintenance_blocks_new_queue_handoff_but_keeps_obligation(acquisition_ledger):

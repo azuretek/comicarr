@@ -209,6 +209,36 @@ def test_bulk_search_keeps_same_id_issue_and_annual_as_distinct_obligations(monk
     assert {comicarr.SEARCH_QUEUE.get_nowait()["entity_type"] for _ in range(2)} == {"issue", "annual"}
 
 
+def test_explicit_annual_lookup_uses_null_deleted_row():
+    from comicarr import search as legacy_search
+
+    with db.get_engine().begin() as conn:
+        conn.execute(comics.insert().values(ComicID="annual-series", Status="Active"))
+        conn.execute(
+            issues.insert().values(
+                IssueID="shared-id",
+                ComicID="annual-series",
+                Issue_Number="1",
+                Status="Wanted",
+            )
+        )
+        conn.execute(
+            annuals.insert().values(
+                IssueID="shared-id",
+                ComicID="annual-series",
+                Issue_Number="Annual 1",
+                Status="Wanted",
+                Deleted=None,
+            )
+        )
+
+    result, mode, oneoff = legacy_search._search_source_for_issue("shared-id", entity_type="annual")
+
+    assert result["Issue_Number"] == "Annual 1"
+    assert mode == "want_ann"
+    assert oneoff is False
+
+
 def test_bulk_search_rejects_stale_preview_without_mutating_sources(monkeypatch):
     _seed_series()
     _ready_route(monkeypatch)
