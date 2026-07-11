@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import insert
 
 import comicarr
-from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController, ensure_acquisition_schema
 from comicarr.app.acquisition.models import ItemOutcome
 from comicarr.app.acquisition.runs import RunLedger
 from comicarr.app.search import service
@@ -29,7 +29,7 @@ from comicarr.app.search.commands import (
 )
 from comicarr.app.series import queries as series_queries
 from comicarr.db import get_engine, shutdown_engine
-from comicarr.tables import annuals, comics, metadata
+from comicarr.tables import annuals, comics, issues, metadata
 
 
 @pytest.fixture
@@ -39,6 +39,7 @@ def acquisition_ledger(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     shutdown_engine()
     metadata.create_all(get_engine())
+    assert ensure_acquisition_schema(get_engine()).ready
     ledger = RunLedger(get_engine())
     yield ledger
     shutdown_engine()
@@ -167,6 +168,46 @@ def test_enqueue_persists_obligation_before_queue_handoff(acquisition_ledger):
     assert acquisition_ledger.get_run("search-run")["accepted_count"] == 1
 
 
+def test_fast_worker_terminal_state_does_not_fail_queue_handoff(acquisition_ledger):
+    class TerminalizingQueue(queue.Queue):
+        def put(self, item, *args, **kwargs):
+            if isinstance(item, dict) and item.get("run_id"):
+                assert acquisition_ledger.claim_item(item["run_id"], item["entity_type"], item["issueid"])
+                acquisition_ledger.record_outcome(
+                    item["run_id"], item["entity_type"], item["issueid"], ItemOutcome.SUCCEEDED
+                )
+            super().put(item, *args, **kwargs)
+
+    command = enqueue_search_command(
+        _command(),
+        trigger="test",
+        work_queue=TerminalizingQueue(),
+        ledger=acquisition_ledger,
+        run_id="fast-search-run",
+    )
+
+    item = acquisition_ledger.get_item(command.run_id, "issue", "issue-1")
+    assert item["state"] == ItemOutcome.SUCCEEDED.value
+
+
+def test_annual_command_retains_its_durable_entity_identity(monkeypatch, acquisition_ledger):
+    provider_search = _configure_worker(monkeypatch)
+    work = queue.Queue()
+    enqueue_search_command(
+        {"comicid": "comic-1", "issueid": "annual-1", "annual": True},
+        trigger="test",
+        work_queue=work,
+        ledger=acquisition_ledger,
+        run_id="annual-search-run",
+    )
+    work.put("exit")
+
+    service.search_queue(work, ledger=acquisition_ledger, maintenance=_OpenMaintenance())
+
+    provider_search.assert_called_once_with("annual-1", manual=False)
+    assert acquisition_ledger.get_item("annual-search-run", "annual", "annual-1") is not None
+
+
 def test_active_maintenance_blocks_new_queue_handoff_but_keeps_obligation(acquisition_ledger):
     controller = MaintenanceController(get_engine())
     controller.acquire_fence("owner", "repair-1", reason="repair apply")
@@ -193,6 +234,8 @@ def test_legacy_queue_item_cannot_bypass_active_maintenance(monkeypatch, acquisi
     work = queue.Queue()
     work.put(_command())
     original_put = work.put
+    sleep = MagicMock()
+    monkeypatch.setattr(service.time, "sleep", sleep)
 
     def stop_before_requeued_item(item, *args, **kwargs):
         original_put("exit")
@@ -204,6 +247,37 @@ def test_legacy_queue_item_cannot_bypass_active_maintenance(monkeypatch, acquisi
 
     provider_search.assert_not_called()
     assert work.get_nowait()["issueid"] == "issue-1"
+    sleep.assert_called_once_with(5)
+
+
+def test_durable_maintenance_requeue_uses_attempt_backoff(monkeypatch, acquisition_ledger):
+    provider_search = _configure_worker(monkeypatch)
+    controller = MaintenanceController(get_engine())
+    controller.acquire_fence("owner", "repair-1", reason="repair apply")
+    work = queue.Queue()
+    acquisition_ledger.create_run("search-backoff", "search", "test")
+    acquisition_ledger.accept_item(
+        "search-backoff",
+        "issue",
+        "issue-1",
+        payload={"comicid": "comic-1", "issueid": "issue-1", "manual": False},
+    )
+    work.put({**_command(), "run_id": "search-backoff"})
+    original_put = work.put
+
+    def stop_after_requeue(item, *args, **kwargs):
+        original_put("exit")
+        original_put(item, *args, **kwargs)
+
+    work.put = stop_after_requeue
+    sleep = MagicMock()
+    monkeypatch.setattr(service.time, "sleep", sleep)
+
+    service.search_queue(work, ledger=acquisition_ledger, maintenance=controller)
+
+    provider_search.assert_not_called()
+    assert acquisition_ledger.get_item("search-backoff", "issue", "issue-1")["attempt_count"] == 1
+    sleep.assert_called_once_with(5)
 
 
 def test_replay_resets_running_item_without_count_inflation(acquisition_ledger):
@@ -223,6 +297,26 @@ def test_replay_resets_running_item_without_count_inflation(acquisition_ledger):
     assert work.get_nowait()["run_id"] == "search-replay"
     assert acquisition_ledger.get_item("search-replay", "issue", "issue-1")["state"] == "accepted"
     assert acquisition_ledger.get_run("search-replay")["accepted_count"] == 1
+
+
+def test_live_duplicate_does_not_reclaim_a_running_search_obligation(monkeypatch, acquisition_ledger):
+    provider_search = _configure_worker(monkeypatch)
+    acquisition_ledger.create_run("search-running", "search", "test")
+    acquisition_ledger.accept_item(
+        "search-running",
+        "issue",
+        "issue-1",
+        payload={"comicid": "comic-1", "issueid": "issue-1", "manual": False},
+    )
+    assert acquisition_ledger.claim_item("search-running", "issue", "issue-1") is True
+    work = queue.Queue()
+    work.put({**_command(), "run_id": "search-running"})
+    work.put("exit")
+
+    service.search_queue(work, ledger=acquisition_ledger, maintenance=_OpenMaintenance())
+
+    provider_search.assert_not_called()
+    assert acquisition_ledger.get_item("search-running", "issue", "issue-1")["state"] == "running"
 
 
 def test_in_progress_result_requeues_same_obligation(monkeypatch, acquisition_ledger):
@@ -336,6 +430,72 @@ def test_bulk_candidate_state_avoids_per_issue_eligibility_query(monkeypatch):
 
     assert result == {"status": True, "reason": None}
     lookup.assert_not_called()
+
+
+def test_manual_wanted_scan_queues_eligible_backlog_outside_automatic_tier(acquisition_ledger, monkeypatch):
+    from comicarr import search as legacy_search
+
+    monkeypatch.setattr(
+        comicarr,
+        "CONFIG",
+        SimpleNamespace(
+            EXTRA_NEWZNABS=[],
+            EXTRA_TORZNABS=[],
+            ENABLE_DDL=True,
+            ENABLE_GETCOMICS=True,
+            ENABLE_EXTERNAL_SERVER=False,
+            EXPERIMENTAL=False,
+            NEWZNAB=False,
+            ENABLE_TORRENT_SEARCH=False,
+            ENABLE_TORRENTS=False,
+            ANNUALS_ON=False,
+            FAILED_DOWNLOAD_HANDLING=False,
+            FAILED_AUTO=False,
+            SEARCH_STORYARCS=False,
+        ),
+    )
+    monkeypatch.setattr(comicarr, "SEARCH_TIER_DATE", "2026-01-01")
+    monkeypatch.setattr(comicarr, "SEARCHLOCK", threading.Lock())
+    work = queue.Queue()
+    monkeypatch.setattr(comicarr, "SEARCH_QUEUE", work)
+    with get_engine().begin() as conn:
+        conn.execute(
+            comics.insert().values(
+                ComicID="160294",
+                ComicName="Absolute Batman",
+                ComicName_Filesafe="Absolute_Batman",
+                ComicYear="2024",
+                ComicPublisher="DC",
+                Status="Active",
+                Type="Comic",
+            )
+        )
+        conn.execute(
+            issues.insert().values(
+                IssueID="old-wanted",
+                ComicID="160294",
+                ComicName="Absolute Batman",
+                Issue_Number="1",
+                Status="Wanted",
+                AcquisitionIntent="wanted",
+                ReleaseDate="2020-01-01",
+                DateAdded="2000-01-01",
+            )
+        )
+
+    result = legacy_search.searchforissue(
+        acquisition_run_id="manual-backlog",
+        acquisition_trigger="manual_wanted_scan",
+    )
+
+    assert result == {
+        "status": "QUEUED",
+        "queued_count": 1,
+        "error_count": 0,
+        "run_id": "manual-backlog",
+    }
+    assert work.get_nowait()["run_id"] == "manual-backlog"
+    assert acquisition_ledger.get_run("manual-backlog")["accepted_count"] == 1
 
 
 @pytest.mark.parametrize(("deleted", "found"), [(None, True), (0, True), (1, False)])

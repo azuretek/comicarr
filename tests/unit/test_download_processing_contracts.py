@@ -17,6 +17,7 @@ from sqlalchemy import insert, select
 
 import comicarr
 from comicarr import db, getcomics
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import pp_commands, recovery, router, service
 from comicarr.app.downloads.ddl_commands import DDLCommand
 from comicarr.downloaders import mediafire
@@ -71,6 +72,7 @@ def sqlite_ddl_db(tmp_path, monkeypatch):
     )
     engine = db.get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     yield engine
     db.shutdown_engine()
 
@@ -409,6 +411,7 @@ def test_requeue_reconstructs_and_enqueues_persisted_command(monkeypatch):
     statuses = []
     monkeypatch.setattr(service.dl_queries, "get_ddl_item", lambda item_id: row)
     monkeypatch.setattr(service.dl_queries, "update_ddl_status", lambda item_id, status: statuses.append(status))
+    monkeypatch.setattr(service.dl_queries, "claim_failed_ddl_retry", lambda item_id: statuses.append("Queued") or True)
     monkeypatch.setattr(comicarr, "DDL_QUEUE", ddl_queue)
 
     result = service.requeue_ddl_item("ddl-1")
@@ -434,6 +437,7 @@ def test_requeue_rejects_active_downloading_status(monkeypatch):
     statuses = []
     monkeypatch.setattr(service.dl_queries, "get_ddl_item", lambda item_id: row)
     monkeypatch.setattr(service.dl_queries, "update_ddl_status", lambda item_id, status: statuses.append(status))
+    monkeypatch.setattr(service.dl_queries, "claim_failed_ddl_retry", lambda item_id: statuses.append("Queued") or True)
     monkeypatch.setattr(comicarr, "DDL_QUEUE", ddl_queue)
 
     result = service.requeue_ddl_item("ddl-1")
@@ -493,6 +497,7 @@ def test_requeue_keeps_durable_queued_status_when_handoff_fails(monkeypatch):
     ddl_queue.put.side_effect = RuntimeError("queue unavailable")
     monkeypatch.setattr(service.dl_queries, "get_ddl_item", lambda item_id: row)
     monkeypatch.setattr(service.dl_queries, "update_ddl_status", lambda item_id, status: statuses.append(status))
+    monkeypatch.setattr(service.dl_queries, "claim_failed_ddl_retry", lambda item_id: statuses.append("Queued") or True)
     monkeypatch.setattr(comicarr, "DDL_QUEUE", ddl_queue)
 
     result = service.requeue_ddl_item("ddl-1")

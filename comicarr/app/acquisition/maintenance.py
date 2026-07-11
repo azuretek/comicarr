@@ -21,9 +21,11 @@ from sqlalchemy.exc import IntegrityError
 import comicarr
 from comicarr.db import get_engine
 from comicarr.tables import (
+    acquisition_canary_permits,
     acquisition_maintenance,
     acquisition_maintenance_events,
     acquisition_maintenance_leases,
+    acquisition_reconciliation,
     acquisition_repair_canaries,
     acquisition_repair_events,
     acquisition_repair_items,
@@ -33,13 +35,15 @@ from comicarr.tables import (
     acquisition_run_items,
     acquisition_runs,
     acquisition_schema_versions,
+    acquisition_search_previews,
     annuals,
     issues,
 )
 
 SCHEMA_COMPONENT = "acquisition"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 CONTROL_ID = "acquisition"
+RECONCILIATION_CONTROL_ID = "migration-reconciliation"
 
 _BASE_SCHEMA_TABLES = (
     acquisition_schema_versions,
@@ -57,7 +61,11 @@ _REPAIR_SCHEMA_TABLES = (
     acquisition_repair_events,
     acquisition_repair_canaries,
 )
-_SCHEMA_TABLES = _BASE_SCHEMA_TABLES + _REPAIR_SCHEMA_TABLES
+_SEARCH_PREVIEW_SCHEMA_TABLES = (acquisition_search_previews,)
+_RECOVERY_CONTROL_SCHEMA_TABLES = (acquisition_reconciliation, acquisition_canary_permits)
+_SCHEMA_TABLES = (
+    _BASE_SCHEMA_TABLES + _REPAIR_SCHEMA_TABLES + _SEARCH_PREVIEW_SCHEMA_TABLES + _RECOVERY_CONTROL_SCHEMA_TABLES
+)
 
 _BASE_REQUIRED_INDEXES = {
     "issues": {"issues_acquisition_intent"},
@@ -78,6 +86,16 @@ _REPAIR_REQUIRED_INDEXES = {
     "acquisition_repair_events": {"acq_repair_events_run"},
     "acquisition_repair_canaries": {"acq_repair_canary_run"},
 }
+_SEARCH_PREVIEW_REQUIRED_INDEXES = {
+    "acquisition_search_previews": {
+        "acq_search_preview_series_state",
+        "acq_search_preview_run",
+    },
+}
+_RECOVERY_CONTROL_REQUIRED_INDEXES = {
+    "acquisition_reconciliation": {"acq_reconciliation_state"},
+    "acquisition_canary_permits": {"acq_canary_permit_state", "acq_canary_permit_release"},
+}
 
 
 def _utcnow():
@@ -86,6 +104,16 @@ def _utcnow():
 
 def _truthy(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def maintenance_retry_delay(attempt_count):
+    """Return bounded backoff for a deliberately requeued fenced command."""
+
+    try:
+        attempt = max(1, int(attempt_count))
+    except (TypeError, ValueError):
+        attempt = 1
+    return min(60, 5 * (2 ** min(attempt - 1, 4)))
 
 
 @dataclass(frozen=True)
@@ -118,6 +146,7 @@ class Lease:
     work_kind: str
     entity_type: str | None = None
     entity_id: str | None = None
+    canary_permit_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +159,7 @@ class RuntimeGateStatus:
     owner: str | None = None
     run_id: str | None = None
     heartbeat_at: str | None = None
+    reconciliation_state: str | None = None
 
     def as_dict(self):
         return {
@@ -141,6 +171,7 @@ class RuntimeGateStatus:
             "owner": self.owner,
             "run_id": self.run_id,
             "heartbeat_at": self.heartbeat_at,
+            "reconciliation_state": self.reconciliation_state,
         }
 
 
@@ -186,24 +217,90 @@ def _add_intent_column(engine, table_name):
         conn.execute(text("ALTER TABLE %s ADD COLUMN %s VARCHAR(16)" % (quoted_table, quoted_column)))
 
 
+def _add_item_dispatch_state_column(engine):
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("acquisition_run_items")}
+    if "dispatch_state" in columns:
+        return
+    quoted_table = engine.dialect.identifier_preparer.quote("acquisition_run_items")
+    quoted_column = engine.dialect.identifier_preparer.quote("dispatch_state")
+    with engine.begin() as conn:
+        conn.execute(
+            text("ALTER TABLE %s ADD COLUMN %s VARCHAR(32) NOT NULL DEFAULT 'pending'" % (quoted_table, quoted_column))
+        )
+
+
 def _ensure_control_row(engine):
-    try:
-        with engine.begin() as conn:
+    with engine.begin() as conn:
+        existing = conn.execute(
+            select(acquisition_maintenance.c.control_id).where(acquisition_maintenance.c.control_id == CONTROL_ID)
+        ).first()
+        if existing is not None:
+            return
+        try:
+            with conn.begin_nested():
+                conn.execute(
+                    insert(acquisition_maintenance).values(
+                        control_id=CONTROL_ID,
+                        epoch=0,
+                        active=0,
+                        owner=None,
+                        run_id=None,
+                        reason=None,
+                        acquired_at=None,
+                        heartbeat_at=None,
+                        released_at=None,
+                    )
+                )
+        except IntegrityError:
+            # A concurrent initializer won after our read; the desired row is
+            # now present and normal controller construction stays read-only.
+            pass
+
+
+def get_reconciliation_status(engine=None):
+    """Read the durable post-migration reconciliation gate."""
+
+    engine = engine or get_engine()
+    with engine.connect() as conn:
+        row = (
             conn.execute(
-                insert(acquisition_maintenance).values(
-                    control_id=CONTROL_ID,
-                    epoch=0,
-                    active=0,
-                    owner=None,
-                    run_id=None,
-                    reason=None,
-                    acquired_at=None,
-                    heartbeat_at=None,
-                    released_at=None,
+                select(acquisition_reconciliation).where(
+                    acquisition_reconciliation.c.control_id == RECONCILIATION_CONTROL_ID
                 )
             )
-    except IntegrityError:
-        pass
+            .mappings()
+            .first()
+        )
+    if row is None:
+        return {"state": "unavailable", "reason": "reconciliation control row is missing", "updated_at": None}
+    return {"state": row["state"], "reason": row["reason"], "updated_at": row["updated_at"]}
+
+
+def set_reconciliation_state(state, reason=None, engine=None):
+    """Persist a migration/reconciliation gate transition for restart safety."""
+
+    normalized = str(state or "").strip().lower()
+    if normalized not in {"ready", "migrating", "pending_preview", "failed"}:
+        raise ValueError("invalid reconciliation state")
+    engine = engine or get_engine()
+    now = _utcnow()
+    with engine.begin() as conn:
+        result = conn.execute(
+            update(acquisition_reconciliation)
+            .where(acquisition_reconciliation.c.control_id == RECONCILIATION_CONTROL_ID)
+            .values(state=normalized, reason=str(reason)[:255] if reason else None, updated_at=now)
+        )
+        if result.rowcount != 1:
+            conn.execute(
+                insert(acquisition_reconciliation).values(
+                    control_id=RECONCILIATION_CONTROL_ID,
+                    state=normalized,
+                    reason=str(reason)[:255] if reason else None,
+                    updated_at=now,
+                )
+            )
+    return get_reconciliation_status(engine)
 
 
 def _apply_schema_v1(engine):
@@ -231,10 +328,52 @@ def _apply_schema_v2(engine):
             _create_declared_index(engine, table, name)
 
 
+def _apply_schema_v3(engine):
+    for table in _SEARCH_PREVIEW_SCHEMA_TABLES:
+        table.create(engine, checkfirst=True)
+    for table_name, names in _SEARCH_PREVIEW_REQUIRED_INDEXES.items():
+        table = next(table for table in _SEARCH_PREVIEW_SCHEMA_TABLES if table.name == table_name)
+        for name in names:
+            _create_declared_index(engine, table, name)
+
+
+def _ensure_reconciliation_control_row(engine):
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                insert(acquisition_reconciliation).values(
+                    control_id=RECONCILIATION_CONTROL_ID,
+                    state="ready",
+                    reason=None,
+                    updated_at=_utcnow(),
+                )
+            )
+    except IntegrityError:
+        pass
+
+
+def _apply_schema_v4(engine):
+    for table in _RECOVERY_CONTROL_SCHEMA_TABLES:
+        table.create(engine, checkfirst=True)
+    for table_name, names in _RECOVERY_CONTROL_REQUIRED_INDEXES.items():
+        table = next(table for table in _RECOVERY_CONTROL_SCHEMA_TABLES if table.name == table_name)
+        for name in names:
+            _create_declared_index(engine, table, name)
+    _ensure_reconciliation_control_row(engine)
+
+
+def _apply_schema_v5(engine):
+    _add_item_dispatch_state_column(engine)
+
+
 def _version_tables(target_version):
     tables = list(_BASE_SCHEMA_TABLES)
     if target_version >= 2:
         tables.extend(_REPAIR_SCHEMA_TABLES)
+    if target_version >= 3:
+        tables.extend(_SEARCH_PREVIEW_SCHEMA_TABLES)
+    if target_version >= 4:
+        tables.extend(_RECOVERY_CONTROL_SCHEMA_TABLES)
     return tuple(tables)
 
 
@@ -242,6 +381,10 @@ def _version_indexes(target_version):
     required = dict(_BASE_REQUIRED_INDEXES)
     if target_version >= 2:
         required.update(_REPAIR_REQUIRED_INDEXES)
+    if target_version >= 3:
+        required.update(_SEARCH_PREVIEW_REQUIRED_INDEXES)
+    if target_version >= 4:
+        required.update(_RECOVERY_CONTROL_REQUIRED_INDEXES)
     return required
 
 
@@ -259,6 +402,8 @@ def _verify_schema(engine, target_version=SCHEMA_VERSION):
         "annuals": {"AcquisitionIntent"},
         **{table.name: {column.name for column in table.columns} for table in version_tables},
     }
+    if target_version < 5:
+        required_columns["acquisition_run_items"].discard("dispatch_state")
     missing_columns = []
     for table_name, expected in required_columns.items():
         actual = {column["name"] for column in inspector.get_columns(table_name)}
@@ -279,6 +424,15 @@ def _verify_schema(engine, target_version=SCHEMA_VERSION):
         ).first()
     if control is None:
         raise RuntimeError("missing acquisition maintenance control row")
+    if target_version >= 4:
+        with engine.connect() as conn:
+            reconciliation = conn.execute(
+                select(acquisition_reconciliation.c.control_id).where(
+                    acquisition_reconciliation.c.control_id == RECONCILIATION_CONTROL_ID
+                )
+            ).first()
+        if reconciliation is None:
+            raise RuntimeError("missing acquisition reconciliation control row")
 
 
 def ensure_acquisition_schema(engine=None):
@@ -322,6 +476,42 @@ def ensure_acquisition_schema(engine=None):
                     )
                 )
             version = 2
+        if version < 3:
+            _apply_schema_v3(engine)
+            _verify_schema(engine, target_version=3)
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(acquisition_schema_versions).values(
+                        component=SCHEMA_COMPONENT,
+                        version=3,
+                        applied_at=_utcnow(),
+                    )
+                )
+            version = 3
+        if version < 4:
+            _apply_schema_v4(engine)
+            _verify_schema(engine, target_version=4)
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(acquisition_schema_versions).values(
+                        component=SCHEMA_COMPONENT,
+                        version=4,
+                        applied_at=_utcnow(),
+                    )
+                )
+            version = 4
+        if version < 5:
+            _apply_schema_v5(engine)
+            _verify_schema(engine, target_version=5)
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(acquisition_schema_versions).values(
+                        component=SCHEMA_COMPONENT,
+                        version=5,
+                        applied_at=_utcnow(),
+                    )
+                )
+            version = 5
         _verify_schema(engine, target_version=SCHEMA_VERSION)
         status = SchemaStatus(True, version, None)
     except Exception as e:
@@ -371,37 +561,43 @@ class MaintenanceController:
             current = row._mapping
             if current["active"]:
                 if current["owner"] == str(owner) and current["run_id"] == str(run_id):
-                    return self.status()
-                raise MaintenanceConflict("acquisition maintenance is owned by another operation")
-            epoch = int(current["epoch"]) + 1
-            result = conn.execute(
-                update(acquisition_maintenance)
-                .where(acquisition_maintenance.c.control_id == CONTROL_ID)
-                .where(acquisition_maintenance.c.epoch == current["epoch"])
-                .where(acquisition_maintenance.c.active == 0)
-                .values(
-                    epoch=epoch,
-                    active=1,
-                    owner=str(owner),
-                    run_id=str(run_id),
-                    reason=str(reason)[:1000],
-                    acquired_at=now,
-                    heartbeat_at=now,
-                    released_at=None,
+                    # Return the durable status only after this transaction
+                    # commits. A second connection cannot see an uncommitted
+                    # epoch on SQLite/PostgreSQL and would otherwise persist a
+                    # stale fence token into the repair manifest.
+                    pass
+                else:
+                    raise MaintenanceConflict("acquisition maintenance is owned by another operation")
+            else:
+                epoch = int(current["epoch"]) + 1
+                result = conn.execute(
+                    update(acquisition_maintenance)
+                    .where(acquisition_maintenance.c.control_id == CONTROL_ID)
+                    .where(acquisition_maintenance.c.epoch == current["epoch"])
+                    .where(acquisition_maintenance.c.active == 0)
+                    .values(
+                        epoch=epoch,
+                        active=1,
+                        owner=str(owner),
+                        run_id=str(run_id),
+                        reason=str(reason)[:1000],
+                        acquired_at=now,
+                        heartbeat_at=now,
+                        released_at=None,
+                    )
                 )
-            )
-            if result.rowcount != 1:
-                raise MaintenanceConflict("acquisition maintenance fence changed concurrently")
-            conn.execute(
-                insert(acquisition_maintenance_events).values(
-                    epoch=epoch,
-                    action="acquire",
-                    actor=str(owner),
-                    run_id=str(run_id),
-                    reason=str(reason)[:1000],
-                    created_at=now,
+                if result.rowcount != 1:
+                    raise MaintenanceConflict("acquisition maintenance fence changed concurrently")
+                conn.execute(
+                    insert(acquisition_maintenance_events).values(
+                        epoch=epoch,
+                        action="acquire",
+                        actor=str(owner),
+                        run_id=str(run_id),
+                        reason=str(reason)[:1000],
+                        created_at=now,
+                    )
                 )
-            )
         return self.status()
 
     def heartbeat_fence(self, owner, run_id, epoch):
@@ -419,11 +615,31 @@ class MaintenanceController:
             raise MaintenanceConflict("maintenance fence ownership changed")
 
     def release_fence(self, owner, run_id, epoch):
-        status = self.status()
-        if status.active_leases:
-            raise MaintenanceConflict("cannot release maintenance fence before active leases drain")
         now = _utcnow()
         with self.engine.begin() as conn:
+            current = (
+                conn.execute(
+                    select(acquisition_maintenance)
+                    .where(acquisition_maintenance.c.control_id == CONTROL_ID)
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            if (
+                not current["active"]
+                or current["owner"] != str(owner)
+                or current["run_id"] != str(run_id)
+                or int(current["epoch"]) != int(epoch)
+            ):
+                raise MaintenanceConflict("maintenance fence ownership changed")
+            active_leases = conn.execute(
+                select(func.count())
+                .select_from(acquisition_maintenance_leases)
+                .where(acquisition_maintenance_leases.c.released_at.is_(None))
+            ).scalar_one()
+            if active_leases:
+                raise MaintenanceConflict("cannot release maintenance fence before active leases drain")
             result = conn.execute(
                 update(acquisition_maintenance)
                 .where(acquisition_maintenance.c.control_id == CONTROL_ID)
@@ -454,21 +670,54 @@ class MaintenanceController:
             )
         return self.status()
 
-    def abort_fence(self, actor, reason):
+    def abort_fence(self, actor, reason, *, force_stale_leases=False):
         if not actor or not reason:
             raise ValueError("actor and reason are required for an audited abort")
-        status = self.status()
-        if not status.active:
-            raise MaintenanceConflict("no active acquisition maintenance fence")
-        if status.active_leases:
-            raise MaintenanceConflict("cannot abort while side-effect leases are active")
         now = _utcnow()
         with self.engine.begin() as conn:
+            current = (
+                conn.execute(
+                    select(acquisition_maintenance)
+                    .where(acquisition_maintenance.c.control_id == CONTROL_ID)
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            if not current["active"]:
+                raise MaintenanceConflict("no active acquisition maintenance fence")
+            active_lease_rows = list(
+                conn.execute(
+                    select(acquisition_maintenance_leases.c.lease_id).where(
+                        acquisition_maintenance_leases.c.released_at.is_(None)
+                    )
+                )
+            )
+            if active_lease_rows and not force_stale_leases:
+                raise MaintenanceConflict("cannot abort while side-effect leases are active")
+            if active_lease_rows:
+                lease_ids = [row[0] for row in active_lease_rows]
+                conn.execute(
+                    update(acquisition_maintenance_leases)
+                    .where(acquisition_maintenance_leases.c.lease_id.in_(lease_ids))
+                    .where(acquisition_maintenance_leases.c.released_at.is_(None))
+                    .values(heartbeat_at=now, released_at=now)
+                )
+                conn.execute(
+                    update(acquisition_canary_permits)
+                    .where(acquisition_canary_permits.c.lease_id.in_(lease_ids))
+                    .where(acquisition_canary_permits.c.state == "claimed")
+                    .values(
+                        state="manual_review",
+                        completed_at=now,
+                        outcome="abandoned_after_restart",
+                    )
+                )
             result = conn.execute(
                 update(acquisition_maintenance)
                 .where(acquisition_maintenance.c.control_id == CONTROL_ID)
                 .where(acquisition_maintenance.c.active == 1)
-                .where(acquisition_maintenance.c.epoch == status.epoch)
+                .where(acquisition_maintenance.c.epoch == int(current["epoch"]))
                 .values(
                     active=0,
                     owner=None,
@@ -482,11 +731,11 @@ class MaintenanceController:
                 raise MaintenanceConflict("maintenance fence changed during abort")
             conn.execute(
                 insert(acquisition_maintenance_events).values(
-                    epoch=status.epoch,
+                    epoch=int(current["epoch"]),
                     action="abort",
                     actor=str(actor),
-                    run_id=status.run_id,
-                    reason=str(reason)[:1000],
+                    run_id=current["run_id"],
+                    reason=(("forced stale-lease cleanup: " if active_lease_rows else "") + str(reason))[:1000],
                     created_at=now,
                 )
             )
@@ -497,6 +746,14 @@ class MaintenanceController:
             raise ValueError("owner and work_kind are required")
         if _operator_requested(getattr(comicarr, "CONFIG", None)):
             raise MaintenanceBlocked("operator acquisition maintenance is enabled")
+        try:
+            reconciliation = get_reconciliation_status(self.engine)
+        except Exception as e:
+            raise MaintenanceBlocked("acquisition reconciliation gate is unavailable") from e
+        if reconciliation["state"] != "ready":
+            raise MaintenanceBlocked(
+                "acquisition reconciliation state %s blocks new work claims" % reconciliation["state"]
+            )
         lease_id = str(lease_id or uuid.uuid4())
         now = _utcnow()
         columns = [
@@ -510,19 +767,25 @@ class MaintenanceController:
             acquisition_maintenance_leases.c.heartbeat_at,
             acquisition_maintenance_leases.c.released_at,
         ]
-        gated_values = select(
-            literal(lease_id),
-            acquisition_maintenance.c.epoch,
-            literal(str(owner)),
-            literal(str(work_kind)),
-            literal(str(entity_type) if entity_type is not None else None),
-            literal(str(entity_id) if entity_id is not None else None),
-            literal(now),
-            literal(now),
-            literal(None),
-        ).where(
-            acquisition_maintenance.c.control_id == CONTROL_ID,
-            acquisition_maintenance.c.active == 0,
+        gated_values = (
+            select(
+                literal(lease_id),
+                acquisition_maintenance.c.epoch,
+                literal(str(owner)),
+                literal(str(work_kind)),
+                literal(str(entity_type) if entity_type is not None else None),
+                literal(str(entity_id) if entity_id is not None else None),
+                literal(now),
+                literal(now),
+                literal(None),
+            )
+            .select_from(acquisition_maintenance.join(acquisition_reconciliation, literal(True)))
+            .where(
+                acquisition_maintenance.c.control_id == CONTROL_ID,
+                acquisition_maintenance.c.active == 0,
+                acquisition_reconciliation.c.control_id == RECONCILIATION_CONTROL_ID,
+                acquisition_reconciliation.c.state == "ready",
+            )
         )
         try:
             with self.engine.begin() as conn:
@@ -548,6 +811,68 @@ class MaintenanceController:
             work_kind=values["work_kind"],
             entity_type=values["entity_type"],
             entity_id=values["entity_id"],
+        )
+
+    def acquire_canary_handoff_lease(self, owner, release_key, route, lease_id=None):
+        """Claim the one authorized handoff that may cross an active fence."""
+
+        lease_id = str(lease_id or uuid.uuid4())
+        now = _utcnow()
+        with self.engine.begin() as conn:
+            control = (
+                conn.execute(
+                    select(acquisition_maintenance)
+                    .where(acquisition_maintenance.c.control_id == CONTROL_ID)
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            if not control["active"] or not control["run_id"]:
+                raise MaintenanceBlocked("no active acquisition canary fence")
+            permit = (
+                conn.execute(
+                    select(acquisition_canary_permits)
+                    .where(acquisition_canary_permits.c.permit_id == str(control["run_id"]))
+                    .where(acquisition_canary_permits.c.release_key == str(release_key))
+                    .where(acquisition_canary_permits.c.route == str(route))
+                    .where(acquisition_canary_permits.c.state == "authorized")
+                    .where(acquisition_canary_permits.c.expires_at >= now)
+                )
+                .mappings()
+                .first()
+            )
+            if permit is None:
+                raise MaintenanceBlocked("acquisition maintenance blocks this unapproved handoff")
+            claimed = conn.execute(
+                update(acquisition_canary_permits)
+                .where(acquisition_canary_permits.c.permit_id == permit["permit_id"])
+                .where(acquisition_canary_permits.c.state == "authorized")
+                .values(state="claimed", lease_id=lease_id, claimed_at=now)
+            )
+            if claimed.rowcount != 1:
+                raise MaintenanceBlocked("acquisition canary permit was claimed concurrently")
+            conn.execute(
+                insert(acquisition_maintenance_leases).values(
+                    lease_id=lease_id,
+                    epoch=int(control["epoch"]),
+                    owner=str(owner),
+                    work_kind="canary_handoff",
+                    entity_type="release",
+                    entity_id=str(release_key),
+                    acquired_at=now,
+                    heartbeat_at=now,
+                    released_at=None,
+                )
+            )
+        return Lease(
+            lease_id=lease_id,
+            epoch=int(control["epoch"]),
+            owner=str(owner),
+            work_kind="canary_handoff",
+            entity_type="release",
+            entity_id=str(release_key),
+            canary_permit_id=str(permit["permit_id"]),
         )
 
     def heartbeat_lease(self, lease_id):
@@ -587,9 +912,52 @@ class MaintenanceController:
         )
         with self.engine.connect() as conn:
             current = conn.execute(stmt).first()
+            if current is None and lease.canary_permit_id:
+                canary_stmt = (
+                    select(acquisition_maintenance_leases.c.lease_id)
+                    .select_from(
+                        acquisition_maintenance_leases.join(
+                            acquisition_maintenance,
+                            acquisition_maintenance.c.control_id == CONTROL_ID,
+                        ).join(
+                            acquisition_canary_permits,
+                            acquisition_canary_permits.c.lease_id == acquisition_maintenance_leases.c.lease_id,
+                        )
+                    )
+                    .where(
+                        acquisition_maintenance_leases.c.lease_id == str(lease.lease_id),
+                        acquisition_maintenance_leases.c.epoch == int(lease.epoch),
+                        acquisition_maintenance_leases.c.released_at.is_(None),
+                        acquisition_maintenance.c.epoch == int(lease.epoch),
+                        acquisition_maintenance.c.active == 1,
+                        acquisition_maintenance.c.run_id == str(lease.canary_permit_id),
+                        acquisition_canary_permits.c.permit_id == str(lease.canary_permit_id),
+                        acquisition_canary_permits.c.state == "claimed",
+                        acquisition_canary_permits.c.release_key == str(lease.entity_id),
+                        acquisition_canary_permits.c.expires_at >= _utcnow(),
+                    )
+                )
+                current = conn.execute(canary_stmt).first()
         if current is None:
             raise MaintenanceBlocked("acquisition lease was fenced before the side effect")
         return True
+
+    def complete_canary_handoff(self, lease, outcome):
+        """Terminally record the sole permitted handoff without reopening it."""
+
+        if not lease.canary_permit_id:
+            return False
+        normalized = str(outcome or "unknown")[:64]
+        now = _utcnow()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(acquisition_canary_permits)
+                .where(acquisition_canary_permits.c.permit_id == str(lease.canary_permit_id))
+                .where(acquisition_canary_permits.c.lease_id == str(lease.lease_id))
+                .where(acquisition_canary_permits.c.state == "claimed")
+                .values(state="completed", completed_at=now, outcome=normalized)
+            )
+        return result.rowcount == 1
 
     def release_lease(self, lease_id):
         now = _utcnow()
@@ -605,6 +973,25 @@ class MaintenanceController:
     @contextmanager
     def lease(self, owner, work_kind, entity_type=None, entity_id=None, lease_id=None):
         claim = self.acquire_lease(owner, work_kind, entity_type, entity_id, lease_id)
+        try:
+            yield claim
+        finally:
+            self.release_lease(claim.lease_id)
+
+    @contextmanager
+    def handoff_lease(self, owner, release_key, route, lease_id=None):
+        """Use a normal lease, or the one exact permit while fenced."""
+
+        try:
+            claim = self.acquire_lease(
+                owner,
+                "external-handoff",
+                entity_type="release",
+                entity_id=release_key,
+                lease_id=lease_id,
+            )
+        except MaintenanceBlocked:
+            claim = self.acquire_canary_handoff_lease(owner, release_key, route, lease_id=lease_id)
         try:
             yield claim
         finally:
@@ -631,30 +1018,40 @@ def refresh_runtime_state(config=None, engine=None):
 
     schema_ready = bool(getattr(comicarr, "ACQUISITION_SCHEMA_READY", False))
     if not schema_ready:
-        status = RuntimeGateStatus(True, "schema_unavailable", False, False, 0)
-    elif _operator_requested(config):
-        fence = MaintenanceController(engine).status()
         status = RuntimeGateStatus(
-            True,
-            "operator_maintenance",
-            True,
-            fence.active,
-            fence.epoch,
-            fence.owner,
-            fence.run_id,
-            fence.heartbeat_at,
+            blocked=True,
+            reason="schema_unavailable",
+            schema_ready=False,
+            maintenance_active=False,
+            epoch=0,
         )
     else:
+        reconciliation = get_reconciliation_status(engine)
+        reconciliation_state = reconciliation["state"]
         fence = MaintenanceController(engine).status()
+        if reconciliation_state != "ready":
+            reason = (
+                "migration_in_progress"
+                if reconciliation_state == "migrating"
+                else "migration_reconciliation_%s" % reconciliation_state
+            )
+            blocked = True
+        elif _operator_requested(config):
+            blocked = True
+            reason = "operator_maintenance"
+        else:
+            blocked = fence.active
+            reason = "persistent_maintenance" if fence.active else None
         status = RuntimeGateStatus(
-            fence.active,
-            "persistent_maintenance" if fence.active else None,
-            True,
-            fence.active,
-            fence.epoch,
-            fence.owner,
-            fence.run_id,
-            fence.heartbeat_at,
+            blocked=blocked,
+            reason=reason,
+            schema_ready=True,
+            maintenance_active=fence.active,
+            epoch=fence.epoch,
+            owner=fence.owner,
+            run_id=fence.run_id,
+            heartbeat_at=fence.heartbeat_at,
+            reconciliation_state=reconciliation_state,
         )
     comicarr.ACQUISITION_WORKERS_BLOCKED = status.blocked
     comicarr.ACQUISITION_BLOCK_REASON = status.reason

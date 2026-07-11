@@ -51,10 +51,14 @@ _RESTART_SAFE_ROUTES = frozenset({"sabnzbd", "nzbget", "ddl", "rtorrent", "delug
 
 
 def _record_route_health(route, success, error=None):
-    family = "nzb" if route in {"sabnzbd", "nzbget"} else (
-        "torrent"
-        if route in {"rtorrent", "deluge", "qbittorrent", "transmission", "utorrent", "watchdir"}
-        else route
+    family = (
+        "nzb"
+        if route in {"sabnzbd", "nzbget"}
+        else (
+            "torrent"
+            if route in {"rtorrent", "deluge", "qbittorrent", "transmission", "utorrent", "watchdir"}
+            else route
+        )
     )
     if family not in {"nzb", "torrent", "ddl"}:
         return
@@ -69,6 +73,12 @@ def _record_route_health(route, success, error=None):
 def normalize_route(route):
     normalized = str(route or "").strip().lower()
     return _ROUTE_ALIASES.get(normalized, normalized or "unknown")
+
+
+def is_restart_safe_route(route):
+    """Return whether this route has a durable identity safe for restart replay."""
+
+    return normalize_route(route) in _RESTART_SAFE_ROUTES
 
 
 def reserve(release_key, route, payload=None, **fields):
@@ -186,39 +196,46 @@ def perform_handoff(
 
     normalized = normalize_route(route)
     controller = MaintenanceController()
-    with controller.lease(
-        owner,
-        "external-handoff",
-        entity_type="release",
-        entity_id=release_key,
-    ) as lease:
-        controller.assert_lease_current(lease)
-        if resume_accepted:
-            current = journal.read_one(release_key)
-            if not current or current.get("stage") != journal.SNATCHED:
-                raise HandoffReservationError("accepted handoff cannot be resumed from its current stage")
-        else:
-            reserve(release_key, normalized, payload=payload, **fields)
-        controller.assert_lease_current(lease)
+    with controller.handoff_lease(owner, release_key, normalized) as lease:
+        outcome = "failed_before_submission"
         try:
-            response = sender()
-        except Exception as e:
-            journal.mark_manual_review(
+            controller.assert_lease_current(lease)
+            if resume_accepted:
+                current = journal.read_one(release_key)
+                if not current or current.get("stage") != journal.SNATCHED:
+                    raise HandoffReservationError("accepted handoff cannot be resumed from its current stage")
+            else:
+                reserve(release_key, normalized, payload=payload, **fields)
+            controller.assert_lease_current(lease)
+            try:
+                response = sender()
+            except Exception as e:
+                journal.mark_manual_review(
+                    release_key,
+                    "submission_outcome_unknown:%s" % type(e).__name__,
+                    payload={"route": normalized},
+                    downloader_type=normalized,
+                    **fields,
+                )
+                _record_route_health(normalized, False, "submission_outcome_unknown")
+                outcome = "submission_outcome_unknown"
+                raise
+            acceptance = record_acceptance(
                 release_key,
-                "submission_outcome_unknown:%s" % type(e).__name__,
-                payload={"route": normalized},
-                downloader_type=normalized,
+                normalized,
+                response,
+                payload=payload,
                 **fields,
             )
-            _record_route_health(normalized, False, "submission_outcome_unknown")
+            if finalizer is not None:
+                finalizer(response, acceptance)
+            outcome = "accepted" if acceptance.restart_safe else "manual_review"
+            return response, acceptance
+        except Exception:
+            if outcome == "failed_before_submission":
+                outcome = "handoff_failed"
             raise
-        acceptance = record_acceptance(
-            release_key,
-            normalized,
-            response,
-            payload=payload,
-            **fields,
-        )
-        if finalizer is not None:
-            finalizer(response, acceptance)
-        return response, acceptance
+        finally:
+            # A claimed canary is terminal regardless of the result. Never
+            # re-open it for an automatic retry after an ambiguous side effect.
+            controller.complete_canary_handoff(lease, outcome)

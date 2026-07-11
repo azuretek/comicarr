@@ -31,14 +31,21 @@ from comicarr.app.downloads.pp_commands import PostProcessCommandError, configur
 from comicarr.downloaders import mediafire, mega, pixeldrain
 from comicarr.tables import annuals, comics, ddl_info, issues, storyarcs, weekly
 
-# P1: bounded re-enqueue cap for the DDL atomic begin()-blocks. On a journal
-# raise inside one of those blocks BOTH ddl_info and journal roll back AND the
-# GetComics DDL path wrote no prior journal/foundsearch row — so nothing
-# (replay_pipeline / _reconstruct_anchors) would ever rescan it: the item is
-# lost forever. We re-put it on DDL_QUEUE (idempotent upsert + idempotent
-# record_transition ⇒ retry-safe) so it is genuinely recoverable, but cap the
-# requeues so a persistent DB failure surfaces loudly instead of hot-looping.
-_DDL_JOURNAL_REQUEUE_CAP = 3
+
+def _maintenance_retry_delay(item):
+    """Keep fenced monitor work durable without spinning a queue worker."""
+
+    if not isinstance(item, dict):
+        return 5
+    try:
+        attempt = int(item.get("_maintenance_retry_attempt", 0)) + 1
+    except (TypeError, ValueError):
+        attempt = 1
+    item["_maintenance_retry_attempt"] = attempt
+    from comicarr.app.acquisition.maintenance import maintenance_retry_delay
+
+    return maintenance_retry_delay(attempt)
+
 
 # ---------------------------------------------------------------------------
 # Download history
@@ -268,9 +275,15 @@ def requeue_ddl_item(item_id):
         return {"success": False, "error": "DDL item not found: %s" % item_id, "not_found": True}
 
     status = str(item.get("status") or item.get("Status") or "").strip()
-    # Failed = retry after terminal failure; Queued = re-handoff a durable orphan.
-    # Downloading/Completed must not be scheduled a second concurrent run.
-    if status and status not in {"Failed", "Queued"}:
+    # Only a terminal failure can be manually retried. Queued rows belong to
+    # the durable outbox/recovery worker; accepting them here would allow two
+    # concurrent requests to enqueue the same external download.
+    if status != "Failed":
+        if not status:
+            try:
+                DDLCommand.from_mapping(item)
+            except DDLCommandError as e:
+                return {"success": False, "error": str(e), "validation_error": True}
         return {
             "success": False,
             "error": "DDL item status %s cannot be requeued" % status,
@@ -283,7 +296,13 @@ def requeue_ddl_item(item_id):
         return {"success": False, "error": str(e), "validation_error": True}
 
     try:
-        dl_queries.update_ddl_status(item_id, "Queued")
+        claimed = dl_queries.claim_failed_ddl_retry(item_id)
+        if not claimed:
+            return {
+                "success": False,
+                "error": "DDL item changed before retry could be claimed",
+                "validation_error": True,
+            }
     except Exception as e:
         logger.error("[DOWNLOADS] Unable to update DDL item %s for requeue: %s" % (item_id, e))
         return {
@@ -292,8 +311,6 @@ def requeue_ddl_item(item_id):
             "operational_error": True,
         }
 
-    # Allow a deliberate requeue to supersede an in-memory owner for this id.
-    comicarr.DDL_QUEUED.discard(item_id)
     try:
         if not _enqueue_ddl_queue_item(comicarr.DDL_QUEUE, command.to_queue_item()):
             return {
@@ -1326,7 +1343,14 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                         "quarantining without re-downloading: %s" % (item.get("id"), type(e).__name__)
                     )
                     try:
-                        db.upsert("ddl_info", nval, {"ID": item["id"]})
+                        db.upsert(
+                            "ddl_info",
+                            {
+                                "status": "Manual Review",
+                                "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            },
+                            {"ID": item["id"]},
+                        )
                         journal.mark_manual_review(
                             ddlc_rkey,
                             "ddl_artifact_state_persistence_error:%s" % type(e).__name__,
@@ -1530,7 +1554,10 @@ def postprocess_main(queue):
             continue
         logger.info(
             "Now loading post-processing command name=%s issueid=%s"
-            % (item.get("nzb_name") if isinstance(item, dict) else "unknown", item.get("issueid") if isinstance(item, dict) else None)
+            % (
+                item.get("nzb_name") if isinstance(item, dict) else "unknown",
+                item.get("issueid") if isinstance(item, dict) else None,
+            )
         )
 
         try:
@@ -1616,9 +1643,7 @@ def _run_owned_postprocess(item):
             won = True
 
         if won is False:
-            logger.info(
-                "[DOWNLOADS-PP] Idempotency claim lost for %s; dropping duplicate." % canonical_release_key
-            )
+            logger.info("[DOWNLOADS-PP] Idempotency claim lost for %s; dropping duplicate." % canonical_release_key)
             return "drop", None
 
         try:
@@ -1718,11 +1743,12 @@ def worker_main(queue):
                 entity_id=item.get("journal_release_key") or item.get("hash"),
             ) as lease:
                 controller.assert_lease_current(lease)
+                item.pop("_maintenance_retry_attempt", None)
                 snstat = torrentinfo(torrent_hash=item["hash"], download=True)
                 _handle_torrent_monitor_result(item, snstat)
         except MaintenanceBlocked:
             queue.put(item)
-            time.sleep(1)
+            time.sleep(_maintenance_retry_delay(item))
 
 
 def _handle_torrent_monitor_result(item, snstat):
@@ -1753,8 +1779,7 @@ def _handle_torrent_monitor_result(item, snstat):
 
     if status == "NOT FOUND":
         logger.error(
-            "[DOWNLOADS-WORKER] torrent hash not found in client for issueid=%s; marking failed."
-            % item.get("issueid")
+            "[DOWNLOADS-WORKER] torrent hash not found in client for issueid=%s; marking failed." % item.get("issueid")
         )
         journal.mark_failed(
             rkey,
@@ -1849,10 +1874,13 @@ def nzb_monitor(queue):
                             except MaintenanceBlocked:
                                 comicarr.RETURN_THE_NZBQUEUE.put(qu_retrieve)
                             except Exception as e:
-                                logger.error("Exception occurred while resuming NZB monitor id=%s: %s" % (
-                                    qu_retrieve.get("nzo_id") or qu_retrieve.get("NZBID"),
-                                    type(e).__name__,
-                                ))
+                                logger.error(
+                                    "Exception occurred while resuming NZB monitor id=%s: %s"
+                                    % (
+                                        qu_retrieve.get("nzo_id") or qu_retrieve.get("NZBID"),
+                                        type(e).__name__,
+                                    )
+                                )
                             time.sleep(5)
                         else:
                             break
@@ -1884,7 +1912,7 @@ def nzb_monitor(queue):
                     cdh_monitor(queue, item, nzstat, lease=lease)
             except MaintenanceBlocked:
                 queue.put(item)
-                time.sleep(1)
+                time.sleep(_maintenance_retry_delay(item))
         else:
             time.sleep(5)
 

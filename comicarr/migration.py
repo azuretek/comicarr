@@ -29,6 +29,22 @@ from comicarr import encrypted, logger, maintenance
 _migration_lock = threading.Lock()
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+
+def _set_acquisition_reconciliation(state, message):
+    """Mirror a durable reconciliation gate into legacy progress globals."""
+
+    try:
+        from comicarr.app.acquisition.maintenance import set_reconciliation_state
+
+        persisted = set_reconciliation_state(state, message)
+        comicarr.MIGRATION_RECONCILIATION = persisted
+    except Exception as e:
+        # Migration must never resume acquisition just because this diagnostic
+        # update failed; the startup schema gate remains fail-closed.
+        comicarr.MIGRATION_RECONCILIATION = {"state": "failed", "reason": "reconciliation_state_unavailable"}
+        logger.error("[MIGRATION] Unable to persist reconciliation state: %s" % e)
+
+
 # Tables to migrate, ordered by dependency
 # (ephemeral tables like searchresults, notifs, provider_searches are excluded)
 MIGRATABLE_TABLES = [
@@ -240,6 +256,7 @@ class Mylar3Migration:
             comicarr.MIGRATION_STATUS = "migrating"
             comicarr.MIGRATION_ERROR = None
             comicarr.MIGRATION_TABLES_COMPLETE = 0
+            _set_acquisition_reconciliation("migrating", "Mylar3 migration is mutating the destination database")
 
             # Validate first (use resolved path to prevent TOCTOU)
             if self.dbfile is None or self.real_path is None:
@@ -247,6 +264,10 @@ class Mylar3Migration:
                 if not valid:
                     comicarr.MIGRATION_STATUS = "error"
                     comicarr.MIGRATION_ERROR = "Migration validation failed"
+                    _set_acquisition_reconciliation(
+                        "failed",
+                        "Migration validation failed; operator review required before acquisition resumes",
+                    )
                     return False
                 self.dbfile = result
                 self.real_path = os.path.realpath(self.source_path)
@@ -322,6 +343,11 @@ class Mylar3Migration:
                             logger.error("[MIGRATION][%s] Failed: %s" % (table.upper(), e))
                             comicarr.MIGRATION_STATUS = "error"
                             comicarr.MIGRATION_ERROR = "Failed on table %s" % table
+                            _set_acquisition_reconciliation(
+                                "failed",
+                                "Migration failed on table %s; operator review required before acquisition resumes"
+                                % table,
+                            )
                             return False
 
                         comicarr.MIGRATION_TABLES_COMPLETE += 1
@@ -356,13 +382,23 @@ class Mylar3Migration:
             comicarr.DB_EMPTY = False
             comicarr.MIGRATION_STATUS = "complete"
             comicarr.MIGRATION_CURRENT_TABLE = ""
-            logger.info("[MIGRATION] Migration completed successfully")
+            # Row counts alone are not recovery-ready. Surface a pending
+            # reconciliation state so operators open the repair preview before
+            # trusting Wanted/Have aggregates or restarting into Auto-Search.
+            _set_acquisition_reconciliation(
+                "pending_preview",
+                "Migration copied rows successfully. Preview acquisition reconciliation before enabling automatic search.",
+            )
+            logger.info("[MIGRATION] Migration completed successfully; acquisition reconciliation preview is pending")
             return True
 
         except Exception as e:
             logger.error("[MIGRATION] Migration failed: %s" % e)
             comicarr.MIGRATION_STATUS = "error"
             comicarr.MIGRATION_ERROR = "Migration failed unexpectedly"
+            _set_acquisition_reconciliation(
+                "failed", "Migration failed; inspect and reconcile before acquisition resumes"
+            )
             return False
         finally:
             comicarr.MIGRATION_IN_PROGRESS = False

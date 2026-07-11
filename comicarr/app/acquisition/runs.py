@@ -31,6 +31,7 @@ PAYLOAD_FIELDS = {
             "mode",
             "manual",
             "annual",
+            "entity_type",
             "storyarc",
         }
     ),
@@ -136,6 +137,8 @@ class RunLedger:
 
     def accept_item(self, run_id, entity_type, entity_id, payload=None, command_kind=None):
         run = self._require_run(run_id)
+        if run["completion_state"] not in {RunState.PENDING.value, RunState.RUNNING.value}:
+            raise ValueError("terminal acquisition runs cannot accept new items")
         effective_kind = str(command_kind or run["command_kind"]).strip().lower()
         if effective_kind != run["command_kind"]:
             raise ValueError("item command_kind must match its acquisition run")
@@ -147,6 +150,7 @@ class RunLedger:
             "entity_type": str(entity_type),
             "entity_id": str(entity_id),
             "state": ItemOutcome.ACCEPTED.value,
+            "dispatch_state": DispatchState.PENDING.value,
             "payload_json": encoded,
             "attempt_count": 0,
             "next_attempt_at": None,
@@ -197,6 +201,97 @@ class RunLedger:
                 update(acquisition_runs)
                 .where(acquisition_runs.c.run_id == str(run_id))
                 .values(dispatch_state=state.value, updated_at=_utcnow())
+            )
+        return self.get_run(run_id)
+
+    def record_item_dispatch(self, run_id, entity_type, entity_id, state, reason=None):
+        """Record queue handoff separately from the item's worker outcome."""
+
+        item = self.get_item(run_id, entity_type, entity_id)
+        if item is None:
+            raise KeyError("unknown acquisition item")
+        state = DispatchState(_value(state))
+        if state not in {DispatchState.PENDING, DispatchState.ACCEPTED, DispatchState.ERROR}:
+            raise ValueError("invalid acquisition item dispatch state")
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(acquisition_run_items)
+                .where(acquisition_run_items.c.item_id == item["item_id"])
+                .where(acquisition_run_items.c.state.in_([ItemOutcome.ACCEPTED.value, ItemOutcome.RUNNING.value]))
+                .values(
+                    dispatch_state=state.value,
+                    reason=str(reason)[:1000] if reason else None,
+                    updated_at=_utcnow(),
+                )
+            )
+        if result.rowcount != 1:
+            # Queue.put can hand the item to a very fast worker before the
+            # producer writes its accepted handoff marker. The terminal
+            # worker result is stronger evidence than that marker, so leave
+            # it untouched instead of turning a successful handoff into an
+            # API error.
+            current = self.get_item(run_id, entity_type, entity_id)
+            if current is not None and ItemOutcome(current["state"]).terminal:
+                return current
+            raise ValueError("acquisition item changed before dispatch state could be recorded")
+        return self.get_item(run_id, entity_type, entity_id)
+
+    def claim_item_dispatch(self, run_id, entity_type, entity_id):
+        """Reserve one pending handoff so concurrent redrives cannot duplicate it."""
+        item = self.get_item(run_id, entity_type, entity_id)
+        if item is None:
+            raise KeyError("unknown acquisition item")
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(acquisition_run_items)
+                .where(acquisition_run_items.c.item_id == item["item_id"])
+                .where(acquisition_run_items.c.state == ItemOutcome.ACCEPTED.value)
+                .where(
+                    acquisition_run_items.c.dispatch_state.in_([DispatchState.PENDING.value, DispatchState.ERROR.value])
+                )
+                .values(dispatch_state=DispatchState.ACCEPTED.value, updated_at=_utcnow())
+            )
+        return result.rowcount == 1
+
+    def complete_empty_run(
+        self,
+        run_id,
+        *,
+        completion_state=RunState.COMPLETED,
+        dispatch_state=DispatchState.ACCEPTED,
+    ):
+        """Close an intentionally empty manual/scheduled scan truthfully.
+
+        A scan that found no eligible obligations still needs a durable run ID
+        for the operator, but must not pretend that an item was accepted or
+        that a provider was consulted. Empty runs therefore retain zero item
+        counters and close to an explicit completed or failed scan result
+        rather than a fabricated ``no_match`` item.
+        """
+
+        self._require_run(run_id)
+        completion_state = RunState(_value(completion_state))
+        dispatch_state = DispatchState(_value(dispatch_state))
+        if completion_state in {RunState.PENDING, RunState.RUNNING}:
+            raise ValueError("empty acquisition runs must close to a terminal state")
+        with self.engine.begin() as conn:
+            item_count = conn.execute(
+                select(func.count())
+                .select_from(acquisition_run_items)
+                .where(acquisition_run_items.c.run_id == str(run_id))
+            ).scalar_one()
+            if item_count:
+                raise ValueError("only runs without accepted items can be completed as empty")
+            now = _utcnow()
+            conn.execute(
+                update(acquisition_runs)
+                .where(acquisition_runs.c.run_id == str(run_id))
+                .values(
+                    dispatch_state=dispatch_state.value,
+                    completion_state=completion_state.value,
+                    updated_at=now,
+                    completed_at=now,
+                )
             )
         return self.get_run(run_id)
 
@@ -281,6 +376,47 @@ class RunLedger:
             rows = [dict(row._mapping) for row in conn.execute(stmt)]
         for row in rows:
             row["payload"] = _decode_payload(row["payload_json"])
+        return rows
+
+    def list_pending_dispatch_items(self, run_id):
+        """Return accepted items that have not reached the worker queue."""
+
+        run = self._require_run(run_id)
+        with self.engine.connect() as conn:
+            rows = [
+                _row_dict(row)
+                for row in conn.execute(
+                    select(acquisition_run_items)
+                    .where(acquisition_run_items.c.run_id == str(run_id))
+                    .where(acquisition_run_items.c.command_kind == run["command_kind"])
+                    .where(acquisition_run_items.c.state == ItemOutcome.ACCEPTED.value)
+                    .where(
+                        acquisition_run_items.c.dispatch_state.in_(
+                            [DispatchState.PENDING.value, DispatchState.ERROR.value]
+                        )
+                    )
+                    .order_by(acquisition_run_items.c.item_id)
+                )
+            ]
+        for row in rows:
+            row["payload"] = _decode_payload(row["payload_json"])
+        return rows
+
+    def list_items(self, run_id):
+        """Return the bounded, sanitized item outcomes for one durable run."""
+        run = self._require_run(run_id)
+        with self.engine.connect() as conn:
+            rows = [
+                _row_dict(row)
+                for row in conn.execute(
+                    select(acquisition_run_items)
+                    .where(acquisition_run_items.c.run_id == str(run_id))
+                    .where(acquisition_run_items.c.command_kind == run["command_kind"])
+                    .order_by(acquisition_run_items.c.item_id)
+                )
+            ]
+        for row in rows:
+            row["payload"] = _decode_payload(row.pop("payload_json", None))
         return rows
 
     def reconcile(self, run_id):

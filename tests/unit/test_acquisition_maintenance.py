@@ -20,6 +20,7 @@ from comicarr.app.acquisition.maintenance import (
     MaintenanceBlocked,
     MaintenanceController,
     ensure_acquisition_schema,
+    maintenance_retry_delay,
     refresh_runtime_state,
 )
 from comicarr.db import get_engine, shutdown_engine
@@ -86,6 +87,26 @@ def test_interrupted_fence_survives_restart_and_requires_explicit_audited_abort(
     assert restarted_process.list_events()[-1]["action"] == "abort"
 
 
+def test_forced_abort_releases_stale_leases_only_with_explicit_operator_flag():
+    controller = MaintenanceController(get_engine())
+    lease = controller.acquire_lease("worker", "search", "issue", "issue-1")
+    fence = controller.acquire_fence("owner", "repair-1", reason="repair apply")
+
+    with pytest.raises(Exception, match="side-effect leases"):
+        controller.abort_fence("owner", "operator checked the crashed worker")
+
+    status = controller.abort_fence(
+        "owner",
+        "operator confirmed the old worker process is stopped",
+        force_stale_leases=True,
+    )
+
+    assert status.active is False
+    assert status.active_leases == 0
+    assert controller.release_lease(lease.lease_id) is False
+    assert fence.epoch == status.epoch
+
+
 def test_schema_migration_is_versioned_idempotent_and_detects_drift():
     first = ensure_acquisition_schema(get_engine())
     second = ensure_acquisition_schema(get_engine())
@@ -113,6 +134,21 @@ def test_schema_migration_upgrades_a_v0189_shaped_legacy_schema(tmp_path):
     assert first.version == second.version == SCHEMA_VERSION
     assert "AcquisitionIntent" in {column["name"] for column in inspect(legacy_engine).get_columns("issues")}
     assert "AcquisitionIntent" in {column["name"] for column in inspect(legacy_engine).get_columns("annuals")}
+    legacy_engine.dispose()
+
+
+def test_schema_migration_adds_row_dispatch_state_to_a_v4_database(tmp_path):
+    legacy_engine = create_engine("sqlite:///%s" % (tmp_path / "v4.db"))
+    metadata.create_all(legacy_engine)
+    with legacy_engine.begin() as conn:
+        conn.execute(text("ALTER TABLE acquisition_run_items DROP COLUMN dispatch_state"))
+
+    status = ensure_acquisition_schema(legacy_engine)
+
+    assert status.ready
+    assert "dispatch_state" in {
+        column["name"] for column in inspect(legacy_engine).get_columns("acquisition_run_items")
+    }
     legacy_engine.dispose()
 
 
@@ -150,3 +186,8 @@ def test_schema_or_operator_gate_fails_closed_without_preventing_runtime_status(
     operator_block = refresh_runtime_state(SimpleNamespace(ACQUISITION_MAINTENANCE=False), get_engine())
     assert operator_block.blocked is True
     assert operator_block.reason == "operator_maintenance"
+
+
+@pytest.mark.parametrize(("attempt", "expected"), [(0, 5), (1, 5), (2, 10), (3, 20), (4, 40), (5, 60), (20, 60)])
+def test_maintenance_retry_backoff_is_bounded(attempt, expected):
+    assert maintenance_retry_delay(attempt) == expected

@@ -354,14 +354,6 @@ def _probe_nzb(row, payload=None):
     return "unreachable"
 
 
-def _probe_sab(row, payload=None):
-    return _sab_history_or_queue(row, payload=payload)
-
-
-def _probe_nzbget(row, payload=None):
-    return _nzbget_history(row, payload=payload)
-
-
 def _ddl_link_alive(link):
     """Recheck a DDL source link. Alive ⇒ the download could still resume;
     dead ⇒ (combined with status=Downloading) the source is GONE. A network
@@ -430,9 +422,9 @@ _DEFAULT_PROBES = {
     "rtorrent": _probe_torrent,
     "deluge": _probe_torrent,
     "nzb": _probe_nzb,
-    "sab": _probe_sab,
-    "sabnzbd": _probe_sab,
-    "nzbget": _probe_nzbget,
+    "sab": _sab_history_or_queue,
+    "sabnzbd": _sab_history_or_queue,
+    "nzbget": _nzbget_history,
     "ddl": _probe_ddl,
     "DDL": _probe_ddl,
 }

@@ -88,6 +88,9 @@ jobs:
           tags: |
             ghcr.io/frankieramirez/comicarr:latest
             ghcr.io/frankieramirez/comicarr:${{ needs.changesets.outputs.version }}
+          build-args: |
+            COMICARR_BUILD_ID=${{ needs.changesets.outputs.tag_name }}
+            COMICARR_BUILD_COMMIT=${{ github.sha }}
           platforms: linux/amd64,linux/arm64
           cache-from: type=registry,ref=ghcr.io/frankieramirez/comicarr:buildcache
           cache-to: type=registry,ref=ghcr.io/frankieramirez/comicarr:buildcache,mode=max

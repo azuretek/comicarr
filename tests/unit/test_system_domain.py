@@ -666,6 +666,18 @@ class TestConfigService:
         assert len(result["jobs"]) == 1
         assert result["jobs"][0]["id"] == "search_job"
 
+    def test_operational_poll_can_skip_duplicate_acquisition_health(self):
+        ctx = _make_test_ctx()
+        ctx.scheduler.get_jobs.return_value = []
+
+        with patch("comicarr.app.search.health.get_acquisition_health") as acquisition_health:
+            jobs = system_service.get_job_info(ctx, include_acquisition=False)
+            diagnostics = system_service.get_startup_diagnostics(ctx, include_acquisition=False)
+
+        assert "acquisition" not in jobs
+        assert "acquisition" not in diagnostics
+        acquisition_health.assert_not_called()
+
     def test_get_job_info_includes_durable_weekly_outcomes(self):
         """The weekly scheduler reports its durable outcome fields for refresh polling."""
         ctx = _make_test_ctx()
@@ -922,6 +934,25 @@ class TestConfigService:
             "version": "0.18.9",
             "source": "environment",
             "verified": True,
+        }
+
+    def test_runtime_fallback_build_identity_is_never_marked_verified(self, monkeypatch):
+        monkeypatch.delenv("COMICARR_BUILD_ID", raising=False)
+        monkeypatch.delenv("COMICARR_BUILD_COMMIT", raising=False)
+        ctx = _make_test_ctx(
+            current_version="a1b2c3d4e5f6",
+            current_version_name="v0.18.9",
+        )
+
+        build = system_service.get_build_identity(ctx)
+
+        assert build == {
+            "id": "v0.18.9",
+            "commit": "a1b2c3d4e5f6",
+            "release": "v0.18.9",
+            "version": "a1b2c3d4e5f6",
+            "source": "runtime",
+            "verified": False,
         }
 
 

@@ -39,6 +39,7 @@ COMICS_COLUMNS = [
     t_comics.c.Total.label("Total"),
     t_comics.c.Have.label("Have"),
     t_comics.c.DetailURL.label("DetailURL"),
+    t_comics.c.ComicLocation.label("ComicLocation"),
     t_comics.c.ContentType.label("ContentType"),
 ]
 

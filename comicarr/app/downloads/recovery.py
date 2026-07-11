@@ -843,21 +843,26 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
                 "SNATCHED_QUEUE so the live torrent monitor resumes." % rkey
             )
         elif kind == "ddl":
-            # P2-5(a): DDL `still` resumes on DDL_QUEUE (the ddl_downloader
-            # worker), NOT NZB_QUEUE — cdh/nzb_monitor cannot historycheck a
-            # DDL item and the item would otherwise strand with no owner.
-            from comicarr.app.downloads.service import _enqueue_ddl_queue_item
+            # A direct DDL sender has no durable client identity or monitor
+            # protocol. After a crash, a live link proves only that the old
+            # side effect may still exist; re-sending would duplicate it.
+            journal.mark_manual_review(
+                rkey,
+                "ambiguous_ddl_acceptance_after_restart",
+                payload=payload,
+                issueid=row.get("issueid"),
+                provider=row.get("provider"),
+                downloader_type="ddl",
+            )
+            ddl_id = item.get("id")
+            if ddl_id:
+                from comicarr.app.downloads import queries as dl_queries
 
-            if _enqueue_ddl_queue_item(comicarr.DDL_QUEUE, item):
-                logger.info(
-                    "[RECOVERY] %s -> STILL (downloading) — re-enqueued onto "
-                    "DDL_QUEUE so the ddl_downloader worker resumes." % rkey
-                )
-            else:
-                logger.fdebug(
-                    "[RECOVERY] %s -> STILL (downloading) — DDL id already owned "
-                    "by this process queue/worker; skip duplicate put." % rkey
-                )
+                dl_queries.update_ddl_status(ddl_id, "Manual Review")
+            logger.warn(
+                "[RECOVERY] %s -> MANUAL REVIEW (ambiguous DDL acceptance after restart); "
+                "no duplicate sender call." % rkey
+            )
         else:
             comicarr.NZB_QUEUE.put(item)
             logger.info(

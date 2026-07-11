@@ -40,6 +40,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from comicarr import db, logger
+from comicarr.app.common.dates import now
 from comicarr.tables import pipeline_journal
 
 # ---------------------------------------------------------------------------
@@ -332,17 +333,23 @@ def _merge_payload(existing, incoming):
     merged = dict(existing or {})
     for key, value in (incoming or {}).items():
         old = merged.get(key)
-        if key in _IMMUTABLE_PAYLOAD_KEYS and old not in (None, "") and value not in (None, "") and old != value:
+        values_match = normalize_provider(old) == normalize_provider(value) if key == "provider" else old == value
+        if key in _IMMUTABLE_PAYLOAD_KEYS and old not in (None, "") and value not in (None, "") and not values_match:
             return merged, key
         if key == "download_info" and isinstance(value, dict):
             nested = dict(merged.get(key) or {})
             for nested_key, nested_value in value.items():
                 old_nested = nested.get(nested_key)
+                values_match = (
+                    normalize_provider(old_nested) == normalize_provider(nested_value)
+                    if nested_key == "provider"
+                    else old_nested == nested_value
+                )
                 if (
                     nested_key in _IMMUTABLE_PAYLOAD_KEYS
                     and old_nested not in (None, "")
                     and nested_value not in (None, "")
-                    and old_nested != nested_value
+                    and not values_match
                 ):
                     return merged, "download_info.%s" % nested_key
                 nested[nested_key] = nested_value
@@ -382,7 +389,7 @@ def load_payload(payload_json):
 
 
 def _now():
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+    return now()
 
 
 def _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
@@ -447,17 +454,25 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
     merged_payload, conflict = _merge_payload(existing_payload, payload)
     if existing_row is not None and not conflict:
         values = existing_row._mapping
-        conflict_fields = ("issueid", "provider") if new_attempt else (
-            "issueid",
-            "provider",
-            "downloader_type",
-            "nzbname",
-            "hash",
+        conflict_fields = (
+            ("issueid", "provider")
+            if new_attempt
+            else (
+                "issueid",
+                "provider",
+                "downloader_type",
+                "hash",
+            )
         )
         for field_name in conflict_fields:
             incoming = fields.get(field_name)
             current = values.get(field_name)
-            if incoming not in (None, "") and current not in (None, "") and str(incoming) != str(current):
+            values_match = (
+                normalize_provider(incoming) == normalize_provider(current)
+                if field_name == "provider"
+                else str(incoming) == str(current)
+            )
+            if incoming not in (None, "") and current not in (None, "") and not values_match:
                 conflict = field_name
                 break
     payload_json = _dump_payload(merged_payload) if merged_payload is not None else None

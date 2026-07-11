@@ -13,17 +13,20 @@ import datetime
 import json
 
 import pytest
-from sqlalchemy import String, inspect, select, update
+from sqlalchemy import String, insert, inspect, select, update
 
 import comicarr
 from comicarr import db
 from comicarr.app.acquisition.maintenance import MaintenanceController, ensure_acquisition_schema
+from comicarr.app.downloads import handoff, journal
 from comicarr.app.system.acquisition_repair import (
     RepairBlocked,
     RepairConfirmationError,
     RepairService,
 )
 from comicarr.tables import (
+    acquisition_canary_permits,
+    acquisition_maintenance_leases,
     acquisition_repair_canaries,
     acquisition_repair_events,
     acquisition_repair_items,
@@ -160,7 +163,7 @@ def _confirm(service, preview, *, selected=(), session_id="session-owner", canar
     )
 
 
-def test_schema_v2_declares_all_repair_tables_and_bounded_indexed_identifiers():
+def test_schema_v4_declares_repair_recovery_tables_and_bounded_indexed_identifiers():
     table_names = set(inspect(db.get_engine()).get_table_names())
     expected = {
         "acquisition_repair_runs",
@@ -169,6 +172,8 @@ def test_schema_v2_declares_all_repair_tables_and_bounded_indexed_identifiers():
         "acquisition_repair_series",
         "acquisition_repair_events",
         "acquisition_repair_canaries",
+        "acquisition_reconciliation",
+        "acquisition_canary_permits",
     }
     assert expected <= table_names
 
@@ -186,6 +191,8 @@ def test_schema_v2_declares_all_repair_tables_and_bounded_indexed_identifiers():
         acquisition_repair_events.c.run_id,
         acquisition_repair_canaries.c.run_id,
         acquisition_repair_canaries.c.entity_id,
+        acquisition_canary_permits.c.permit_id,
+        acquisition_canary_permits.c.release_key,
     }
     assert all(isinstance(column.type, String) and column.type.length for column in indexed_columns)
 
@@ -219,6 +226,28 @@ def test_absolute_batman_preview_is_read_only_and_conservative(tmp_path):
     assert preview["preview_token"] not in json.dumps(dict(stored_run), default=str)
     optional = [item for item in preview["items"] if item["optional"]]
     assert [item["entity_key"] for item in optional] == ["issue:released-19", "issue:released-20"]
+
+
+def test_public_repair_run_reads_persisted_proposed_values_and_can_omit_items(tmp_path):
+    _absolute_batman_fixture(tmp_path)
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+
+    detailed = service.read_public_run(
+        preview["run_id"],
+        actor="owner",
+        session_id="session-owner",
+    )
+    status_only = service.read_public_run(
+        preview["run_id"],
+        actor="owner",
+        session_id="session-owner",
+        include_items=False,
+    )
+
+    assert detailed["items"][0]["proposed_values"] == {"Status": "Downloaded"}
+    assert status_only["items"] == []
+    assert status_only["run"]["item_count"] == 22
 
 
 def test_confirmation_is_session_bound_single_use_and_freezes_selection(tmp_path):
@@ -283,6 +312,36 @@ def test_expired_confirmation_token_does_not_freeze_manifest(tmp_path):
     assert _row(acquisition_repair_manifests, acquisition_repair_manifests.c.run_id == preview["run_id"]) is None
 
 
+def test_large_manifest_confirmation_uses_incremental_fingerprint(tmp_path):
+    _insert_series(tmp_path)
+    with db.get_engine().begin() as conn:
+        conn.execute(
+            issues.insert(),
+            [
+                {
+                    "IssueID": "large-%04d" % index,
+                    "ComicID": "batman",
+                    "ComicName": "Absolute Batman",
+                    "Issue_Number": str(index),
+                    "Int_IssueNumber": index,
+                    "IssueName": "x" * 900,
+                    "Status": None,
+                    "ReleaseDate": "2026-01-01",
+                    "DigitalDate": None,
+                    "IssueDate": "2026-01-01",
+                }
+                for index in range(400)
+            ],
+        )
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+
+    confirmed = _confirm(service, preview)
+
+    assert confirmed["item_count"] == 400
+    assert confirmed["fingerprint"]
+
+
 def test_apply_requires_drained_fence_then_uses_null_safe_cas(tmp_path):
     _insert_series(tmp_path)
     _insert_issue("one", 1, date="2026-01-01")
@@ -303,6 +362,19 @@ def test_apply_requires_drained_fence_then_uses_null_safe_cas(tmp_path):
     assert _row(issues, issues.c.IssueID == "one")["Status"] == "Wanted"
     assert _row(comics, comics.c.ComicID == "batman")["Have"] == 0
     assert _row(comics, comics.c.ComicID == "batman")["Total"] == 1
+    assert MaintenanceController(db.get_engine()).status().active is False
+
+
+def test_apply_rejects_non_positive_batch_limit_before_acquiring_fence(tmp_path):
+    _insert_series(tmp_path)
+    _insert_issue("one", 1, date="2026-01-01")
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+    _confirm(service, preview, selected=("issue:one",))
+
+    with pytest.raises(ValueError, match="max_items"):
+        service.apply(preview["run_id"], actor="owner", session_id="session-owner", max_items=0)
+
     assert MaintenanceController(db.get_engine()).status().active is False
 
 
@@ -406,6 +478,52 @@ def test_precedence_preserves_explicit_intent_beside_owned_and_inflight(tmp_path
     assert items["issue:ambiguous-ddl"]["reason"] == "legacy_ddl_downloading_unproven"
 
 
+def test_future_explicit_wanted_intent_remains_deferred_without_status_mutation(tmp_path):
+    _insert_series(tmp_path)
+    _insert_issue("future-wanted", 1, status="Skipped", intent="wanted", date="2026-08-01")
+
+    preview = _preview(RepairService(db.get_engine()))
+    item = next(item for item in preview["items"] if item["entity_id"] == "future-wanted")
+
+    assert item["intent"] == "wanted"
+    assert item["reason"] == "future"
+    assert item["proposed_values"] == {}
+    assert item["selected"] is False
+
+
+def test_aggregate_only_drift_is_never_mutated_without_a_selected_source_change(tmp_path):
+    _insert_series(tmp_path)
+    _insert_issue("optional", 1, status="Skipped", date="2026-01-01")
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+    _confirm(service, preview)
+
+    result = service.apply(preview["run_id"], actor="owner", session_id="session-owner")
+
+    assert result["state"] == "completed"
+    series = _row(comics, comics.c.ComicID == "batman")
+    assert series["Have"] == 999
+    assert series["Total"] == 999
+
+
+def test_aggregate_compare_and_set_never_clobbers_concurrent_aggregate_change(tmp_path):
+    library = _insert_series(tmp_path)
+    (library / "owned.cbz").write_bytes(b"owned")
+    _insert_issue("owned", 1, status="Skipped", location="owned.cbz")
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+    _confirm(service, preview)
+    with db.get_engine().begin() as conn:
+        conn.execute(update(comics).where(comics.c.ComicID == "batman").values(Have=777, Total=777))
+
+    result = service.apply(preview["run_id"], actor="owner", session_id="session-owner")
+
+    assert result["state"] == "needs_review"
+    series = _row(comics, comics.c.ComicID == "batman")
+    assert series["Have"] == 777
+    assert series["Total"] == 777
+
+
 def test_archived_reserved_and_null_deleted_annual_participate_in_preview_and_aggregate(tmp_path):
     library = _insert_series(tmp_path)
     annual_name = "Absolute Batman Annual 001.cbz"
@@ -488,6 +606,197 @@ def test_canary_is_bound_to_owner_session_and_single_manifest_item(tmp_path):
     completed = service.apply(preview["run_id"], actor="owner", session_id="session-owner")
     assert completed["state"] == "completed"
     assert _row(issues, issues.c.IssueID == "two")["Status"] == "Wanted"
+
+
+def test_completed_repair_can_authorize_exactly_one_restart_safe_external_handoff(tmp_path):
+    library = _insert_series(tmp_path)
+    (library / "owned.cbz").write_bytes(b"owned")
+    _insert_issue("owned", 1, status="Skipped", location="owned.cbz")
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+    _confirm(service, preview)
+    assert service.apply(preview["run_id"], actor="owner", session_id="session-owner")["state"] == "completed"
+
+    release_key = journal.release_key("owned", "sabnzbd")
+    permit = service.authorize_acquisition_canary(
+        preview["run_id"],
+        actor="owner",
+        session_id="session-owner",
+        release_key=release_key,
+        route="sabnzbd",
+    )
+    sender_calls = []
+
+    response, acceptance = handoff.perform_handoff(
+        release_key,
+        "sabnzbd",
+        lambda: sender_calls.append("sent") or {"nzo_id": "nzo-canary"},
+        payload={"issueid": "owned", "provider": "sabnzbd"},
+    )
+
+    assert response == {"nzo_id": "nzo-canary"}
+    assert acceptance.restart_safe is True
+    assert sender_calls == ["sent"]
+    canary = service.get_acquisition_canary(permit["permit_id"], actor="owner", session_id="session-owner")
+    assert canary["state"] == "completed"
+    assert canary["outcome"] == "accepted"
+    assert journal.read_one(release_key)["stage"] == journal.SNATCHED
+
+    with pytest.raises(Exception):
+        handoff.perform_handoff(
+            journal.release_key("other", "sabnzbd"),
+            "sabnzbd",
+            lambda: pytest.fail("a second handoff must not reach the downloader"),
+            payload={"issueid": "other", "provider": "sabnzbd"},
+        )
+
+    released = service.release_acquisition_canary(
+        permit["permit_id"],
+        actor="owner",
+        session_id="session-owner",
+        reason="canary evidence recorded",
+    )
+    assert released["maintenance_released"] is True
+    assert MaintenanceController(db.get_engine()).status().active is False
+
+
+def test_authorized_external_canary_can_be_cancelled_before_side_effect(tmp_path):
+    library = _insert_series(tmp_path)
+    (library / "owned.cbz").write_bytes(b"owned")
+    _insert_issue("owned", 1, status="Skipped", location="owned.cbz")
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+    _confirm(service, preview)
+    assert service.apply(preview["run_id"], actor="owner", session_id="session-owner")["state"] == "completed"
+
+    permit = service.authorize_acquisition_canary(
+        preview["run_id"],
+        actor="owner",
+        session_id="session-owner",
+        release_key=journal.release_key("owned", "sabnzbd"),
+        route="sabnzbd",
+    )
+    released = service.release_acquisition_canary(
+        permit["permit_id"],
+        actor="owner",
+        session_id="session-owner",
+        reason="operator cancelled before downloader submission",
+    )
+
+    assert released["state"] == "cancelled"
+    assert released["outcome"].startswith("cancelled:")
+    assert released["maintenance_released"] is True
+    assert MaintenanceController(db.get_engine()).status().active is False
+
+
+def test_canary_fence_race_persists_wait_and_resumes_after_the_lease_drains(tmp_path):
+    """A worker that races the fence must not strand global acquisition."""
+
+    library = _insert_series(tmp_path)
+    (library / "owned.cbz").write_bytes(b"owned")
+    _insert_issue("owned", 1, status="Skipped", location="owned.cbz")
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+    _confirm(service, preview)
+    assert service.apply(preview["run_id"], actor="owner", session_id="session-owner")["state"] == "completed"
+
+    class FenceRaceMaintenance(MaintenanceController):
+        def __init__(self, engine):
+            super().__init__(engine)
+            self.raced_lease_id = "preexisting-worker-lease"
+            self.injected = False
+
+        def acquire_fence(self, owner, run_id, reason):
+            fence = super().acquire_fence(owner, run_id, reason)
+            if not self.injected:
+                self.injected = True
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        insert(acquisition_maintenance_leases).values(
+                            lease_id=self.raced_lease_id,
+                            epoch=fence.epoch - 1,
+                            owner="racing-worker",
+                            work_kind="search",
+                            entity_type="issue",
+                            entity_id="owned",
+                            acquired_at="2026-07-10T00:00:00+00:00",
+                            heartbeat_at="2026-07-10T00:00:00+00:00",
+                            released_at=None,
+                        )
+                    )
+            return self.status()
+
+    maintenance = FenceRaceMaintenance(db.get_engine())
+    service.maintenance = maintenance
+    release_key = journal.release_key("owned", "sabnzbd")
+    waiting = service.authorize_acquisition_canary(
+        preview["run_id"],
+        actor="owner",
+        session_id="session-owner",
+        release_key=release_key,
+        route="sabnzbd",
+    )
+
+    assert waiting["state"] == "waiting_for_drain"
+    assert MaintenanceController(db.get_engine()).status().active is True
+    assert (
+        service.get_acquisition_canary(waiting["permit_id"], actor="owner", session_id="session-owner")["state"]
+        == "waiting_for_drain"
+    )
+
+    assert maintenance.release_lease(maintenance.raced_lease_id) is True
+    authorized = service.authorize_acquisition_canary(
+        preview["run_id"],
+        actor="owner",
+        session_id="session-owner",
+        release_key=release_key,
+        route="sabnzbd",
+    )
+    assert authorized["permit_id"] == waiting["permit_id"]
+    assert authorized["state"] == "authorized"
+
+    released = service.release_acquisition_canary(
+        waiting["permit_id"],
+        actor="owner",
+        session_id="session-owner",
+        reason="racing worker drained without a downloader request",
+    )
+    assert released["state"] == "cancelled"
+    assert MaintenanceController(db.get_engine()).status().active is False
+
+
+def test_expired_waiting_canary_cannot_be_promoted(tmp_path):
+    library = _insert_series(tmp_path)
+    (library / "owned.cbz").write_bytes(b"owned")
+    _insert_issue("owned", 1, status="Skipped", location="owned.cbz")
+    service = RepairService(db.get_engine())
+    preview = _preview(service)
+    _confirm(service, preview)
+    service.apply(preview["run_id"], actor="owner", session_id="session-owner")
+    created = datetime.datetime(2026, 7, 10, tzinfo=datetime.timezone.utc)
+    permit = service.authorize_acquisition_canary(
+        preview["run_id"],
+        actor="owner",
+        session_id="session-owner",
+        release_key=journal.release_key("owned", "sabnzbd"),
+        route="sabnzbd",
+        now=created,
+        ttl_seconds=1,
+    )
+    with pytest.raises(RepairConfirmationError, match="expired"):
+        service.authorize_acquisition_canary(
+            preview["run_id"],
+            actor="owner",
+            session_id="session-owner",
+            release_key=permit["release_key"],
+            route="sabnzbd",
+            now=created + datetime.timedelta(seconds=2),
+        )
+    assert (
+        service.get_acquisition_canary(permit["permit_id"], actor="owner", session_id="session-owner")["state"]
+        == "cancelled"
+    )
+    assert MaintenanceController(db.get_engine()).status().active is False
 
 
 def test_conditional_rollback_restores_only_unchanged_applied_values(tmp_path):

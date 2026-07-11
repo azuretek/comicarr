@@ -16,7 +16,7 @@ import pytest
 
 import comicarr
 from comicarr import importer, updater
-from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController, ensure_acquisition_schema
 from comicarr.app.acquisition.runs import RunLedger
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import metadata
@@ -45,6 +45,7 @@ def acquisition_ledger(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     shutdown_engine()
     metadata.create_all(get_engine())
+    assert ensure_acquisition_schema(get_engine()).ready
     ledger = RunLedger(get_engine())
     yield ledger
     shutdown_engine()

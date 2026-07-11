@@ -1760,7 +1760,20 @@ def verification(verified_matches, is_info):
     return is_info  # foundc
 
 
-def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
+def searchforissue(
+    issueid=None,
+    new=False,
+    rsschecker=None,
+    manual=False,
+    acquisition_run_id=None,
+    acquisition_trigger=None,
+):
+    """Queue or run searches while preserving an optional outer run identity.
+
+    The historical backlog scan owns candidate discovery.  Manual callers can
+    now supply one durable run ID so all accepted Wanted rows become visible as
+    a single operation without changing the per-issue worker contract.
+    """
     if rsschecker == "yes":
         while comicarr.SEARCHLOCK.locked():
             # logger.info(
@@ -1823,6 +1836,8 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
             stloop = 2  # 3 levels - one for issues, one for storyarcs, one  for annuals
             results = []
             search_skip = {}
+            queued_count = 0
+            error_count = 0
 
             if comicarr.CONFIG.ANNUALS_ON:
                 stloop += 1
@@ -2141,7 +2156,13 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     else:
                         DateAdded = result["DateAdded"]
 
-                    if rsschecker is None and DateAdded >= comicarr.SEARCH_TIER_DATE:
+                    # Automatic scans retain their tier guard. An explicit
+                    # operator-run backlog scan is intentionally broader: its
+                    # durable run provides the audit trail and it must not
+                    # silently leave older Wanted obligations untouched.
+                    if rsschecker is None and (
+                        DateAdded >= comicarr.SEARCH_TIER_DATE or acquisition_run_id is not None
+                    ):
                         logger.fdebug(
                             "[TIER1] Adding: %s #%s [ComicID:%s / IssueiD: %s][ %s >= %s]"
                             % (
@@ -2163,9 +2184,14 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 "issueid": result["IssueID"],
                                 "comicid": result["ComicID"],
                                 "booktype": booktype,
+                                "entity_type": "annual" if result.get("mode") == "want_ann" else "issue",
                             },
-                            trigger="wanted_scan",
+                            trigger=acquisition_trigger or "wanted_scan",
+                            run_id=acquisition_run_id,
+                            scope_type="wanted_backlog" if acquisition_run_id else None,
+                            scope_id="all" if acquisition_run_id else None,
                         )
+                        queued_count += 1
                         continue
                     elif rsschecker:
                         if not [
@@ -2247,6 +2273,7 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     #        )
 
                 except Exception as err:
+                    error_count += 1
                     exc_type, exc_value, exc_tb = sys.exc_info()
                     filename, line_num, func_name, err_text = traceback.extract_tb(exc_tb)[-1]
                     tracebackline = traceback.format_exc()
@@ -2546,6 +2573,12 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                 logger.info("Completed Queueing API Search scan")
                 if comicarr.SEARCHLOCK.locked():
                     comicarr.SEARCHLOCK.release()
+                return {
+                    "status": "QUEUED",
+                    "queued_count": queued_count,
+                    "error_count": error_count,
+                    "run_id": acquisition_run_id,
+                }
         else:
             try:
                 comicarr.SEARCHLOCK.acquire()
@@ -2792,10 +2825,16 @@ def searchIssueIDList(issuelist):
     ):
         for issueid in issuelist:
             comicname = None
+            entity_type = "issue"
             issue = db.select_one(select(issues).where(issues.c.IssueID == issueid))
             if issue is None:
-                issue = db.select_one(select(annuals).where((annuals.c.IssueID == issueid) & (annuals.c.Deleted != 1)))
-                if issue is None:
+                annual_issue = db.select_one(
+                    select(annuals).where((annuals.c.IssueID == issueid) & (annuals.c.Deleted != 1))
+                )
+                if annual_issue is not None:
+                    issue = annual_issue
+                    entity_type = "annual"
+                else:
                     issue = db.select_one(select(storyarcs).where(storyarcs.c.IssueArcID == issueid))
                     if issue is not None:
                         comicname = issue["ComicName"]
@@ -2837,6 +2876,7 @@ def searchIssueIDList(issuelist):
                     "issueid": issue["IssueID"],  # issueid,
                     "comicid": issue["ComicID"],
                     "booktype": booktype,
+                    "entity_type": entity_type,
                 },
                 trigger="issue_list",
             )
@@ -3438,6 +3478,7 @@ def searcher(
         if os.path.exists(comicarr.CONFIG.BLACKHOLE_DIR):
             # copy the nzb from nzbpath to blackhole dir.
             try:
+
                 def _blackhole_sender():
                     shutil.move(nzbpath, os.path.join(comicarr.CONFIG.BLACKHOLE_DIR, nzbname))
                     return {"status": True}

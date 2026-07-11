@@ -69,6 +69,13 @@ def _bool_value(value: Any, key: str) -> bool:
     return bool(value)
 
 
+def _entity_type(value: Any) -> str:
+    normalized = str(value or "issue").strip().lower()
+    if normalized not in {"issue", "annual"}:
+        raise SearchCommandError("Invalid search entity type")
+    return normalized
+
+
 @dataclass(frozen=True)
 class SearchCommand:
     """The stable identity and display context for one issue search."""
@@ -81,6 +88,7 @@ class SearchCommand:
     seriesyear: str | None = None
     issuenumber: str | None = None
     booktype: str | None = None
+    entity_type: str = "issue"
 
     @classmethod
     def from_mapping(cls, raw_values: Mapping[str, Any]) -> "SearchCommand":
@@ -97,6 +105,10 @@ class SearchCommand:
             seriesyear=_optional_text(values.get("seriesyear")),
             issuenumber=_optional_text(values.get("issuenumber") or values.get("issue_number")),
             booktype=_optional_text(values.get("booktype")),
+            entity_type=_entity_type(
+                values.get("entity_type")
+                or ("annual" if _bool_value(values.get("annual", False), "annual") else "issue")
+            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -110,6 +122,7 @@ class SearchCommand:
             "seriesyear": self.seriesyear,
             "issuenumber": self.issuenumber,
             "booktype": self.booktype,
+            "entity_type": self.entity_type,
         }
 
     def persisted_payload(self) -> dict[str, Any]:
@@ -121,10 +134,21 @@ class SearchCommand:
             "comicname": self.comicname,
             "seriesyear": self.seriesyear,
             "issue_number": self.issuenumber,
+            "entity_type": self.entity_type,
         }
 
 
-def enqueue_search_command(raw_values, *, trigger, work_queue=None, ledger=None, run_id=None, maintenance=None):
+def enqueue_search_command(
+    raw_values,
+    *,
+    trigger,
+    work_queue=None,
+    ledger=None,
+    run_id=None,
+    maintenance=None,
+    scope_type=None,
+    scope_id=None,
+):
     """Persist one search obligation before handing it to the in-memory queue."""
     from comicarr.app.acquisition.runs import RunLedger
 
@@ -138,20 +162,33 @@ def enqueue_search_command(raw_values, *, trigger, work_queue=None, ledger=None,
         effective_run_id,
         command_kind="search",
         trigger=trigger,
-        scope_type="issue",
-        scope_id=command.issueid,
+        scope_type=scope_type or "issue",
+        scope_id=scope_id or command.issueid,
     )
     ledger.accept_item(
         effective_run_id,
-        entity_type="issue",
+        entity_type=command.entity_type,
         entity_id=command.issueid,
         payload=command.persisted_payload(),
     )
     try:
-        _put_with_maintenance_lease(command, work_queue, maintenance)
-    except Exception:
+        dispatch_persisted_search_command(command, work_queue=work_queue, maintenance=maintenance)
+    except Exception as e:
+        ledger.record_item_dispatch(
+            effective_run_id,
+            command.entity_type,
+            command.issueid,
+            DispatchState.ERROR,
+            reason=type(e).__name__,
+        )
         ledger.record_dispatch(effective_run_id, DispatchState.ERROR)
         raise
+    ledger.record_item_dispatch(
+        effective_run_id,
+        command.entity_type,
+        command.issueid,
+        DispatchState.ACCEPTED,
+    )
     ledger.record_dispatch(effective_run_id, DispatchState.ACCEPTED)
     return command
 
@@ -163,11 +200,72 @@ def _put_with_maintenance_lease(command, work_queue, maintenance=None):
     with controller.lease(
         "search-producer",
         work_kind="search_queue_handoff",
-        entity_type="issue",
+        entity_type=command.entity_type,
         entity_id=command.issueid,
     ) as lease:
         controller.assert_lease_current(lease)
         work_queue.put(command.to_mapping())
+
+
+def dispatch_persisted_search_command(command, *, work_queue=None, maintenance=None):
+    """Hand off an already-ledgered command without creating a second item.
+
+    Bulk confirmation persists all source and ledger changes in one database
+    transaction before it touches the in-memory queue.  Reusing this boundary
+    keeps that flow subject to the same maintenance fence as ordinary search
+    producers while avoiding a second ``accept_item`` call during a browser
+    retry.
+    """
+
+    work_queue = work_queue or comicarr.SEARCH_QUEUE
+    _put_with_maintenance_lease(command, work_queue, maintenance)
+
+
+def dispatch_pending_search_commands(run_id, *, work_queue=None, ledger=None, maintenance=None):
+    """Dispatch only durable search items that were never handed to a worker.
+
+    The row-level dispatch state prevents an idempotent browser retry from
+    enqueuing an already accepted item while its original worker may be
+    running. A crash after ``Queue.put`` is still safe because worker claiming
+    is compare-and-set, and a later process restart reconciles that boundary.
+    """
+
+    from comicarr.app.acquisition.runs import RunLedger
+
+    ledger = ledger or RunLedger()
+    work_queue = work_queue or comicarr.SEARCH_QUEUE
+    dispatched = 0
+    errors = []
+    for item in ledger.list_pending_dispatch_items(run_id):
+        entity_type = item["entity_type"]
+        entity_id = item["entity_id"]
+        if not ledger.claim_item_dispatch(run_id, entity_type, entity_id):
+            continue
+        try:
+            command = SearchCommand.from_mapping(
+                {**(item["payload"] or {}), "run_id": run_id, "entity_type": entity_type}
+            )
+        except SearchCommandError as e:
+            ledger.record_outcome(run_id, entity_type, entity_id, ItemOutcome.QUARANTINED, reason=str(e))
+            errors.append(type(e).__name__)
+            continue
+        try:
+            dispatch_persisted_search_command(command, work_queue=work_queue, maintenance=maintenance)
+        except Exception as e:
+            ledger.record_item_dispatch(
+                run_id,
+                entity_type,
+                entity_id,
+                DispatchState.ERROR,
+                reason=type(e).__name__,
+            )
+            errors.append(type(e).__name__)
+            continue
+        ledger.record_item_dispatch(run_id, entity_type, entity_id, DispatchState.ACCEPTED)
+        dispatched += 1
+
+    ledger.record_dispatch(run_id, DispatchState.ERROR if errors else DispatchState.ACCEPTED)
+    return {"dispatched": dispatched, "errors": errors}
 
 
 def replay_search_obligations(*, work_queue=None, ledger=None, maintenance=None):
@@ -181,13 +279,16 @@ def replay_search_obligations(*, work_queue=None, ledger=None, maintenance=None)
         run_id = item["run_id"]
         entity_id = item["entity_id"]
         try:
-            command = SearchCommand.from_mapping({**(item["payload"] or {}), "run_id": run_id})
+            command = SearchCommand.from_mapping(
+                {**(item["payload"] or {}), "run_id": run_id, "entity_type": item["entity_type"]}
+            )
         except SearchCommandError as e:
-            ledger.record_outcome(run_id, "issue", entity_id, ItemOutcome.QUARANTINED, reason=str(e))
+            ledger.record_outcome(run_id, item["entity_type"], entity_id, ItemOutcome.QUARANTINED, reason=str(e))
             continue
         if item["state"] == ItemOutcome.RUNNING.value:
-            ledger.record_requeue(run_id, "issue", entity_id, reason="worker restart")
+            ledger.record_requeue(run_id, item["entity_type"], entity_id, reason="worker restart")
         _put_with_maintenance_lease(command, work_queue, maintenance)
+        ledger.record_item_dispatch(run_id, item["entity_type"], entity_id, DispatchState.ACCEPTED)
         ledger.record_dispatch(run_id, DispatchState.ACCEPTED)
         replayed += 1
     return replayed

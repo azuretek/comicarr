@@ -159,3 +159,21 @@ def get_provider_stats(ctx: AppContext = Depends(get_context)):
 def get_search_health(ctx: AppContext = Depends(get_context)):
     """Get acquisition-route, durable run, worker, and maintenance health."""
     return search_service.get_health(ctx)
+
+
+@router.get("/runs/{run_id}", dependencies=[Depends(require_session)])
+def get_search_run(run_id: str, include_items: bool = True, ctx: AppContext = Depends(get_context)):
+    """Poll the terminal outcome of a durable search run."""
+    result = search_service.get_run(ctx, run_id, include_items=include_items)
+    if result.get("success") is False:
+        return JSONResponse(status_code=int(result.get("status_code") or 404), content=result)
+    return result
+
+
+@router.post("/runs/{run_id}/retry", dependencies=[Depends(require_session)])
+def retry_search_run(run_id: str, ctx: AppContext = Depends(get_context)):
+    """Redrive durable search obligations that missed their queue handoff."""
+    result = search_service.retry_run(ctx, run_id)
+    if result.get("success") is False and result.get("status_code"):
+        return JSONResponse(status_code=int(result["status_code"]), content=result)
+    return result

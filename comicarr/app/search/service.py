@@ -17,6 +17,7 @@ rsscheck.py. Preserves ThreadPoolExecutor for parallel provider queries.
 import datetime
 import re
 import time
+import uuid
 from operator import itemgetter
 from pathlib import Path
 from urllib.parse import urljoin
@@ -25,7 +26,7 @@ import requests
 
 import comicarr
 from comicarr import db, logger
-from comicarr.app.acquisition.models import ItemOutcome
+from comicarr.app.acquisition.models import DispatchState, ItemOutcome, RunState
 from comicarr.app.search.commands import SearchCommand, SearchCommandError
 from comicarr.tables import issues, ref32p
 
@@ -182,11 +183,127 @@ def add_manga(ctx, manga_id):
 
 
 def force_search(ctx):
-    """Trigger a full search for all wanted issues."""
+    """Trigger a full search for all wanted issues with a durable outcome."""
     from comicarr import search
+    from comicarr.app.acquisition.runs import RunLedger
+    from comicarr.app.search.health import get_search_health
 
-    search.searchforissue()
-    return {"success": True, "message": "Search initiated"}
+    health = get_search_health(
+        ctx.config,
+        provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
+    )
+    routes = health.get("routes") or {}
+    viable = bool(health.get("viable_route")) or any(
+        bool((routes.get(name) or {}).get("ready") or (routes.get(name) or {}).get("viable"))
+        for name in ("ddl", "nzb", "torrent")
+    )
+    if health.get("blocked") or not viable:
+        return {
+            "success": False,
+            "status": "blocked",
+            "error": health.get("reason") or "no_viable_acquisition_route",
+            "message": "Search blocked: no complete acquisition route is ready",
+        }
+
+    run_id = str(uuid.uuid4())
+    ledger = RunLedger()
+    ledger.create_run(
+        run_id,
+        command_kind="search",
+        trigger="manual_wanted_scan",
+        scope_type="wanted_backlog",
+        scope_id="all",
+    )
+    try:
+        queue_result = search.searchforissue(
+            acquisition_run_id=run_id,
+            acquisition_trigger="manual_wanted_scan",
+        )
+    except Exception as e:
+        logger.error("[SEARCH] Force search failed: %s" % e)
+        ledger.complete_empty_run(
+            run_id,
+            completion_state=RunState.FAILED,
+            dispatch_state=DispatchState.ERROR,
+        )
+        return {
+            "success": False,
+            "status": "failed",
+            "run_id": run_id,
+            "error": "Search failed to start",
+            "message": "Search failed to start",
+        }
+
+    queue_result = queue_result if isinstance(queue_result, dict) else {}
+    if str(queue_result.get("status") or "").strip().upper() == "IN PROGRESS":
+        ledger.complete_empty_run(
+            run_id,
+            completion_state=RunState.BLOCKED,
+            dispatch_state=DispatchState.ERROR,
+        )
+        return {
+            "success": False,
+            "status": "blocked",
+            "run_id": run_id,
+            "error": "search_already_in_progress",
+            "message": "Search is already running; no new Wanted items were queued",
+        }
+
+    try:
+        accepted = max(0, int(queue_result.get("queued_count") or 0))
+    except (TypeError, ValueError):
+        accepted = 0
+    try:
+        handoff_errors = max(0, int(queue_result.get("error_count") or 0))
+    except (TypeError, ValueError):
+        handoff_errors = 0
+    if accepted == 0:
+        if handoff_errors:
+            ledger.complete_empty_run(
+                run_id,
+                completion_state=RunState.FAILED,
+                dispatch_state=DispatchState.ERROR,
+            )
+            return {
+                "success": False,
+                "status": "failed",
+                "run_id": run_id,
+                "accepted": 0,
+                "error": "Wanted issues could not be queued",
+                "message": "Search could not queue eligible Wanted issues",
+            }
+        ledger.complete_empty_run(run_id)
+        return {
+            "success": True,
+            "status": "no_match",
+            "run_id": run_id,
+            "accepted": 0,
+            "message": "No eligible Wanted issues were queued",
+        }
+
+    # Every enqueue records accepted dispatch itself. Reasserting it is
+    # idempotent and makes the outer scan's acceptance visible even if the
+    # legacy loop later changes its internal handoff details. A mixed scan
+    # retains the accepted obligations but surfaces the handoff failures.
+    ledger.record_dispatch(run_id, DispatchState.ERROR if handoff_errors else DispatchState.ACCEPTED)
+    run = ledger.get_run(run_id) or {}
+    if handoff_errors:
+        return {
+            "success": True,
+            "status": "partial",
+            "run_id": run_id,
+            "accepted": int(run.get("accepted_count") or accepted),
+            "error": "Some Wanted issues could not be queued",
+            "message": "Search queued %s Wanted issue%s; %s could not be queued"
+            % (accepted, "" if accepted == 1 else "s", handoff_errors),
+        }
+    return {
+        "success": True,
+        "status": "accepted",
+        "run_id": run_id,
+        "accepted": int(run.get("accepted_count") or accepted),
+        "message": "Search queued for %s Wanted issue%s" % (accepted, "" if accepted == 1 else "s"),
+    }
 
 
 def force_rss(ctx):
@@ -215,6 +332,97 @@ def get_health(ctx):
         ctx.config,
         provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
     )
+
+
+def get_run(ctx, run_id, include_items=True):
+    """Return a durable search run without exposing provider request data."""
+    from comicarr.app.acquisition.runs import RunLedger
+
+    ledger = RunLedger()
+    run = ledger.get_run(run_id)
+    if run is None or run["command_kind"] != "search":
+        return {"success": False, "error": "search run not found", "status_code": 404}
+    return {
+        "success": True,
+        "run": {
+            key: run[key]
+            for key in (
+                "run_id",
+                "command_kind",
+                "trigger",
+                "scope_type",
+                "scope_id",
+                "dispatch_state",
+                "completion_state",
+                "accepted_count",
+                "terminal_count",
+                "succeeded_count",
+                "no_match_count",
+                "blocked_count",
+                "failed_count",
+                "created_at",
+                "updated_at",
+                "completed_at",
+            )
+        },
+        "items": (
+            [
+                {
+                    "entity_type": item["entity_type"],
+                    "entity_id": item["entity_id"],
+                    "state": item["state"],
+                    "attempt_count": item["attempt_count"],
+                    "reason": item["reason"],
+                    "updated_at": item["updated_at"],
+                    "completed_at": item["completed_at"],
+                }
+                for item in ledger.list_items(run_id)
+            ]
+            if include_items
+            else []
+        ),
+    }
+
+
+def retry_run(ctx, run_id):
+    """Redrive only search items whose durable queue handoff is still pending."""
+    from comicarr.app.acquisition.runs import RunLedger
+    from comicarr.app.search.commands import dispatch_pending_search_commands
+
+    ledger = RunLedger()
+    run = ledger.get_run(run_id)
+    if run is None or run["command_kind"] != "search":
+        return {"success": False, "error": "search run not found", "status_code": 404}
+    if run["completion_state"] in {"completed", "partial", "blocked", "failed"}:
+        return {
+            "success": False,
+            "error": "terminal search runs cannot be retried",
+            "status_code": 409,
+        }
+    try:
+        result = dispatch_pending_search_commands(run_id, ledger=ledger)
+    except Exception as e:
+        logger.error("[SEARCH] Search run retry failed: %s", e)
+        return {"success": False, "error": "search queue handoff retry failed", "status_code": 503}
+    refreshed = ledger.get_run(run_id) or run
+    if result["errors"]:
+        status = "partial" if result["dispatched"] else "failed"
+        message = "Some search items still need queue handoff retry"
+    elif result["dispatched"]:
+        status = "accepted"
+        message = "Search queue handoff retry accepted"
+    else:
+        status = "accepted"
+        message = "No pending search queue handoffs remain"
+    return {
+        "success": not bool(result["errors"]),
+        "status": status,
+        "run_id": run_id,
+        "dispatched": result["dispatched"],
+        "errors": result["errors"],
+        "message": message,
+        "run": refreshed,
+    }
 
 
 # --- Extracted from helpers.py ---
@@ -742,9 +950,11 @@ def _safe_task_done(queue):
 
 
 def _requeue_search_command(queue, command, ledger, reason):
+    requeued = None
     if ledger and command.run_id:
-        ledger.record_requeue(command.run_id, "issue", command.issueid, reason=reason)
+        requeued = ledger.record_requeue(command.run_id, command.entity_type, command.issueid, reason=reason)
     queue.put(command.to_mapping())
+    return requeued
 
 
 def _record_search_worker_health(state, error=None):
@@ -760,7 +970,7 @@ def _record_search_worker_health(state, error=None):
 def search_queue(queue, ledger=None, maintenance=None):
     import queue as queue_module
 
-    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController, maintenance_retry_delay
 
     worker_maintenance = maintenance
     last_heartbeat = 0.0
@@ -796,19 +1006,17 @@ def search_queue(queue, ledger=None, maintenance=None):
                 continue
 
             if command_ledger and command.run_id:
-                item_state = command_ledger.get_item(command.run_id, "issue", command.issueid)
+                item_state = command_ledger.get_item(command.run_id, command.entity_type, command.issueid)
                 if item_state is None:
                     raise SearchCommandError("Search command references an unknown durable obligation")
                 if ItemOutcome(item_state["state"]).terminal:
                     continue
                 if item_state["state"] == ItemOutcome.RUNNING.value:
-                    command_ledger.record_requeue(
-                        command.run_id,
-                        "issue",
-                        command.issueid,
-                        reason="recovered running queue item",
-                    )
-                if not command_ledger.claim_item(command.run_id, "issue", command.issueid):
+                    # A live duplicate must never reclaim an in-flight
+                    # provider search. True crash recovery resets RUNNING
+                    # obligations before it puts them back on this queue.
+                    continue
+                if not command_ledger.claim_item(command.run_id, command.entity_type, command.issueid):
                     continue
 
             try:
@@ -817,7 +1025,7 @@ def search_queue(queue, ledger=None, maintenance=None):
                 with worker_maintenance.lease(
                     "search-worker",
                     work_kind="provider_search",
-                    entity_type="issue",
+                    entity_type=command.entity_type,
                     entity_id=command.issueid,
                 ) as lease:
                     worker_maintenance.assert_lease_current(lease)
@@ -827,7 +1035,7 @@ def search_queue(queue, ledger=None, maintenance=None):
                     if command_ledger and command.run_id:
                         command_ledger.record_outcome(
                             command.run_id,
-                            "issue",
+                            command.entity_type,
                             command.issueid,
                             ItemOutcome.FAILED,
                             reason=str(e),
@@ -835,20 +1043,20 @@ def search_queue(queue, ledger=None, maintenance=None):
                     logger.error("[SEARCH-QUEUE] Search command %s failed: %s" % (command.issueid, e))
                     _record_search_worker_health("failed", e)
                     continue
-                _requeue_search_command(queue, command, command_ledger, str(e))
+                requeued = _requeue_search_command(queue, command, command_ledger, str(e))
                 _record_search_worker_health("blocked", e)
-                time.sleep(1)
+                time.sleep(maintenance_retry_delay((requeued or {}).get("attempt_count", 1)))
                 continue
 
             outcome, outcome_reason = _search_outcome(result)
             if outcome is None:
-                _requeue_search_command(queue, command, command_ledger, outcome_reason)
-                time.sleep(1)
+                requeued = _requeue_search_command(queue, command, command_ledger, outcome_reason)
+                time.sleep(maintenance_retry_delay((requeued or {}).get("attempt_count", 1)))
                 continue
             if command_ledger and command.run_id:
                 command_ledger.record_outcome(
                     command.run_id,
-                    "issue",
+                    command.entity_type,
                     command.issueid,
                     outcome,
                     reason=outcome_reason,

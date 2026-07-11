@@ -52,6 +52,7 @@ import pytest
 from sqlalchemy import select
 
 import comicarr
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import journal, recovery, recovery_classify
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import issues, metadata, nzblog, pipeline_journal, snatched
@@ -89,6 +90,7 @@ def _isolated_db(tmp_path, monkeypatch):
     comicarr.SIGNAL = None
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     yield
     comicarr.SIGNAL = saved_signal
     shutdown_engine()
@@ -130,10 +132,7 @@ def _insert_journal(release_key, stage, payload=None, **fields):
 
 
 def _probe(value):
-    return {
-        dt: (lambda row, v=value: v)
-        for dt in ("torrent", "nzb", "sab", "sabnzbd", "nzbget", "ddl", "DDL")
-    }
+    return {dt: (lambda row, v=value: v) for dt in ("torrent", "nzb", "sab", "sabnzbd", "nzbget", "ddl", "DDL")}
 
 
 def _artifact_folder(tmp_path, name):

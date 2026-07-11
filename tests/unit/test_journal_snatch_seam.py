@@ -30,6 +30,7 @@ from sqlalchemy import insert, select
 
 import comicarr
 from comicarr import updater
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import handoff, journal, service
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import comics, ddl_info, issues, metadata, nzblog, pipeline_journal, snatched
@@ -55,6 +56,7 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     yield
     shutdown_engine()
 

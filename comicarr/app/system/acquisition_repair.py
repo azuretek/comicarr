@@ -29,14 +29,19 @@ import json
 import secrets
 import time
 import uuid
-from pathlib import Path
 
 from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.exc import OperationalError
 
+from comicarr.app.acquisition.evidence import (
+    has_verified_file_under_root,
+    has_verified_library_file,
+    resolve_library_root,
+)
 from comicarr.app.acquisition.maintenance import MaintenanceConflict, MaintenanceController
 from comicarr.app.acquisition.models import AcquisitionIntent, Fulfillment
 from comicarr.tables import (
+    acquisition_canary_permits,
     acquisition_repair_canaries,
     acquisition_repair_events,
     acquisition_repair_items,
@@ -67,7 +72,6 @@ _INTENT_STATUS = {
     AcquisitionIntent.SKIPPED.value: "Skipped",
     AcquisitionIntent.IGNORED.value: "Ignored",
 }
-_OWNED_STATUSES = {"Downloaded", "Archived"}
 _SOURCE_TABLES = {"issue": issues, "annual": annuals}
 
 
@@ -156,18 +160,7 @@ def _selected_date(row):
 
 
 def _safe_verified_file(series, row):
-    root = series.get("ComicLocation")
-    location = row.get("Location")
-    if not root or not location:
-        return False
-    try:
-        root_path = Path(str(root)).expanduser().resolve(strict=True)
-        raw = Path(str(location)).expanduser()
-        candidate = raw if raw.is_absolute() else root_path / raw
-        candidate = candidate.resolve(strict=True)
-        return candidate.is_relative_to(root_path) and candidate.is_file()
-    except (OSError, RuntimeError, ValueError):
-        return False
+    return has_verified_library_file(series.get("ComicLocation"), row.get("Location"))
 
 
 def _source_before(row):
@@ -200,8 +193,11 @@ def _aggregate_document(series):
         "series_id": series["series_id"],
         "before_have": series.get("before_have"),
         "before_total": series.get("before_total"),
-        "proposed_have": series.get("proposed_have"),
-        "proposed_total": series.get("proposed_total"),
+        # ``final_*`` are the persisted expected aggregate proposal. The
+        # table predates the manifest projection, so retain its bounded,
+        # portable columns rather than adding a second unbounded document.
+        "proposed_have": series.get("proposed_have", series.get("final_have")),
+        "proposed_total": series.get("proposed_total", series.get("final_total")),
         "selected": bool(series.get("aggregate_selected")),
     }
 
@@ -415,7 +411,12 @@ class RepairService:
                     reason = "missing_date"
 
                 if legacy is None:
-                    if intent in _EXPLICIT_INTENTS:
+                    if intent in _EXPLICIT_INTENTS and reason not in {
+                        "paused",
+                        "future",
+                        "invalid_date",
+                        "missing_date",
+                    }:
                         target = _INTENT_STATUS[intent]
                         if current_status != target:
                             proposed["Status"] = target
@@ -526,8 +527,20 @@ class RepairService:
 
         for sequence, item in enumerate(items, start=1):
             item["sequence"] = sequence
-        preview_fingerprint = _fingerprint(items)
         summary = self._summary(items)
+        aggregate_document = {
+            "series_id": str(series_id),
+            "before_have": series.get("Have"),
+            "before_total": series.get("Total"),
+            # Ownership is evidence-backed at preview time. A status repair
+            # cannot make a non-existent file count as owned later.
+            "final_have": sum(
+                item["fulfillment"] in {Fulfillment.DOWNLOADED.value, Fulfillment.ARCHIVED.value} for item in items
+            ),
+            "final_total": len(items),
+            "aggregate_selected": bool(summary["selected"]),
+        }
+        preview_fingerprint = _fingerprint(items, (aggregate_document,))
         when = created.isoformat()
 
         with self.engine.begin() as conn:
@@ -565,10 +578,11 @@ class RepairService:
                     series_id=str(series_id),
                     state="previewed",
                     dirty=0,
+                    aggregate_selected=int(aggregate_document["aggregate_selected"]),
                     before_have=series.get("Have"),
                     before_total=series.get("Total"),
-                    final_have=None,
-                    final_total=None,
+                    final_have=aggregate_document["final_have"],
+                    final_total=aggregate_document["final_total"],
                     conflict_reason=None,
                     updated_at=when,
                 )
@@ -711,7 +725,22 @@ class RepairService:
                         .values(selected=int(selected), updated_at=confirmed_at.isoformat())
                     )
 
-            frozen_fingerprint = hashlib.sha256(_json(documents).encode("utf-8")).hexdigest()
+            aggregate_rows = [
+                dict(row)
+                for row in conn.execute(
+                    select(acquisition_repair_series).where(acquisition_repair_series.c.run_id == str(run_id))
+                ).mappings()
+            ]
+            for series_row in aggregate_rows:
+                conn.execute(
+                    update(acquisition_repair_series)
+                    .where(acquisition_repair_series.c.series_item_id == series_row["series_item_id"])
+                    .values(aggregate_selected=int(selected_count > 0), updated_at=confirmed_at.isoformat())
+                )
+                series_row["aggregate_selected"] = int(selected_count > 0)
+            # Hash each bounded record rather than one giant document. This
+            # keeps confirmation valid for large libraries just like preview.
+            frozen_fingerprint = _fingerprint(documents, aggregate_rows)
             consumed = conn.execute(
                 update(acquisition_repair_runs)
                 .where(acquisition_repair_runs.c.run_id == str(run_id))
@@ -803,6 +832,41 @@ class RepairService:
             row["entity_key"] = _entity_key(row["entity_type"], row["entity_id"])
         return rows
 
+    def read_public_run(self, run_id, *, actor, session_id, include_items=True):
+        """Return the owner-authorized public repair projection.
+
+        Polling callers can omit the immutable manifest items while a repair is
+        running; the run counters remain the authoritative progress view.
+        """
+
+        run = self.get_run(run_id)
+        if run is None:
+            return None
+        self._authorize(run, actor, session_id)
+        return {
+            "run": {
+                key: run[key]
+                for key in (
+                    "run_id",
+                    "scope_type",
+                    "scope_id",
+                    "state",
+                    "item_count",
+                    "selected_count",
+                    "applied_count",
+                    "conflict_count",
+                    "rollback_count",
+                    "rollback_conflict_count",
+                    "last_sequence",
+                    "created_at",
+                    "confirmed_at",
+                    "started_at",
+                    "completed_at",
+                )
+            },
+            "items": [self._public_item(item) for item in self.list_items(run_id)] if include_items else [],
+        }
+
     def _event(self, conn, run_id, action, actor, reason, item=None):
         conn.execute(
             insert(acquisition_repair_events).values(
@@ -817,7 +881,7 @@ class RepairService:
             )
         )
 
-    def _acquire_drained_fence(self, run, actor):
+    def _acquire_drained_fence(self, run, actor, *, waiting_state="waiting_for_drain"):
         try:
             fence = self.maintenance.acquire_fence(str(actor), run["run_id"], "acquisition repair apply")
         except MaintenanceConflict as e:
@@ -829,6 +893,18 @@ class RepairService:
                 .values(maintenance_epoch=fence.epoch, updated_at=_iso())
             )
         if not fence.drained:
+            # The fence must remain active until pre-existing side effects
+            # drain; releasing it earlier would let fresh claims race a repair.
+            # Persist a resumable, visible wait state instead of returning a
+            # generic error that looks like an abandoned maintenance toggle.
+            self.maintenance.heartbeat_fence(str(actor), run["run_id"], fence.epoch)
+            with self.engine.begin() as conn:
+                conn.execute(
+                    update(acquisition_repair_runs)
+                    .where(acquisition_repair_runs.c.run_id == run["run_id"])
+                    .values(state=waiting_state, updated_at=_iso())
+                )
+                self._event(conn, run["run_id"], "drain_wait", actor, "waiting for active acquisition leases")
             raise RepairBlocked("active acquisition leases must drain before repair mutation")
         return fence
 
@@ -949,20 +1025,49 @@ class RepairService:
         return self._write_with_retry(operation)
 
     def _aggregate_counts(self, conn, series_id):
-        issue_total = conn.execute(
-            select(func.count()).select_from(issues).where(issues.c.ComicID == str(series_id))
-        ).scalar_one()
+        series = (
+            conn.execute(select(comics.c.ComicLocation).where(comics.c.ComicID == str(series_id))).mappings().first()
+        )
+        if series is None:
+            raise RepairError("series disappeared during aggregate finalization")
+        root = resolve_library_root(series.get("ComicLocation"))
         annual_filter = (annuals.c.ComicID == str(series_id)) & or_(annuals.c.Deleted.is_(None), annuals.c.Deleted != 1)
-        annual_total = conn.execute(select(func.count()).select_from(annuals).where(annual_filter)).scalar_one()
-        issue_have = conn.execute(
-            select(func.count())
-            .select_from(issues)
-            .where(issues.c.ComicID == str(series_id), issues.c.Status.in_(tuple(_OWNED_STATUSES)))
-        ).scalar_one()
-        annual_have = conn.execute(
-            select(func.count()).select_from(annuals).where(annual_filter, annuals.c.Status.in_(tuple(_OWNED_STATUSES)))
-        ).scalar_one()
-        return int(issue_have + annual_have), int(issue_total + annual_total)
+        source_rows = [
+            *[
+                dict(row)
+                for row in conn.execute(
+                    select(issues.c.Status, issues.c.Location).where(issues.c.ComicID == str(series_id))
+                ).mappings()
+            ],
+            *[
+                dict(row)
+                for row in conn.execute(select(annuals.c.Status, annuals.c.Location).where(annual_filter)).mappings()
+            ],
+        ]
+        have = sum(
+            row.get("Status") == "Archived" or has_verified_file_under_root(root, row.get("Location"))
+            for row in source_rows
+        )
+        return int(have), len(source_rows)
+
+    def _aggregate_conflict(self, conn, series, run_id, actor, reason, *, rollback, increment_run=True):
+        conn.execute(
+            update(acquisition_repair_series)
+            .where(acquisition_repair_series.c.series_item_id == series["series_item_id"])
+            .values(
+                state="rollback_conflict" if rollback else "conflict",
+                dirty=1,
+                conflict_reason=reason,
+                updated_at=_iso(),
+            )
+        )
+        if increment_run:
+            conn.execute(
+                update(acquisition_repair_runs)
+                .where(acquisition_repair_runs.c.run_id == str(run_id))
+                .values(conflict_count=acquisition_repair_runs.c.conflict_count + 1, updated_at=_iso())
+            )
+        self._event(conn, run_id, "aggregate_conflict", actor, reason)
 
     def _finalize_series(self, run_id, actor, *, rollback=False):
         with self.engine.connect() as conn:
@@ -989,31 +1094,83 @@ class RepairService:
                 ).scalar_one()
                 if conflict_count:
                     conflicts += int(conflict_count)
+                    self._aggregate_conflict(
+                        conn,
+                        series,
+                        run_id,
+                        actor,
+                        "conditional rollback conflict" if rollback else "source changed since preview",
+                        rollback=rollback,
+                        increment_run=False,
+                    )
+                    continue
+                if not series["dirty"]:
+                    # A preview with no selected source mutation must never
+                    # "repair" an unrelated stale Have/Total aggregate.
                     conn.execute(
                         update(acquisition_repair_series)
                         .where(acquisition_repair_series.c.series_item_id == series["series_item_id"])
                         .values(
-                            state="rollback_conflict" if rollback else "conflict",
-                            dirty=1,
-                            conflict_reason="conditional rollback conflict"
-                            if rollback
-                            else "source changed since preview",
+                            state="rolled_back" if rollback else "finalized",
+                            dirty=0,
+                            conflict_reason=None,
                             updated_at=_iso(),
                         )
                     )
+                    self._event(conn, run_id, "finalize", actor, "no selected source mutation")
                     continue
+
                 have, total = self._aggregate_counts(conn, series["series_id"])
-                conn.execute(
-                    update(comics).where(comics.c.ComicID == series["series_id"]).values(Have=have, Total=total)
+                expected_have = series["final_have"]
+                expected_total = series["final_total"]
+                if (
+                    expected_have is None
+                    or expected_total is None
+                    or (have, total)
+                    != (
+                        int(expected_have),
+                        int(expected_total),
+                    )
+                ):
+                    conflicts += 1
+                    self._aggregate_conflict(
+                        conn,
+                        series,
+                        run_id,
+                        actor,
+                        "aggregate evidence changed since preview",
+                        rollback=rollback,
+                    )
+                    continue
+
+                before_have = expected_have if rollback else series["before_have"]
+                before_total = expected_total if rollback else series["before_total"]
+                aggregate_update = (
+                    update(comics)
+                    .where(comics.c.ComicID == series["series_id"])
+                    .where(comics.c.Have.is_(None) if before_have is None else comics.c.Have == before_have)
+                    .where(comics.c.Total.is_(None) if before_total is None else comics.c.Total == before_total)
+                    .values(Have=expected_have, Total=expected_total)
                 )
+                if conn.execute(aggregate_update).rowcount != 1:
+                    conflicts += 1
+                    self._aggregate_conflict(
+                        conn,
+                        series,
+                        run_id,
+                        actor,
+                        "series aggregate changed since preview",
+                        rollback=rollback,
+                    )
+                    continue
                 conn.execute(
                     update(acquisition_repair_series)
                     .where(acquisition_repair_series.c.series_item_id == series["series_item_id"])
                     .values(
                         state="rolled_back" if rollback else "finalized",
                         dirty=0,
-                        final_have=have,
-                        final_total=total,
+                        final_have=expected_have,
+                        final_total=expected_total,
                         conflict_reason=None,
                         updated_at=_iso(),
                     )
@@ -1037,6 +1194,13 @@ class RepairService:
         }
 
     def apply(self, run_id, *, actor, session_id, max_items=None, canary_only=False):
+        if max_items is not None:
+            try:
+                max_items = int(max_items)
+            except (TypeError, ValueError) as e:
+                raise ValueError("max_items must be a positive integer") from e
+            if max_items <= 0:
+                raise ValueError("max_items must be a positive integer")
         run = self.get_run(run_id)
         if run is None:
             raise KeyError("unknown repair run")
@@ -1044,14 +1208,15 @@ class RepairService:
         if run["state"] in {"completed", "needs_review"}:
             self._release_owned_fence(run_id, actor)
             return self._result(run_id, new_mutations=0)
-        if run["state"] not in {"confirmed", "applying", "canary_complete"}:
+        if run["state"] not in {"confirmed", "applying", "canary_complete", "waiting_for_drain"}:
             raise RepairConfirmationError("repair manifest is not confirmed for apply")
 
-        canary = _row_dict(
-            self.engine.connect()
-            .execute(select(acquisition_repair_canaries).where(acquisition_repair_canaries.c.run_id == str(run_id)))
-            .first()
-        )
+        with self.engine.connect() as conn:
+            canary = _row_dict(
+                conn.execute(
+                    select(acquisition_repair_canaries).where(acquisition_repair_canaries.c.run_id == str(run_id))
+                ).first()
+            )
         if canary:
             if canary["owner_id"] != str(actor) or not hmac.compare_digest(
                 canary["session_digest"], _digest(session_id)
@@ -1090,7 +1255,7 @@ class RepairService:
         for item in selected:
             if item["apply_state"] != "pending":
                 continue
-            if max_items is not None and processed >= int(max_items):
+            if max_items is not None and processed >= max_items:
                 break
             changed, _state = self._apply_item(item, actor)
             processed += 1
@@ -1230,10 +1395,10 @@ class RepairService:
         self._authorize(run, actor, session_id)
         if run["state"] in {"rolled_back", "rollback_needs_review"}:
             return self._result(run_id, new_mutations=0)
-        if run["state"] not in {"completed", "needs_review"}:
+        if run["state"] not in {"completed", "needs_review", "rollback_waiting_for_drain"}:
             raise RepairConfirmationError("repair must finish apply before conditional rollback")
 
-        fence = self._acquire_drained_fence(run, actor)
+        fence = self._acquire_drained_fence(run, actor, waiting_state="rollback_waiting_for_drain")
         with self.engine.begin() as conn:
             conn.execute(
                 update(acquisition_repair_runs)
@@ -1262,6 +1427,236 @@ class RepairService:
         return self._result(run_id, new_mutations=new_mutations)
 
     # ------------------------------------------------------------------
+    # One named external-acquisition canary
+    # ------------------------------------------------------------------
+
+    def authorize_acquisition_canary(
+        self,
+        run_id,
+        *,
+        actor,
+        session_id,
+        release_key,
+        route,
+        now=None,
+        ttl_seconds=900,
+    ):
+        """Fence automatic work and permit exactly one durable handoff."""
+
+        from comicarr.app.downloads.handoff import is_restart_safe_route, normalize_route
+
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError("unknown repair run")
+        self._authorize(run, actor, session_id)
+        if run["state"] != "completed" or int(run["conflict_count"] or 0):
+            raise RepairConfirmationError("a conflict-free completed repair is required before a canary")
+        release_key = str(release_key or "").strip()
+        if not release_key or len(release_key) > 512:
+            raise ValueError("a bounded release key is required for the acquisition canary")
+        route = normalize_route(route)
+        if not is_restart_safe_route(route):
+            raise ValueError("the selected canary route cannot be safely correlated across restart")
+
+        created = _now(now)
+        expires_at = (created + datetime.timedelta(seconds=max(1, int(ttl_seconds)))).isoformat()
+        with self.engine.connect() as conn:
+            existing = (
+                conn.execute(
+                    select(acquisition_canary_permits)
+                    .where(acquisition_canary_permits.c.repair_run_id == str(run_id))
+                    .where(acquisition_canary_permits.c.release_key == release_key)
+                )
+                .mappings()
+                .first()
+            )
+        if existing is not None:
+            existing = dict(existing)
+            if existing["actor_id"] != str(actor) or not hmac.compare_digest(
+                existing["session_digest"], _digest(session_id)
+            ):
+                raise RepairConfirmationError("acquisition canary is bound to a different owner or session")
+            if existing["route"] != route:
+                raise RepairConfirmationError("the named acquisition canary already uses a different route")
+            if existing["state"] not in {"waiting_for_drain", "authorized"}:
+                raise RepairConfirmationError("the named acquisition canary has already reached a terminal state")
+
+            try:
+                expired = _now(created) >= datetime.datetime.fromisoformat(str(existing["expires_at"]))
+            except (TypeError, ValueError):
+                expired = True
+            if expired:
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        update(acquisition_canary_permits)
+                        .where(acquisition_canary_permits.c.permit_id == str(existing["permit_id"]))
+                        .where(acquisition_canary_permits.c.state.in_(["waiting_for_drain", "authorized"]))
+                        .values(state="cancelled", completed_at=_iso(created), outcome="expired")
+                    )
+                    self._event(conn, run_id, "canary_expired", actor, "named canary authorization expired")
+                status = self.maintenance.status()
+                if status.active and status.owner == str(actor) and status.run_id == str(existing["permit_id"]):
+                    if status.drained:
+                        self.maintenance.release_fence(str(actor), str(existing["permit_id"]), status.epoch)
+                raise RepairConfirmationError("the named acquisition canary has expired")
+
+            # A lease that races the fence must leave an auditable, resumable
+            # permit behind. Retrying authorization after that lease drains is
+            # the only path that turns it into an executable canary.
+            fence = self.maintenance.status()
+            if not fence.active or fence.owner != str(actor) or fence.run_id != str(existing["permit_id"]):
+                raise RepairBlocked("the existing acquisition canary no longer owns its maintenance fence")
+            if existing["state"] == "waiting_for_drain":
+                if not fence.drained:
+                    self.maintenance.heartbeat_fence(str(actor), str(existing["permit_id"]), fence.epoch)
+                    return {
+                        "permit_id": existing["permit_id"],
+                        "run_id": existing["repair_run_id"],
+                        "release_key": existing["release_key"],
+                        "route": existing["route"],
+                        "state": existing["state"],
+                        "expires_at": existing["expires_at"],
+                        "maintenance_epoch": fence.epoch,
+                    }
+                promoted = False
+                with self.engine.begin() as conn:
+                    result = conn.execute(
+                        update(acquisition_canary_permits)
+                        .where(acquisition_canary_permits.c.permit_id == str(existing["permit_id"]))
+                        .where(acquisition_canary_permits.c.state == "waiting_for_drain")
+                        .values(state="authorized")
+                    )
+                    promoted = result.rowcount == 1
+                    if promoted:
+                        self._event(
+                            conn,
+                            run_id,
+                            "canary_authorize",
+                            actor,
+                            "one named handoff authorized after drain",
+                        )
+                if not promoted:
+                    raise RepairBlocked("acquisition canary changed before drain authorization")
+                existing["state"] = "authorized"
+            if not fence.drained:
+                raise RepairBlocked("active acquisition leases must drain before canary authorization")
+            self.maintenance.heartbeat_fence(str(actor), str(existing["permit_id"]), fence.epoch)
+            return {
+                "permit_id": existing["permit_id"],
+                "run_id": existing["repair_run_id"],
+                "release_key": existing["release_key"],
+                "route": existing["route"],
+                "state": existing["state"],
+                "expires_at": existing["expires_at"],
+                "maintenance_epoch": fence.epoch,
+            }
+
+        current = self.maintenance.status()
+        if current.active:
+            raise RepairBlocked("acquisition maintenance is already owned by another operation")
+        if not current.drained:
+            raise RepairBlocked("active acquisition leases must drain before canary authorization")
+
+        permit_id = str(uuid.uuid4())
+        fence = self.maintenance.acquire_fence(str(actor), permit_id, "one named acquisition canary")
+        state = "authorized" if fence.drained else "waiting_for_drain"
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(acquisition_canary_permits).values(
+                    permit_id=permit_id,
+                    repair_run_id=str(run_id),
+                    release_key=release_key,
+                    route=route,
+                    actor_id=str(actor),
+                    session_digest=_digest(session_id),
+                    state=state,
+                    created_at=created.isoformat(),
+                    expires_at=expires_at,
+                    lease_id=None,
+                    claimed_at=None,
+                    completed_at=None,
+                    outcome=None,
+                )
+            )
+            self._event(
+                conn,
+                run_id,
+                "canary_authorize" if fence.drained else "canary_drain_wait",
+                actor,
+                "one named handoff authorized" if fence.drained else "waiting for active acquisition leases",
+            )
+        return {
+            "permit_id": permit_id,
+            "run_id": str(run_id),
+            "release_key": release_key,
+            "route": route,
+            "state": state,
+            "expires_at": expires_at,
+            "maintenance_epoch": fence.epoch,
+        }
+
+    def get_acquisition_canary(self, permit_id, *, actor, session_id):
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(acquisition_canary_permits).where(acquisition_canary_permits.c.permit_id == str(permit_id))
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            raise KeyError("unknown acquisition canary")
+        row = dict(row)
+        if row["actor_id"] != str(actor) or not hmac.compare_digest(row["session_digest"], _digest(session_id)):
+            raise RepairConfirmationError("acquisition canary is bound to a different owner or session")
+        return {
+            key: row[key]
+            for key in (
+                "permit_id",
+                "repair_run_id",
+                "release_key",
+                "route",
+                "state",
+                "created_at",
+                "expires_at",
+                "claimed_at",
+                "completed_at",
+                "outcome",
+            )
+        }
+
+    def release_acquisition_canary(self, permit_id, *, actor, session_id, reason):
+        if not reason or not str(reason).strip():
+            raise ValueError("a release reason is required")
+        canary = self.get_acquisition_canary(permit_id, actor=actor, session_id=session_id)
+        if canary["state"] not in {"completed", "authorized", "waiting_for_drain"}:
+            raise RepairConfirmationError("claimed canary handoff must reach a terminal outcome before release")
+        status = self.maintenance.status()
+        if not status.active or status.owner != str(actor) or status.run_id != str(permit_id):
+            raise RepairBlocked("this actor no longer owns the acquisition canary fence")
+        if not status.drained:
+            raise RepairBlocked("canary handoff lease is still active")
+        self.maintenance.release_fence(str(actor), str(permit_id), status.epoch)
+        now = _iso()
+        with self.engine.begin() as conn:
+            if canary["state"] in {"authorized", "waiting_for_drain"}:
+                cancelled = conn.execute(
+                    update(acquisition_canary_permits)
+                    .where(acquisition_canary_permits.c.permit_id == str(permit_id))
+                    .where(acquisition_canary_permits.c.state == canary["state"])
+                    .values(
+                        state="cancelled",
+                        completed_at=now,
+                        outcome=("cancelled: %s" % str(reason).strip())[:64],
+                    )
+                )
+                if cancelled.rowcount != 1:
+                    raise RepairBlocked("acquisition canary changed before it could be cancelled")
+            self._event(conn, canary["repair_run_id"], "canary_release", actor, str(reason))
+        final = self.get_acquisition_canary(permit_id, actor=actor, session_id=session_id)
+        return {**final, "maintenance_released": True}
+
+    # ------------------------------------------------------------------
     # Public item projection
     # ------------------------------------------------------------------
 
@@ -1278,7 +1673,7 @@ class RepairService:
             "date_source": item.get("date_source"),
             "selected_date": item.get("selected_date"),
             "evidence": item["evidence"],
-            "proposed_values": item["proposed"],
+            "proposed_values": item.get("proposed_values", item.get("proposed", {})),
             "optional": bool(item["optional"]),
             "selected": bool(item["selected"]),
         }

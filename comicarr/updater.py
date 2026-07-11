@@ -46,7 +46,7 @@ from comicarr.tables import (
 
 
 def addvialist(queue, ledger=None, maintenance=None):
-    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController
+    from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController, maintenance_retry_delay
     from comicarr.app.acquisition.models import ItemOutcome
     from comicarr.app.acquisition.runs import RunLedger
 
@@ -88,7 +88,10 @@ def addvialist(queue, ledger=None, maintenance=None):
                 if ItemOutcome(ledger_item["state"]).terminal:
                     continue
                 if ledger_item["state"] == ItemOutcome.RUNNING.value:
-                    command_ledger.record_requeue(run_id, "series", comicid, reason="recovered running queue item")
+                    # Startup replay resets interrupted items before queueing
+                    # them. A second live queue entry cannot reclaim work
+                    # that another worker is already refreshing.
+                    continue
 
             if r_mode is None and comicarr.IMPORTLOCK:
                 queue.put(item)
@@ -171,10 +174,11 @@ def addvialist(queue, ledger=None, maintenance=None):
                 command_ledger.record_outcome(run_id, "series", comicid, ItemOutcome.SUCCEEDED)
         except Exception as e:
             if isinstance(e, MaintenanceBlocked):
+                requeued = None
                 if command_ledger and run_id and comicid is not None:
-                    command_ledger.record_requeue(run_id, "series", comicid, reason=str(e))
+                    requeued = command_ledger.record_requeue(run_id, "series", comicid, reason=str(e))
                 queue.put(item)
-                time.sleep(1)
+                time.sleep(maintenance_retry_delay((requeued or {}).get("attempt_count", 1)))
                 continue
             if command_ledger and run_id and comicid is not None:
                 command_ledger.record_outcome(run_id, "series", comicid, ItemOutcome.FAILED, reason=str(e))

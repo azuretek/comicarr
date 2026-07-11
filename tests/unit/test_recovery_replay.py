@@ -28,6 +28,7 @@ import pytest
 from sqlalchemy import select
 
 import comicarr
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import journal, recovery, recovery_classify
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import ddl_info, issues, metadata, nzblog, pipeline_journal, snatched, storyarcs
@@ -58,6 +59,7 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(comicarr, "USE_NZBGET", False, raising=False)
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     yield
     shutdown_engine()
 
@@ -102,10 +104,7 @@ def _journal_row(key):
 
 
 def _probe(value):
-    return {
-        dt: (lambda row, v=value: v)
-        for dt in ("torrent", "nzb", "sab", "sabnzbd", "nzbget", "ddl", "DDL")
-    }
+    return {dt: (lambda row, v=value: v) for dt in ("torrent", "nzb", "sab", "sabnzbd", "nzbget", "ddl", "DDL")}
 
 
 def _artifact_folder(tmp_path, name):
@@ -304,11 +303,12 @@ def test_legacy_ddl_downloading_without_exact_anchor_becomes_manual_review(queue
 
 
 # ---------------------------------------------------------------------------
-# P2-5(a) — DDL `still` re-enqueues onto DDL_QUEUE (NOT NZB_QUEUE)
+# DDL `still` is quarantined after restart because the direct sender has no
+# durable acceptance identity and cannot be safely replayed.
 # ---------------------------------------------------------------------------
 
 
-def test_still_ddl_reenqueued_on_ddl_queue(queues):
+def test_still_ddl_is_quarantined_without_duplicate_sender_call(queues):
     rkey = journal.release_key("40", "DDL", nzbname="Saga.DDL.cbz", discriminant="ddl-9")
     with get_engine().begin() as conn:
         conn.execute(nzblog.insert().values(IssueID="40", PROVIDER="DDL"))
@@ -330,11 +330,8 @@ def test_still_ddl_reenqueued_on_ddl_queue(queues):
     )
     recovery.replay_pipeline(probes=_probe("still"))
     dl = _drain(queues["ddl"])
-    assert len(dl) == 1, "DDL still must re-enqueue onto DDL_QUEUE"
-    assert dl[0]["id"] == "ddl-9"
-    assert dl[0]["issueid"] == "40"
-    assert dl[0]["ddl"] is True
-    # MUST NOT have gone to NZB_QUEUE (the pre-fix mis-route).
+    assert dl == []
+    assert journal.read_one(rkey)["stage"] == journal.MANUAL_REVIEW
     assert _drain(queues["nzb"]) == []
     assert _drain(queues["snatched"]) == []
 
@@ -1082,9 +1079,7 @@ def test_plain_issue_anchor_does_not_pick_unrelated_arc_S_nzbname(queues):
         conn.execute(nzblog.insert().values(IssueID="302", PROVIDER="nzb.su", NZBName="Plain.302.cbz"))
         # ...and an UNRELATED arc has S302 under the SAME provider.
         conn.execute(
-            nzblog.insert().values(
-                IssueID="S302", PROVIDER="nzb.su", NZBName="UnrelatedArc.cbz", SARC="Other Arc"
-            )
+            nzblog.insert().values(IssueID="S302", PROVIDER="nzb.su", NZBName="UnrelatedArc.cbz", SARC="Other Arc")
         )
 
     summary = recovery.replay_pipeline(probes=_probe("still"))
@@ -1103,9 +1098,7 @@ def test_plain_issue_finalize_does_not_delete_unrelated_arc_S_row(queues, monkey
     with get_engine().begin() as conn:
         conn.execute(nzblog.insert().values(IssueID="302", PROVIDER="nzb.su", NZBName="Plain.302.cbz"))
         conn.execute(
-            nzblog.insert().values(
-                IssueID="S302", PROVIDER="nzb.su", NZBName="UnrelatedArc.cbz", SARC="Other Arc"
-            )
+            nzblog.insert().values(IssueID="S302", PROVIDER="nzb.su", NZBName="UnrelatedArc.cbz", SARC="Other Arc")
         )
     _insert_journal(
         rkey,

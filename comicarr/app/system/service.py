@@ -597,10 +597,12 @@ def get_version_info(ctx):
 
 
 def get_build_identity(ctx):
-    """Return deploy identity without pretending an unavailable commit is known."""
-    build_id = os.environ.get("COMICARR_BUILD_ID")
-    build_commit = os.environ.get("COMICARR_BUILD_COMMIT")
-    source = "environment" if build_id or build_commit else "runtime"
+    """Return deploy identity without treating runtime fallbacks as verified."""
+    declared_build_id = (os.environ.get("COMICARR_BUILD_ID") or "").strip() or None
+    declared_build_commit = (os.environ.get("COMICARR_BUILD_COMMIT") or "").strip() or None
+    build_id = declared_build_id
+    build_commit = declared_build_commit
+    source = "environment" if declared_build_id or declared_build_commit else "runtime"
     runtime_commit = getattr(ctx, "current_version", None)
     if not build_commit and runtime_commit and re.fullmatch(r"[0-9a-fA-F]{7,64}", str(runtime_commit)):
         build_commit = str(runtime_commit)
@@ -614,7 +616,10 @@ def get_build_identity(ctx):
         "release": release,
         "version": version,
         "source": source,
-        "verified": bool(build_commit and build_id != "unknown"),
+        # A version string or runtime Git SHA is useful diagnostic context,
+        # but only the image build arguments bind both values to the deployed
+        # artifact. Do not present a local/dev fallback as release-verified.
+        "verified": bool(declared_build_id and declared_build_commit),
     }
 
 
@@ -640,16 +645,21 @@ def get_recent_logs(ctx):
         return {"logs": [], "error": str(e)}
 
 
-def get_job_info(ctx):
+def get_job_info(ctx, include_acquisition=True):
     """Return scheduled job information."""
-    try:
-        from comicarr.app.search.health import get_acquisition_health
+    acquisition = None
+    if include_acquisition:
+        try:
+            from comicarr.app.search.health import get_acquisition_health
 
-        acquisition = get_acquisition_health()
-    except Exception as e:
-        acquisition = {"unavailable": {"reason": "schema_unavailable", "error": sanitize_job_error(e)}}
+            acquisition = get_acquisition_health()
+        except Exception as e:
+            acquisition = {"unavailable": {"reason": "schema_unavailable", "error": sanitize_job_error(e)}}
     if not ctx.scheduler:
-        return {"jobs": [], "acquisition": acquisition}
+        result = {"jobs": []}
+        if include_acquisition:
+            result["acquisition"] = acquisition
+        return result
 
     jobs = []
     for job in ctx.scheduler.get_jobs():
@@ -686,7 +696,10 @@ def get_job_info(ctx):
                 }
             )
         jobs.append(job_info)
-    return {"jobs": jobs, "acquisition": acquisition}
+    result = {"jobs": jobs}
+    if include_acquisition:
+        result["acquisition"] = acquisition
+    return result
 
 
 def _weekly_state(status):
@@ -859,7 +872,7 @@ def register_scheduler_health_listener(scheduler):
     return True
 
 
-def get_startup_diagnostics(ctx):
+def get_startup_diagnostics(ctx, include_acquisition=True):
     """Return startup diagnostics (db empty, migration dismissed).
 
     db_empty is computed live so it reflects the current library state rather
@@ -877,22 +890,22 @@ def get_startup_diagnostics(ctx):
         logger.warn("[DIAGNOSTICS] Live db_empty check failed, falling back to startup flag: %s" % e)
         db_empty = comicarr.DB_EMPTY
 
-    try:
-        from comicarr.app.search.health import get_search_health
-
-        acquisition = get_search_health(
-            ctx.config,
-            provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
-        )
-    except Exception as e:
-        acquisition = {"blocked": True, "reason": "health_unavailable", "error": sanitize_job_error(e)}
-
-    return {
+    result = {
         "db_empty": db_empty,
         "migration_dismissed": getattr(ctx.config, "MIGRATION_DISMISSED", False) if ctx.config else False,
         "build": get_build_identity(ctx),
-        "acquisition": acquisition,
     }
+    if include_acquisition:
+        try:
+            from comicarr.app.search.health import get_search_health
+
+            result["acquisition"] = get_search_health(
+                ctx.config,
+                provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
+            )
+        except Exception as e:
+            result["acquisition"] = {"blocked": True, "reason": "health_unavailable", "error": sanitize_job_error(e)}
+    return result
 
 
 def preview_migration(ctx, path):
@@ -910,7 +923,7 @@ def preview_migration(ctx, path):
 
 
 def start_migration(ctx, path):
-    """Start a migration in a background thread."""
+    """Start a migration only after globally fencing acquisition work."""
     import comicarr as _comicarr
 
     if not path:
@@ -920,23 +933,114 @@ def start_migration(ctx, path):
         return {"success": False, "error": "Migration already in progress"}
 
     import threading
+    import time
+    import uuid
 
     from comicarr import migration
+    from comicarr.app.acquisition.maintenance import (
+        MaintenanceConflict,
+        MaintenanceController,
+        set_reconciliation_state,
+    )
 
     m = migration.Mylar3Migration(path)
     result = m.validate()
     if not result.get("valid"):
         return {"success": False, "error": "Invalid Mylar3 data path"}
 
-    t = threading.Thread(target=m.execute, name="MigrationThread")
+    controller = MaintenanceController(db.get_engine())
+    initial = controller.status()
+    if initial.active and (initial.owner != "migration" or not str(initial.run_id or "").startswith("migration-")):
+        return {"success": False, "error": "Acquisition maintenance is owned by another operation", "status_code": 423}
+    if initial.active_leases and not initial.active:
+        # Avoid taking a fence merely to report an existing busy worker. A
+        # race after this check is handled by the fenced thread below.
+        return {"success": False, "error": "Acquisition workers must drain before migration", "status_code": 423}
+
+    run_id = "migration-%s" % uuid.uuid4()
+    try:
+        fence = controller.acquire_fence("migration", run_id, "Mylar3 migration")
+    except MaintenanceConflict as e:
+        return {"success": False, "error": str(e), "status_code": 423}
+
+    set_reconciliation_state("migrating", "Mylar3 migration is waiting for acquisition quiescence", db.get_engine())
+
+    def _run_fenced_migration():
+        success = False
+        try:
+            _comicarr.MIGRATION_STATUS = "waiting_for_quiescence"
+            # Existing side effects predate the fence and must finish. New
+            # claims are blocked by it. Heartbeat while waiting so diagnostics
+            # distinguish an intentional drain from an abandoned fence.
+            deadline = time.monotonic() + 300
+            while not controller.status().drained:
+                controller.heartbeat_fence("migration", run_id, fence.epoch)
+                if time.monotonic() >= deadline:
+                    _comicarr.MIGRATION_STATUS = "blocked"
+                    _comicarr.MIGRATION_ERROR = "Acquisition workers did not drain before migration"
+                    set_reconciliation_state(
+                        "failed",
+                        "Acquisition workers did not drain before migration; operator review required",
+                        db.get_engine(),
+                    )
+                    return
+                time.sleep(0.25)
+            success = bool(m.execute())
+            if not success:
+                set_reconciliation_state(
+                    "failed",
+                    "Mylar3 migration failed; operator review required before acquisition resumes",
+                    db.get_engine(),
+                )
+        except Exception as e:
+            logger.error("[MIGRATION] Fenced migration runner failed: %s" % e)
+            _comicarr.MIGRATION_STATUS = "error"
+            _comicarr.MIGRATION_ERROR = "Migration runner failed"
+            try:
+                set_reconciliation_state(
+                    "failed",
+                    "Mylar3 migration runner failed; operator review required",
+                    db.get_engine(),
+                )
+            except Exception as state_error:
+                logger.error("[MIGRATION] Unable to record runner failure: %s" % state_error)
+        finally:
+            status = controller.status()
+            if status.active and status.owner == "migration" and status.run_id == run_id and status.drained:
+                try:
+                    controller.release_fence("migration", run_id, status.epoch)
+                except MaintenanceConflict as e:
+                    logger.error("[MIGRATION] Unable to release migration fence: %s" % e)
+            try:
+                from comicarr.app.acquisition.maintenance import get_reconciliation_status, refresh_runtime_state
+
+                gate = refresh_runtime_state(ctx.config, db.get_engine())
+                _comicarr.MIGRATION_RECONCILIATION = get_reconciliation_status(db.get_engine())
+                if gate.blocked:
+                    logger.info("[MIGRATION] Acquisition remains blocked: %s" % gate.reason)
+            except Exception as gate_error:
+                _comicarr.ACQUISITION_WORKERS_BLOCKED = True
+                _comicarr.ACQUISITION_BLOCK_REASON = "migration_reconciliation_gate_unavailable"
+                logger.error("[MIGRATION] Unable to refresh acquisition reconciliation gate: %s" % gate_error)
+
+    t = threading.Thread(target=_run_fenced_migration, name="MigrationThread")
     t.daemon = True
     t.start()
-    return {"status": "started"}
+    return {"status": "started", "run_id": run_id}
 
 
 def get_migration_progress(ctx):
     """Return current migration progress."""
     import comicarr as _comicarr
+
+    try:
+        from comicarr.app.acquisition.maintenance import get_reconciliation_status
+
+        reconciliation = get_reconciliation_status(db.get_engine())
+        _comicarr.MIGRATION_RECONCILIATION = reconciliation
+    except Exception as e:
+        reconciliation = {"state": "unavailable", "reason": "reconciliation status unavailable"}
+        logger.error("[MIGRATION] Unable to read reconciliation state: %s" % e)
 
     return {
         "status": _comicarr.MIGRATION_STATUS,
@@ -944,7 +1048,280 @@ def get_migration_progress(ctx):
         "tables_complete": _comicarr.MIGRATION_TABLES_COMPLETE,
         "tables_total": _comicarr.MIGRATION_TABLES_TOTAL,
         "error": _comicarr.MIGRATION_ERROR,
+        "reconciliation": reconciliation,
     }
+
+
+def mark_reconciliation_ready(ctx, *, actor, reason):
+    """Explicitly lift the durable post-migration acquisition gate."""
+    if not reason or not str(reason).strip():
+        return {"success": False, "error": "a reconciliation release reason is required", "status_code": 400}
+    try:
+        from comicarr.app.acquisition.maintenance import (
+            MaintenanceController,
+            get_reconciliation_status,
+            refresh_runtime_state,
+            set_reconciliation_state,
+        )
+
+        controller = MaintenanceController(db.get_engine())
+        if controller.status().active:
+            return {
+                "success": False,
+                "error": "release acquisition maintenance before resuming automatic work",
+                "status_code": 423,
+            }
+        current = get_reconciliation_status(db.get_engine())
+        if current["state"] == "migrating":
+            return {"success": False, "error": "migration is still running", "status_code": 409}
+        reconciliation = set_reconciliation_state(
+            "ready",
+            "operator %s: %s" % (str(actor)[:80], str(reason)[:160]),
+            db.get_engine(),
+        )
+        gate = refresh_runtime_state(ctx.config, db.get_engine())
+        try:
+            runtime = comicarr.resume_acquisition_runtime(ctx.config)
+        except Exception as e:
+            reconciliation = set_reconciliation_state(
+                "failed",
+                "automatic acquisition resume failed: %s" % type(e).__name__,
+                db.get_engine(),
+            )
+            gate = refresh_runtime_state(ctx.config, db.get_engine())
+            comicarr.MIGRATION_RECONCILIATION = reconciliation
+            logger.error("[MIGRATION] Automatic acquisition resume failed closed: %s" % type(e).__name__)
+            return {
+                "success": False,
+                "error": "automatic acquisition could not be resumed; the gate remains closed",
+                "status_code": 500,
+                "reconciliation": reconciliation,
+                "gate": gate.as_dict(),
+            }
+        comicarr.MIGRATION_RECONCILIATION = reconciliation
+        return {
+            "success": True,
+            "reconciliation": reconciliation,
+            "gate": gate.as_dict(),
+            "runtime": runtime,
+        }
+    except Exception as e:
+        logger.error("[MIGRATION] Unable to mark reconciliation ready: %s" % e)
+        return {"success": False, "error": "unable to resume acquisition", "status_code": 500}
+
+
+def abort_acquisition_maintenance(ctx, *, actor, reason, force_stale_leases=False):
+    """Audited escape hatch for a drained, abandoned repair/migration fence."""
+
+    if not reason or not str(reason).strip():
+        return {"success": False, "error": "a maintenance abort reason is required", "status_code": 400}
+    try:
+        from comicarr.app.acquisition.maintenance import (
+            MaintenanceBlocked,
+            MaintenanceConflict,
+            MaintenanceController,
+        )
+
+        controller = MaintenanceController(db.get_engine())
+        status = controller.abort_fence(str(actor), str(reason).strip(), force_stale_leases=bool(force_stale_leases))
+        from comicarr.app.acquisition.maintenance import (
+            get_reconciliation_status,
+            refresh_runtime_state,
+            set_reconciliation_state,
+        )
+
+        reconciliation = get_reconciliation_status(db.get_engine())
+        if reconciliation["state"] == "migrating":
+            reconciliation = set_reconciliation_state(
+                "failed",
+                "migration fence aborted by operator %s: %s" % (str(actor)[:80], str(reason)[:160]),
+                db.get_engine(),
+            )
+        gate = refresh_runtime_state(ctx.config, db.get_engine())
+        return {
+            "success": True,
+            "maintenance": {
+                "active": status.active,
+                "epoch": status.epoch,
+                "owner": status.owner,
+                "run_id": status.run_id,
+                "reason": status.reason,
+                "heartbeat_at": status.heartbeat_at,
+                "active_leases": status.active_leases,
+            },
+            "reconciliation": reconciliation,
+            "gate": gate.as_dict(),
+        }
+    except (MaintenanceBlocked, MaintenanceConflict) as e:
+        return {"success": False, "error": str(e), "status_code": 423}
+    except Exception as e:
+        logger.error("[MAINTENANCE] Unable to abort acquisition maintenance: %s" % e)
+        return {"success": False, "error": "unable to abort acquisition maintenance", "status_code": 500}
+
+
+# ---------------------------------------------------------------------------
+# Acquisition repair (session-bound, owner only)
+# ---------------------------------------------------------------------------
+
+
+def _repair_service():
+    from comicarr.app.system.acquisition_repair import RepairService
+
+    return RepairService(db.get_engine())
+
+
+def _repair_error_response(exc):
+    from comicarr.app.system.acquisition_repair import (
+        RepairBlocked,
+        RepairConfirmationError,
+        RepairError,
+    )
+
+    if isinstance(exc, KeyError):
+        return {"success": False, "error": str(exc) or "not found", "status_code": 404}
+    if isinstance(exc, RepairConfirmationError):
+        return {"success": False, "error": str(exc), "status_code": 409}
+    if isinstance(exc, RepairBlocked):
+        return {"success": False, "error": str(exc), "status_code": 423}
+    if isinstance(exc, (RepairError, ValueError)):
+        return {"success": False, "error": str(exc), "status_code": 400}
+    logger.error("[REPAIR] Unexpected repair failure: %s" % exc)
+    return {"success": False, "error": "repair failed", "status_code": 500}
+
+
+def preview_acquisition_repair(ctx, series_id, *, actor, session_id):
+    """Create a read-only series-scoped repair preview and one-shot token."""
+    try:
+        result = _repair_service().preview_series(series_id, actor=actor, session_id=session_id)
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def confirm_acquisition_repair(
+    ctx,
+    run_id,
+    *,
+    actor,
+    session_id,
+    preview_token,
+    fingerprint,
+    selected_optional_keys=None,
+    canary_entity_key=None,
+):
+    """Freeze an immutable repair manifest with the one-shot preview token."""
+    try:
+        result = _repair_service().confirm(
+            run_id,
+            preview_token=preview_token,
+            fingerprint=fingerprint,
+            actor=actor,
+            session_id=session_id,
+            selected_optional_keys=selected_optional_keys or (),
+            canary_entity_key=canary_entity_key,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def apply_acquisition_repair(
+    ctx,
+    run_id,
+    *,
+    actor,
+    session_id,
+    max_items=None,
+    canary_only=False,
+):
+    """Apply a confirmed repair manifest under the maintenance fence."""
+    try:
+        result = _repair_service().apply(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            max_items=max_items,
+            canary_only=bool(canary_only),
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def get_acquisition_repair_run(ctx, run_id, *, actor, session_id, include_items=True):
+    """Return a repair run and its ordered items for the owning session."""
+    try:
+        service = _repair_service()
+        projection = service.read_public_run(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            include_items=bool(include_items),
+        )
+        if projection is None:
+            return {"success": False, "error": "unknown repair run", "status_code": 404}
+        return {"success": True, **projection}
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def rollback_acquisition_repair(ctx, run_id, *, actor, session_id, reason):
+    """Conditionally roll back applied repair values when they have not drifted."""
+    try:
+        result = _repair_service().rollback(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            reason=reason,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def authorize_acquisition_canary(ctx, run_id, *, actor, session_id, release_key, route):
+    """Authorize one named, restart-safe external handoff under maintenance."""
+    try:
+        result = _repair_service().authorize_acquisition_canary(
+            run_id,
+            actor=actor,
+            session_id=session_id,
+            release_key=release_key,
+            route=route,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def get_acquisition_canary(ctx, permit_id, *, actor, session_id):
+    """Return the terminally audited state of the named handoff canary."""
+    try:
+        result = _repair_service().get_acquisition_canary(permit_id, actor=actor, session_id=session_id)
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
+
+
+def release_acquisition_canary(ctx, permit_id, *, actor, session_id, reason):
+    """Release the canary fence only after inspection or explicit cancellation."""
+    try:
+        result = _repair_service().release_acquisition_canary(
+            permit_id,
+            actor=actor,
+            session_id=session_id,
+            reason=reason,
+        )
+        result["success"] = True
+        return result
+    except Exception as e:
+        return _repair_error_response(e)
 
 
 # --- Extracted from helpers.py ---

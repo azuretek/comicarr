@@ -43,11 +43,7 @@ def configured_roots(config=None):
 
 
 def _contains(root, candidate):
-    try:
-        candidate.relative_to(root)
-        return True
-    except ValueError:
-        return False
+    return candidate.is_relative_to(root)
 
 
 def _canonical_path(value, label):

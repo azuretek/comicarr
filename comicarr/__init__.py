@@ -152,6 +152,7 @@ MAX_LOGSIZE = 5000000
 SAFESTART = False
 NOWEEKLY = False
 INIT_LOCK = threading.Lock()
+ACQUISITION_RESUME_LOCK = threading.Lock()
 IMPORTLOCK = False
 IMPORTBUTTON = False
 DONATEBUTTON = False
@@ -200,6 +201,7 @@ MIGRATION_CURRENT_TABLE = ""
 MIGRATION_TABLES_COMPLETE = 0
 MIGRATION_TABLES_TOTAL = 0
 MIGRATION_ERROR = None
+MIGRATION_RECONCILIATION = None
 UMASK = None
 WANTED_TAB_OFF = False
 PULLNEW = None
@@ -859,6 +861,95 @@ def replay_acquisition_obligations():
     if search_count or refresh_count:
         logger.info("[ACQUISITION] Replayed %s search and %s refresh obligations" % (search_count, refresh_count))
     return {"search": search_count, "refresh": refresh_count}
+
+
+def resume_acquisition_runtime(config=None):
+    """Replay and restart acquisition-only work after an explicit gate release.
+
+    ``start()`` intentionally leaves the process alive but pauses producers
+    and consumers when the durable reconciliation gate is closed. Releasing
+    that gate from the authenticated operator flow must therefore restore the
+    same narrow runtime surface without requiring an undocumented container
+    restart or starting unrelated diagnostics work a second time.
+    """
+
+    from comicarr.app.acquisition.maintenance import refresh_runtime_state
+
+    config = config or CONFIG
+    with ACQUISITION_RESUME_LOCK:
+        gate = refresh_runtime_state(config)
+        if gate.blocked:
+            raise RuntimeError("acquisition remains blocked: %s" % (gate.reason or "unknown gate"))
+
+        try:
+            replayed = replay_acquisition_obligations()
+        except Exception as e:
+            comicarr.ACQUISITION_WORKERS_BLOCKED = True
+            comicarr.ACQUISITION_BLOCK_REASON = "obligation_replay_failed"
+            raise RuntimeError("durable acquisition replay failed") from e
+
+        queues_started = ["search_queue"]
+        queue_schedule("search_queue", "start")
+        if all(
+            [
+                bool(getattr(config, "ENABLE_TORRENTS", False)),
+                bool(getattr(config, "AUTO_SNATCH", False)),
+                OS_DETECT != "Windows",
+            ]
+        ) and getattr(config, "TORRENT_DOWNLOADER", None) in {2, 4}:
+            queue_schedule("snatched_queue", "start")
+            queues_started.append("snatched_queue")
+        if bool(getattr(config, "POST_PROCESSING", False)) and (
+            (
+                getattr(config, "NZB_DOWNLOADER", None) == 0
+                and bool(getattr(config, "SAB_CLIENT_POST_PROCESSING", False))
+            )
+            or (
+                getattr(config, "NZB_DOWNLOADER", None) == 1
+                and bool(getattr(config, "NZBGET_CLIENT_POST_PROCESSING", False))
+            )
+        ):
+            queue_schedule("nzb_queue", "start")
+            queues_started.append("nzb_queue")
+        if bool(getattr(config, "POST_PROCESSING", False)):
+            queue_schedule("pp_queue", "start")
+            queues_started.append("pp_queue")
+        if bool(getattr(config, "ENABLE_DDL", False)):
+            queue_schedule("ddl_queue", "start")
+            queues_started.append("ddl_queue")
+
+        scheduler_statuses = {
+            "dbupdater": UPDATER_STATUS,
+            "search": SEARCH_STATUS,
+            "weekly": WEEKLY_STATUS,
+            "rss": RSS_STATUS,
+            "monitor": MONITOR_STATUS,
+            "importinbox": IMPORTINBOX_STATUS,
+        }
+        resumed_jobs = []
+        for job_id, status in scheduler_statuses.items():
+            if status == "Paused":
+                continue
+            job = SCHED.get_job(job_id)
+            if job is None:
+                continue
+            job.resume()
+            resumed_jobs.append(job_id)
+
+        logger.info(
+            "[ACQUISITION] Resumed runtime: replayed %s search/%s refresh obligations; queues=%s; jobs=%s"
+            % (
+                replayed["search"],
+                replayed["refresh"],
+                ",".join(queues_started),
+                ",".join(resumed_jobs) or "none",
+            )
+        )
+        return {
+            "replayed": replayed,
+            "queues_started": queues_started,
+            "scheduler_jobs_resumed": resumed_jobs,
+        }
 
 
 def start():

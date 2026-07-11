@@ -39,6 +39,7 @@ import pytest
 from sqlalchemy import select
 
 import comicarr
+from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.downloads import journal, service
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.postprocessor import PostProcessor
@@ -67,6 +68,7 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(comicarr, "APILOCK", fake_lock, raising=False)
     engine = get_engine()
     metadata.create_all(engine)
+    assert ensure_acquisition_schema(engine).ready
     (tmp_path / "dl").mkdir()
     yield
     shutdown_engine()

@@ -102,6 +102,22 @@ def test_dispatch_state_cannot_close_item_completion():
     assert run["completed_at"] is None
 
 
+def test_empty_manual_scan_has_a_terminal_run_without_inventing_an_item():
+    ledger = RunLedger(get_engine())
+    ledger.create_run("empty-run", command_kind="search", trigger="manual_wanted_scan")
+
+    completed = ledger.complete_empty_run("empty-run")
+
+    assert completed["dispatch_state"] == DispatchState.ACCEPTED.value
+    assert completed["completion_state"] == RunState.COMPLETED.value
+    assert completed["accepted_count"] == 0
+    assert completed["terminal_count"] == 0
+    assert completed["completed_at"] is not None
+
+    with pytest.raises(ValueError, match="terminal acquisition runs"):
+        ledger.accept_item("empty-run", entity_type="issue", entity_id="late")
+
+
 def test_terminal_item_outcomes_reconcile_run_counts_and_close_exactly_once():
     ledger = RunLedger(get_engine())
     ledger.create_run("run-3", command_kind="search", trigger="manual")

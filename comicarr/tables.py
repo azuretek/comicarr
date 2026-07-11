@@ -736,6 +736,9 @@ acquisition_run_items = Table(
     Column("entity_type", String(32), nullable=False),
     Column("entity_id", String(255), nullable=False),
     Column("state", String(32), nullable=False),
+    # Queue handoff state is independent of the worker lifecycle. A durable
+    # item can be accepted but not yet handed to the in-memory worker queue.
+    Column("dispatch_state", String(32), nullable=False, server_default="pending"),
     # Validated, bounded JSON containing only the command-kind allowlist. It
     # must never contain provider credentials or downloader secrets.
     Column("payload_json", Text),
@@ -752,6 +755,63 @@ acquisition_run_items = Table(
         "entity_id",
         name="uq_acquisition_run_item_identity",
     ),
+)
+
+# A Search all missing preview is an authenticated, short-lived intent to
+# create exactly one durable series-scoped search run.  It intentionally keeps
+# only a bounded canonical issue selection and token digest; request cookies,
+# provider configuration, and any downloader payload remain outside this
+# operational ledger.
+acquisition_search_previews = Table(
+    "acquisition_search_previews",
+    metadata,
+    Column("preview_id", String(64), primary_key=True),
+    Column("series_id", String(255), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("token_digest", String(64), nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("eligible_json", Text, nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("run_id", String(64)),
+    Column("created_at", String(40), nullable=False),
+    Column("expires_at", String(40), nullable=False),
+    Column("confirmed_at", String(40)),
+    Column("updated_at", String(40), nullable=False),
+    UniqueConstraint("token_digest", name="uq_acquisition_search_preview_token"),
+)
+
+# Migration completion is not enough to resume acquisition. This one-row
+# durable control records the operator-visible reconciliation gate across
+# container restarts.
+acquisition_reconciliation = Table(
+    "acquisition_reconciliation",
+    metadata,
+    Column("control_id", String(64), primary_key=True),
+    Column("state", String(32), nullable=False),
+    Column("reason", String(255)),
+    Column("updated_at", String(40), nullable=False),
+)
+
+# A repair canary is distinct from a repair-item canary: it authorizes exactly
+# one named external handoff while global maintenance remains active.
+acquisition_canary_permits = Table(
+    "acquisition_canary_permits",
+    metadata,
+    Column("permit_id", String(64), primary_key=True),
+    Column("repair_run_id", String(64), nullable=False),
+    Column("release_key", String(512), nullable=False),
+    Column("route", String(32), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("session_digest", String(64), nullable=False),
+    Column("state", String(32), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    Column("expires_at", String(40), nullable=False),
+    Column("lease_id", String(64)),
+    Column("claimed_at", String(40)),
+    Column("completed_at", String(40)),
+    Column("outcome", String(64)),
+    UniqueConstraint("repair_run_id", "release_key", name="uq_acq_canary_repair_release"),
 )
 
 acquisition_maintenance = Table(
@@ -961,6 +1021,11 @@ Index(
     acquisition_run_items.c.entity_type,
     acquisition_run_items.c.entity_id,
 )
+Index("acq_search_preview_series_state", acquisition_search_previews.c.series_id, acquisition_search_previews.c.state)
+Index("acq_search_preview_run", acquisition_search_previews.c.run_id)
+Index("acq_reconciliation_state", acquisition_reconciliation.c.state)
+Index("acq_canary_permit_state", acquisition_canary_permits.c.state, acquisition_canary_permits.c.expires_at)
+Index("acq_canary_permit_release", acquisition_canary_permits.c.release_key)
 Index(
     "acquisition_maintenance_leases_active",
     acquisition_maintenance_leases.c.released_at,
@@ -1033,6 +1098,9 @@ TABLE_MAP = {
     "acquisition_schema_versions": acquisition_schema_versions,
     "acquisition_runs": acquisition_runs,
     "acquisition_run_items": acquisition_run_items,
+    "acquisition_search_previews": acquisition_search_previews,
+    "acquisition_reconciliation": acquisition_reconciliation,
+    "acquisition_canary_permits": acquisition_canary_permits,
     "acquisition_maintenance": acquisition_maintenance,
     "acquisition_maintenance_leases": acquisition_maintenance_leases,
     "acquisition_maintenance_events": acquisition_maintenance_events,
