@@ -1,4 +1,5 @@
 import {
+  type QueryClient,
   useQuery,
   useMutation,
   useQueryClient,
@@ -181,23 +182,34 @@ export function useMangaScan(): UseMutationResult<
     mutationFn: () =>
       apiRequest<MangaScanResponse>("POST", "/api/import/manga/scan"),
     onSuccess: () => {
-      setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ["mangaScanProgress"] });
-        queryClient.invalidateQueries({ queryKey: ["series"] });
-      }, 2000);
+      queryClient.invalidateQueries({ queryKey: ["mangaScanProgress"] });
     },
   });
 }
 
-export function useMangaScanProgress(
-  enabled = false,
-): UseQueryResult<MangaScanProgress> {
+function refetchWhileScanning(query: {
+  state: { data?: { status?: string | null } };
+}) {
+  return query.state.data?.status === "scanning" ? 2000 : false;
+}
+
+function clearImportedScanResults(
+  queryClient: QueryClient,
+  queryKey: readonly ["comicScanProgress" | "mangaScanProgress"],
+) {
+  queryClient.setQueryData<ScanProgress>(queryKey, (current) =>
+    current ? { ...current, results: null, scan_id: null } : current,
+  );
+  queryClient.invalidateQueries({ queryKey });
+  queryClient.invalidateQueries({ queryKey: ["series"] });
+}
+
+export function useMangaScanProgress(): UseQueryResult<MangaScanProgress> {
   return useQuery({
     queryKey: ["mangaScanProgress"],
     queryFn: () =>
       apiRequest<MangaScanProgress>("GET", "/api/import/manga/progress"),
-    enabled,
-    refetchInterval: enabled ? 2000 : false,
+    refetchInterval: refetchWhileScanning,
   });
 }
 
@@ -221,8 +233,7 @@ export function useMangaScanConfirm(): UseMutationResult<
         selected_ids: selectedIds,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mangaScanProgress"] });
-      queryClient.invalidateQueries({ queryKey: ["series"] });
+      clearImportedScanResults(queryClient, ["mangaScanProgress"]);
     },
   });
 }
@@ -247,23 +258,17 @@ export function useComicScan(): UseMutationResult<
     mutationFn: () =>
       apiRequest<ComicScanResponse>("POST", "/api/import/comic/scan"),
     onSuccess: () => {
-      setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ["comicScanProgress"] });
-        queryClient.invalidateQueries({ queryKey: ["series"] });
-      }, 2000);
+      queryClient.invalidateQueries({ queryKey: ["comicScanProgress"] });
     },
   });
 }
 
-export function useComicScanProgress(
-  enabled = false,
-): UseQueryResult<ScanProgress> {
+export function useComicScanProgress(): UseQueryResult<ScanProgress> {
   return useQuery({
     queryKey: ["comicScanProgress"],
     queryFn: () =>
       apiRequest<ScanProgress>("GET", "/api/import/comic/progress"),
-    enabled,
-    refetchInterval: enabled ? 2000 : false,
+    refetchInterval: refetchWhileScanning,
   });
 }
 
@@ -280,8 +285,7 @@ export function useComicScanConfirm(): UseMutationResult<
         selected_ids: selectedIds,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["comicScanProgress"] });
-      queryClient.invalidateQueries({ queryKey: ["series"] });
+      clearImportedScanResults(queryClient, ["comicScanProgress"]);
     },
   });
 }

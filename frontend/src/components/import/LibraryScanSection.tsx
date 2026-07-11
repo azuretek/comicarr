@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   RefreshCw,
   Library,
@@ -25,46 +25,22 @@ export default function LibraryScanSection() {
   const mangaDir = appConfig?.manga_dir as string | undefined;
   const { addToast } = useToast();
 
-  // Comic scan state
   const comicScanMutation = useComicScan();
-  const [comicScanning, setComicScanning] = useState(false);
-  const { data: comicProgress } = useComicScanProgress(comicScanning);
+  const { data: comicProgress } = useComicScanProgress();
   const comicConfirmMutation = useComicScanConfirm();
+  const [comicImported, setComicImported] = useState<number | null>(null);
 
-  // Manga scan state
   const mangaScanMutation = useMangaScan();
-  const [mangaScanning, setMangaScanning] = useState(false);
-  const { data: mangaProgress } = useMangaScanProgress(mangaScanning);
+  const { data: mangaProgress } = useMangaScanProgress();
   const mangaConfirmMutation = useMangaScanConfirm();
-
-  const comicStatus = comicProgress?.status;
-  const comicTerminal =
-    comicScanning && (comicStatus === "completed" || comicStatus === "error");
-  useEffect(() => {
-    if (!comicTerminal) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync polling state with server-driven terminal status
-    setComicScanning(false);
-    if (comicStatus === "error") {
-      addToast({ type: "error", message: "Comic scan failed" });
-    }
-  }, [comicTerminal, comicStatus, addToast]);
-
-  const mangaStatus = mangaProgress?.status;
-  const mangaTerminal =
-    mangaScanning && (mangaStatus === "completed" || mangaStatus === "error");
-  useEffect(() => {
-    if (!mangaTerminal) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync polling state with server-driven terminal status
-    setMangaScanning(false);
-    if (mangaStatus === "error") {
-      addToast({ type: "error", message: "Manga scan failed" });
-    }
-  }, [mangaTerminal, mangaStatus, addToast]);
+  const [mangaImported, setMangaImported] = useState<number | null>(null);
+  const comicScanning = comicProgress?.status === "scanning";
+  const mangaScanning = mangaProgress?.status === "scanning";
 
   const handleComicScan = async () => {
     try {
       await comicScanMutation.mutateAsync();
-      setComicScanning(true);
+      setComicImported(null);
       addToast({ type: "info", message: "Comic library scan started." });
     } catch (err) {
       addToast({
@@ -77,7 +53,7 @@ export default function LibraryScanSection() {
   const handleMangaScan = async () => {
     try {
       await mangaScanMutation.mutateAsync();
-      setMangaScanning(true);
+      setMangaImported(null);
       addToast({ type: "info", message: "Manga library scan started." });
     } catch (err) {
       addToast({
@@ -93,6 +69,7 @@ export default function LibraryScanSection() {
         scanId,
         selectedIds,
       });
+      setComicImported(result.imported);
       addToast({
         type: "success",
         message: `Imported ${result.imported} comic series`,
@@ -111,6 +88,7 @@ export default function LibraryScanSection() {
         scanId,
         selectedIds,
       });
+      setMangaImported(result.imported);
       addToast({
         type: "success",
         message: `Imported ${result.imported} manga series`,
@@ -167,25 +145,79 @@ export default function LibraryScanSection() {
         />
       </div>
 
-      {comicResults && comicResults.length > 0 && comicScanId && (
-        <LibraryScanResults
-          results={comicResults}
-          scanId={comicScanId}
-          onConfirm={handleComicConfirm}
-          isConfirming={comicConfirmMutation.isPending}
-          type="comic"
-        />
-      )}
+      <ScanFailure type="comic" progress={comicProgress} />
+      <ScanFailure type="manga" progress={mangaProgress} />
+      <ImportSummary type="comic" imported={comicImported} />
+      <ImportSummary type="manga" imported={mangaImported} />
 
-      {mangaResults && mangaResults.length > 0 && mangaScanId && (
-        <LibraryScanResults
-          results={mangaResults}
-          scanId={mangaScanId}
-          onConfirm={handleMangaConfirm}
-          isConfirming={mangaConfirmMutation.isPending}
-          type="manga"
-        />
-      )}
+      {comicImported === null &&
+        comicResults &&
+        comicResults.length > 0 &&
+        comicScanId && (
+          <LibraryScanResults
+            results={comicResults}
+            scanId={comicScanId}
+            onConfirm={handleComicConfirm}
+            isConfirming={comicConfirmMutation.isPending}
+            type="comic"
+          />
+        )}
+
+      {mangaImported === null &&
+        mangaResults &&
+        mangaResults.length > 0 &&
+        mangaScanId && (
+          <LibraryScanResults
+            results={mangaResults}
+            scanId={mangaScanId}
+            onConfirm={handleMangaConfirm}
+            isConfirming={mangaConfirmMutation.isPending}
+            type="manga"
+          />
+        )}
+    </div>
+  );
+}
+
+function ScanFailure({
+  type,
+  progress,
+}: {
+  type: "comic" | "manga";
+  progress?: {
+    status: string | null;
+    progress: { errors: string[] };
+  };
+}) {
+  if (progress?.status !== "error") return null;
+
+  const detail = progress.progress.errors[0];
+  return (
+    <div
+      className="rounded-[6px] border border-destructive/40 bg-destructive/10 px-3.5 py-3 text-[12px] text-foreground"
+      role="alert"
+    >
+      {type === "comic" ? "Comic" : "Manga"} library scan failed
+      {detail ? `: ${detail}` : "."}
+    </div>
+  );
+}
+
+function ImportSummary({
+  type,
+  imported,
+}: {
+  type: "comic" | "manga";
+  imported: number | null;
+}) {
+  if (imported === null) return null;
+
+  return (
+    <div
+      className="rounded-[6px] border border-[var(--status-success)]/40 bg-[var(--status-success)]/10 px-3.5 py-3 text-[12px] text-foreground"
+      role="status"
+    >
+      Imported {imported} {type} series. The library has been refreshed.
     </div>
   );
 }

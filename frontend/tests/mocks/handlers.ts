@@ -331,9 +331,18 @@ export const handlers = [
       http_host: "0.0.0.0",
       http_port: 8090,
       comic_dir: "/comics",
+      manga_dir: "/manga",
       api_enabled: true,
     });
   }),
+
+  http.get("/api/import/comic/progress", () =>
+    HttpResponse.json({ status: null, progress: {}, scan_id: null, results: null }),
+  ),
+
+  http.get("/api/import/manga/progress", () =>
+    HttpResponse.json({ status: null, progress: {}, scan_id: null, results: null }),
+  ),
 
   http.put("/api/config", () => {
     return HttpResponse.json({

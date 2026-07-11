@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
 import ErrorDisplay from "@/components/ui/ErrorDisplay";
 import RelativeTime from "@/components/ui/RelativeTime";
@@ -50,61 +49,12 @@ function QueueStatus({ status }: { status: DashboardQueueItem["status"] }) {
 
 export default function DashboardPage() {
   const { data, isLoading, error } = useDashboard();
+  const navigate = useNavigate();
   const comicScan = useComicScan();
   const mangaScan = useMangaScan();
-  const [comicScanning, setComicScanning] = useState(false);
-  const [mangaScanning, setMangaScanning] = useState(false);
-  const { data: comicScanProgress, error: comicProgressError } =
-    useComicScanProgress(comicScanning);
-  const { data: mangaScanProgress, error: mangaProgressError } =
-    useMangaScanProgress(mangaScanning);
+  const { data: comicScanProgress } = useComicScanProgress();
+  const { data: mangaScanProgress } = useMangaScanProgress();
   const { addToast } = useToast();
-
-  useEffect(() => {
-    if (
-      !comicScanning ||
-      !["completed", "error"].includes(comicScanProgress?.status || "")
-    )
-      return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync the dashboard action with server scan state
-    setComicScanning(false);
-    if (comicScanProgress?.status === "error") {
-      addToast({ type: "error", message: "Comic library scan failed." });
-    }
-  }, [comicScanning, comicScanProgress?.status, addToast]);
-
-  useEffect(() => {
-    if (
-      !mangaScanning ||
-      !["completed", "error"].includes(mangaScanProgress?.status || "")
-    )
-      return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync the dashboard action with server scan state
-    setMangaScanning(false);
-    if (mangaScanProgress?.status === "error") {
-      addToast({ type: "error", message: "Manga library scan failed." });
-    }
-  }, [mangaScanning, mangaScanProgress?.status, addToast]);
-
-  useEffect(() => {
-    if (!comicScanning || !comicProgressError) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Release a dashboard action whose progress request failed
-    setComicScanning(false);
-    addToast({
-      type: "error",
-      message: "Unable to monitor comic library scan.",
-    });
-  }, [comicScanning, comicProgressError, addToast]);
-
-  useEffect(() => {
-    if (!mangaScanning || !mangaProgressError) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Release a dashboard action whose progress request failed
-    setMangaScanning(false);
-    addToast({
-      type: "error",
-      message: "Unable to monitor manga library scan.",
-    });
-  }, [mangaScanning, mangaProgressError, addToast]);
 
   if (error) {
     return (
@@ -127,6 +77,8 @@ export default function DashboardPage() {
   const totalIssues = stats?.total_issues ?? 0;
   const completion = stats?.completion_pct ?? 0;
   const queueCount = stats?.queue_count ?? 0;
+  const comicScanning = comicScanProgress?.status === "scanning";
+  const mangaScanning = mangaScanProgress?.status === "scanning";
   const scanPending =
     comicScan.isPending ||
     mangaScan.isPending ||
@@ -137,15 +89,15 @@ export default function DashboardPage() {
   );
 
   const handleLibraryScan = async () => {
-    const scans: { type: "comic" | "manga"; request: Promise<unknown> }[] = [];
+    const scanRequests: Promise<unknown>[] = [];
     if (data?.scan_targets?.comic) {
-      scans.push({ type: "comic", request: comicScan.mutateAsync() });
+      scanRequests.push(comicScan.mutateAsync());
     }
     if (data?.scan_targets?.manga) {
-      scans.push({ type: "manga", request: mangaScan.mutateAsync() });
+      scanRequests.push(mangaScan.mutateAsync());
     }
 
-    if (scans.length === 0) {
+    if (scanRequests.length === 0) {
       addToast({
         type: "error",
         message:
@@ -154,16 +106,11 @@ export default function DashboardPage() {
       return;
     }
 
-    const results = await Promise.allSettled(scans.map((scan) => scan.request));
-    results.forEach((result, index) => {
-      if (result.status !== "fulfilled") return;
-      if (scans[index].type === "comic") setComicScanning(true);
-      else setMangaScanning(true);
-    });
+    const results = await Promise.allSettled(scanRequests);
     const started = results.filter(
       (result) => result.status === "fulfilled",
     ).length;
-    if (started === scans.length) {
+    if (started === scanRequests.length) {
       addToast({
         type: "success",
         message: `${started === 2 ? "Comic and manga library scans" : "Library scan"} started.`,
@@ -175,7 +122,10 @@ export default function DashboardPage() {
       });
     } else {
       addToast({ type: "error", message: "Failed to start library scans." });
+      return;
     }
+
+    navigate("/import");
   };
 
   return (
