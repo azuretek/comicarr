@@ -1,6 +1,7 @@
 import {
   Component,
   useEffect,
+  useRef,
   useState,
   type ComponentType,
   type ReactNode,
@@ -91,6 +92,7 @@ function RouteLoading() {
  */
 export function RouteLoader({ load }: RouteLoaderProps) {
   const [attempt, setAttempt] = useState(0);
+  const loadRef = useRef(load);
   const [loaded, setLoaded] = useState<{
     attempt: number;
     component: ComponentType;
@@ -101,14 +103,23 @@ export function RouteLoader({ load }: RouteLoaderProps) {
   } | null>(null);
 
   useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    load()
+    loadRef
+      .current()
       .then((module) => {
-        if (!cancelled) setLoaded({ attempt, component: module.default });
+        if (!cancelled) {
+          setLoadError(null);
+          setLoaded({ attempt, component: module.default });
+        }
       })
       .catch((loadError: unknown) => {
         if (!cancelled) {
+          setLoaded(null);
           setLoadError({
             attempt,
             error:
@@ -122,7 +133,7 @@ export function RouteLoader({ load }: RouteLoaderProps) {
     return () => {
       cancelled = true;
     };
-  }, [attempt, load]);
+  }, [attempt]);
 
   const retry = () => setAttempt((current) => current + 1);
   const LoadedRoute = loaded?.attempt === attempt ? loaded.component : null;
