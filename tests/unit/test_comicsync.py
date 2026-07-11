@@ -8,6 +8,7 @@ scan-then-select flow, and concurrent scan prevention.
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import create_engine
 
 
 @pytest.fixture(autouse=True)
@@ -155,6 +156,26 @@ class TestNameSimilarity:
 
 class TestComicScan:
     """Tests for the main comicScan function."""
+
+    def test_load_existing_series_indexes_legacy_comic_dynamic_name(self, comicsync, _mock_globals):
+        engine = create_engine("sqlite://")
+        comicsync.comics.create(engine)
+        row = {
+            "ComicID": "45678",
+            "ComicName": "Absolute Batman",
+            "ComicSortName": "Absolute Batman",
+            "DynamicComicName": "absolutebatman",
+            "ComicYear": "2024",
+            "ComicLocation": "/comics/Absolute Batman (2024)",
+            "ContentType": None,
+        }
+        with engine.begin() as conn:
+            conn.execute(comicsync.comics.insert(), row)
+        _mock_globals["db"].get_engine.return_value = engine
+
+        result = comicsync._load_existing_series()
+
+        assert result["absolute batman"][0]["ComicID"] == row["ComicID"]
 
     def test_reconciles_existing_series_matched_by_folder_year(self, comicsync):
         existing_series = {
