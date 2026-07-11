@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.1
+
+### Patch Changes
+
+- 5816867: Prioritize operator-requested searches over restart recovery, ensure configured Torznab providers are searched, and expose safe provider-attempt diagnostics.
+
 ## 0.19.0
 
 ### Minor Changes
