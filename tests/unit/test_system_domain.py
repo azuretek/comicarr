@@ -666,6 +666,14 @@ class TestConfigService:
         assert len(result["jobs"]) == 1
         assert result["jobs"][0]["id"] == "search_job"
 
+    def test_job_management_returns_empty_list_without_scheduler_jobs(self, monkeypatch):
+        """A display-only scheduler read has a stable empty-list contract."""
+        scheduler = MagicMock()
+        scheduler.get_jobs.return_value = []
+        monkeypatch.setattr(comicarr, "SCHED", scheduler)
+
+        assert system_service.job_management(write=False) == []
+
     def test_operational_poll_can_skip_duplicate_acquisition_health(self):
         ctx = _make_test_ctx()
         ctx.scheduler.get_jobs.return_value = []

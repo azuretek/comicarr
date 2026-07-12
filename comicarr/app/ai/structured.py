@@ -66,4 +66,4 @@ def request_structured(client, model, system_prompt, user_prompt, schema_class, 
         return schema_class.model_validate(data)
     except Exception as e:
         logger.error("[AI-STRUCTURED] Failed to parse LLM response: %s" % e)
-        raise ValueError("Failed to parse structured response from LLM: %s" % e)
+        raise ValueError("Failed to parse structured response from LLM: %s" % e) from e

@@ -57,6 +57,23 @@ def test_command_kind_and_entity_identity_are_part_of_the_durable_contract():
     assert refresh_item["entity_type"] == "series"
 
 
+def test_conflicting_run_id_preserves_value_error_contract():
+    ledger = RunLedger(get_engine())
+    ledger.create_run("same-run", command_kind="search", trigger="manual")
+
+    with pytest.raises(ValueError, match="different acquisition command"):
+        ledger.create_run("same-run", command_kind="refresh", trigger="manual")
+
+
+def test_conflicting_item_payload_preserves_value_error_contract():
+    ledger = RunLedger(get_engine())
+    ledger.create_run("payload-run", command_kind="search", trigger="manual")
+    ledger.accept_item("payload-run", entity_type="issue", entity_id="issue-1", payload={"issueid": "first"})
+
+    with pytest.raises(ValueError, match="payload is immutable"):
+        ledger.accept_item("payload-run", entity_type="issue", entity_id="issue-1", payload={"issueid": "second"})
+
+
 def test_reconstructable_payload_is_allowlisted_bounded_and_recoverable():
     ledger = RunLedger(get_engine())
     ledger.create_run("refresh-replay", command_kind="refresh", trigger="manual")

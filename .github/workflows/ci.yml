@@ -91,5 +91,8 @@ jobs:
       - name: Run ruff linter
         run: ruff check comicarr/ --output-format=github
 
+      - name: Run modern backend quality ratchet
+        run: python scripts/run_ruff.py modern
+
       - name: Run ruff formatter check
         run: ruff format --check comicarr/

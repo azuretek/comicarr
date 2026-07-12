@@ -1802,10 +1802,7 @@ def job_management(
         )
 
     if not write:
-        if len(jobresults) == 0:
-            return monitors
-        else:
-            return jobresults
+        return jobresults
     else:
         if job is None:
             for x in jobresults:

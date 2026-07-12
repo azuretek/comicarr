@@ -519,7 +519,7 @@ def main():
             try:
                 open(comicarr.PIDFILE, "w").write(f"{curpid}\n")
             except IOError as e:
-                raise SystemExit("Unable to write PID file: %s [%d]" % (e.strerror, e.errno))
+                raise SystemExit("Unable to write PID file: %s [%d]" % (e.strerror, e.errno)) from e
         else:
             print("Not running in daemon mode. PID file creation disabled.")
 

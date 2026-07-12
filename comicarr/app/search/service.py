@@ -652,6 +652,13 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
             torrent_files = len(torrent_info["files"])
             torrent_folder = torrent_info["folder"]
 
+        def resolve_torrent_path():
+            if torrent_files == 1:
+                if comicarr.USE_DELUGE:
+                    return os.path.join(torrent_folder, torrent_info["files"][0]["path"])
+                return torrent_info["files"][0]
+            return torrent_folder
+
         if all([torrent_status is True, download is True]):
             if not issueid:
                 torrent_info["snatch_status"] = "MONITOR STARTING"
@@ -668,13 +675,7 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
                 shell_cmd = sys.executable
 
             curScriptName = shell_cmd + " " + str(comicarr.CONFIG.AUTO_SNATCH_SCRIPT)
-            if torrent_files > 1:
-                downlocation = torrent_folder
-            else:
-                if comicarr.USE_DELUGE:
-                    downlocation = os.path.join(torrent_folder, torrent_info["files"][0]["path"])
-                else:
-                    downlocation = torrent_info["files"][0]
+            downlocation = resolve_torrent_path()
 
             autosnatch_env = os.environ.copy()
             autosnatch_env["downlocation"] = downlocation.replace("'", "\\'")
@@ -733,8 +734,10 @@ def torrentinfo(issueid=None, torrent_hash=None, download=False, monitor=False):
                         logger.warn("Unable to pause torrent - cannot run post-process on item at this time.")
                         snatch_status = "MONITOR FAIL"
                     else:
+                        torrent_path = torrent_folder
                         try:
-                            new_filepath = os.path.join(torrent_path, ".copy")
+                            torrent_path = resolve_torrent_path()
+                            new_filepath = torrent_path + ".copy"
                             logger.fdebug("New_Filepath: %s" % new_filepath)
                             shutil.copy(torrent_path, new_filepath)
                             torrent_info["copied_filepath"] = new_filepath
