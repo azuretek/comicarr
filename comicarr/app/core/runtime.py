@@ -133,6 +133,20 @@ _CONTEXT_TO_LEGACY = {
 }
 
 
+# Keep the legacy worker names and their canonical context fields in one
+# ordered mapping. Startup stores these identities here and lifespan drains
+# them in this same order.
+POOL_CONTEXT_FIELDS = {
+    "SNPOOL": "sn_pool",
+    "NZBPOOL": "nzb_pool",
+    "SEARCHPOOL": "search_pool",
+    "PPPOOL": "pp_pool",
+    "DDLPOOL": "ddl_pool",
+    "MASS_ADD": "mass_add_pool",
+    "MASS_REFRESH": "mass_refresh_pool",
+}
+
+
 def _legacy_value(comicarr, field, default=None):
     """Read an initialized legacy value without fabricating a mutable default."""
     return getattr(comicarr, _CONTEXT_TO_LEGACY[field], default)

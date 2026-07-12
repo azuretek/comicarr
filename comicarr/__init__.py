@@ -884,19 +884,13 @@ def resume_acquisition_runtime(config=None):
     ctx = get_runtime_if_initialized()
     config = config or (ctx.config if ctx is not None else CONFIG)
 
-    def schedule(queue_name):
-        if ctx is not None:
-            queue_schedule(queue_name, "start", ctx=ctx)
-        else:
-            queue_schedule(queue_name, "start")
-
     with ACQUISITION_RESUME_LOCK:
         gate = refresh_runtime_state(config)
         if gate.blocked:
             raise RuntimeError("acquisition remains blocked: %s" % (gate.reason or "unknown gate"))
 
         try:
-            replayed = replay_acquisition_obligations(ctx=ctx) if ctx is not None else replay_acquisition_obligations()
+            replayed = replay_acquisition_obligations(ctx=ctx)
         except Exception as e:
             set_runtime_acquisition_status(
                 workers_blocked=True,
@@ -905,7 +899,7 @@ def resume_acquisition_runtime(config=None):
             raise RuntimeError("durable acquisition replay failed") from e
 
         queues_started = ["search_queue"]
-        schedule("search_queue")
+        queue_schedule("search_queue", "start", ctx=ctx)
         if all(
             [
                 bool(getattr(config, "ENABLE_TORRENTS", False)),
@@ -913,7 +907,7 @@ def resume_acquisition_runtime(config=None):
                 OS_DETECT != "Windows",
             ]
         ) and getattr(config, "TORRENT_DOWNLOADER", None) in {2, 4}:
-            schedule("snatched_queue")
+            queue_schedule("snatched_queue", "start", ctx=ctx)
             queues_started.append("snatched_queue")
         if bool(getattr(config, "POST_PROCESSING", False)) and (
             (
@@ -925,13 +919,13 @@ def resume_acquisition_runtime(config=None):
                 and bool(getattr(config, "NZBGET_CLIENT_POST_PROCESSING", False))
             )
         ):
-            schedule("nzb_queue")
+            queue_schedule("nzb_queue", "start", ctx=ctx)
             queues_started.append("nzb_queue")
         if bool(getattr(config, "POST_PROCESSING", False)):
-            schedule("pp_queue")
+            queue_schedule("pp_queue", "start", ctx=ctx)
             queues_started.append("pp_queue")
         if bool(getattr(config, "ENABLE_DDL", False)):
-            schedule("ddl_queue")
+            queue_schedule("ddl_queue", "start", ctx=ctx)
             queues_started.append("ddl_queue")
 
         # The broad scheduler-status writer is still a documented legacy
@@ -1346,25 +1340,18 @@ def start(ctx):
 
 def queue_schedule(queuetype, mode, ctx=None):
     """Start/stop legacy workers while preserving canonical pool identity."""
-    from comicarr.app.core.runtime import get_runtime_if_initialized, set_runtime_field
+    from comicarr.app.core.runtime import POOL_CONTEXT_FIELDS, get_runtime_if_initialized, set_runtime_field
 
     ctx = ctx or get_runtime_if_initialized()
-    pool_fields = {
-        "SNPOOL": "sn_pool",
-        "NZBPOOL": "nzb_pool",
-        "SEARCHPOOL": "search_pool",
-        "PPPOOL": "pp_pool",
-        "DDLPOOL": "ddl_pool",
-    }
 
     def get_pool(pool_attr):
         if ctx is not None:
-            return getattr(ctx, pool_fields[pool_attr])
+            return getattr(ctx, POOL_CONTEXT_FIELDS[pool_attr])
         return getattr(comicarr, pool_attr)
 
     def set_pool(pool_attr, pool):
         if ctx is not None:
-            set_runtime_field(ctx, pool_fields[pool_attr], pool)
+            set_runtime_field(ctx, POOL_CONTEXT_FIELDS[pool_attr], pool)
         else:
             setattr(comicarr, pool_attr, pool)
 

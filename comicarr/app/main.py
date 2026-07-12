@@ -29,7 +29,12 @@ from comicarr.app.core.middleware import (
     SecurityHeadersMiddleware,
     SetupGateMiddleware,
 )
-from comicarr.app.core.runtime import get_runtime, set_runtime_acquisition_status, set_runtime_field
+from comicarr.app.core.runtime import (
+    POOL_CONTEXT_FIELDS,
+    get_runtime,
+    set_runtime_acquisition_status,
+    set_runtime_field,
+)
 
 # Bounded worker-drain timeout for the authoritative lifespan shutdown drain.
 # The legacy ad-hoc value was pool.join(5) which is almost certainly too short
@@ -43,16 +48,7 @@ SHUTDOWN_DRAIN_TIMEOUT = 30.0
 # queue_schedule()'s shutdown branch so the FastAPI lifespan is the single
 # authoritative drain. MASS_ADD and MASS_REFRESH are on-demand but still own
 # database work and must not outlive engine disposal.
-_WORKER_POOLS = ("SNPOOL", "NZBPOOL", "SEARCHPOOL", "PPPOOL", "DDLPOOL", "MASS_ADD", "MASS_REFRESH")
-_CONTEXT_POOL_FIELDS = {
-    "SNPOOL": "sn_pool",
-    "NZBPOOL": "nzb_pool",
-    "SEARCHPOOL": "search_pool",
-    "PPPOOL": "pp_pool",
-    "DDLPOOL": "ddl_pool",
-    "MASS_ADD": "mass_add_pool",
-    "MASS_REFRESH": "mass_refresh_pool",
-}
+_WORKER_POOLS = tuple(POOL_CONTEXT_FIELDS)
 
 
 def _drain_worker_pools(timeout, ctx=None):
@@ -75,7 +71,7 @@ def _drain_worker_pools(timeout, ctx=None):
     deadline = time.monotonic() + timeout
 
     for pool_attr in _WORKER_POOLS:
-        pool = getattr(ctx, _CONTEXT_POOL_FIELDS[pool_attr], None) if ctx is not None else None
+        pool = getattr(ctx, POOL_CONTEXT_FIELDS[pool_attr], None) if ctx is not None else None
         if pool is None:
             # Pre-factory legacy tests and the remaining bootstrap bridge use
             # the same pool objects through these aliases.

@@ -2986,7 +2986,8 @@ def importer_thread(serieslist):
     add_list = ctx.add_list if ctx is not None else comicarr.ADD_LIST
     issue_watch_list = ctx.issue_watch_list if ctx is not None else comicarr.ISSUE_WATCH_LIST
 
-    list(map(add_list.put, serieslist))
+    for series in serieslist:
+        add_list.put(series)
 
     try:
         pool = ctx.mass_add_pool if ctx is not None else comicarr.MASS_ADD
@@ -3004,8 +3005,6 @@ def importer_thread(serieslist):
         pool = threading.Thread(target=addvialist, args=(add_list, issue_watch_list), name="mass-add")
         _set_mass_add_pool(ctx, pool)
         pool.start()
-        if not pool:
-            pool.join(5)
 
 
 def issue_watcher_thread(issuelist):
@@ -3015,7 +3014,8 @@ def issue_watcher_thread(issuelist):
 
     ctx = _mass_add_runtime_context()
     issue_watch_list = ctx.issue_watch_list if ctx is not None else comicarr.ISSUE_WATCH_LIST
-    list(map(issue_watch_list.put, issuelist))
+    for issue in issuelist:
+        issue_watch_list.put(issue)
 
 
 _REFRESH_WORKER_LOCK = threading.RLock()
