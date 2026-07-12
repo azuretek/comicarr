@@ -61,6 +61,7 @@ from comicarr.app.common.remote_artifacts import (
     safe_remote_filename,
     write_chunks_atomically,
 )
+from comicarr.app.core.workers import submit_background_future
 from comicarr.app.downloads import handoff
 from comicarr.downloaders import external_server as exs
 from comicarr.tables import (
@@ -128,7 +129,12 @@ def parallel_search_providers(scarios_list, timeout=120):
     # Submit all searches
     for scarios in scarios_list:
         provider_name = list(scarios.get("current_prov", {}).keys())[0] if scarios.get("current_prov") else "unknown"
-        future = executor.submit(search_the_matrix, scarios)
+        future = submit_background_future(
+            executor,
+            search_the_matrix,
+            args=(scarios,),
+            name="provider-search:%s" % provider_name,
+        )
         futures[future] = provider_name
 
     logger.fdebug(f"[PARALLEL-SEARCH] Submitted {len(futures)} provider searches in parallel")

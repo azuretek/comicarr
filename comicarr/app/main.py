@@ -15,6 +15,7 @@ import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from apscheduler.schedulers.base import SchedulerNotRunningError
@@ -47,7 +48,8 @@ SHUTDOWN_DRAIN_TIMEOUT = 30.0
 
 # Scheduler jobs can own the same database and queues as workers. Give an
 # in-flight job a bounded grace period, then preserve live resources for the
-# terminal process exit rather than dispose underneath it.
+# terminal process exit rather than dispose underneath it. Worker drains use
+# the same preservation policy after their post-join liveness checks.
 SCHEDULER_DRAIN_TIMEOUT = 30.0
 
 # All pipeline worker pools. The bounded join below is RELOCATED here from
@@ -57,6 +59,17 @@ SCHEDULER_DRAIN_TIMEOUT = 30.0
 _WORKER_POOLS = tuple(POOL_CONTEXT_FIELDS)
 
 
+@dataclass(frozen=True)
+class DrainResult:
+    """Post-drain owners that can still touch shared runtime resources."""
+
+    live_owners: tuple[str, ...] = ()
+
+    @property
+    def all_stopped(self):
+        return not self.live_owners
+
+
 def _drain_worker_pools(timeout, ctx=None):
     """Bounded join of every live worker pool — runs OFF the event loop.
 
@@ -64,9 +77,13 @@ def _drain_worker_pools(timeout, ctx=None):
     bounded ``join(timeout)``; an unjoined pool is left for the terminal
     hard-kill backstop (a worker wedged in native code must never hang
     termination forever). An AssertionError from a join is swallowed here so
-    it can NOT short-circuit past the journal flush + engine.dispose() (the
-    removed ``except AssertionError: os._exit(0)`` landmine).
+    it can NOT short-circuit to process exit (the removed
+    ``except AssertionError: os._exit(0)`` landmine). Every pool is checked
+    again after its join; uncertain or live owners keep shared resources open
+    for the terminal process-exit path.
     """
+    import threading
+
     import comicarr
     from comicarr import logger
 
@@ -75,6 +92,13 @@ def _drain_worker_pools(timeout, ctx=None):
     # remaining until the deadline; once exhausted, remaining pools are left
     # for the terminal hard-kill backstop.
     deadline = time.monotonic() + timeout
+    live_owners = []
+    registry = getattr(ctx, "background_workers", None) if ctx is not None else None
+
+    def _record_live_owner(pool_attr, reason):
+        if pool_attr not in live_owners:
+            live_owners.append(pool_attr)
+        logger.warn("[SHUTDOWN] Worker pool %s remains live or uncertain after drain: %s" % (pool_attr, reason))
 
     for pool_attr in _WORKER_POOLS:
         pool = getattr(ctx, POOL_CONTEXT_FIELDS[pool_attr], None) if ctx is not None else None
@@ -88,21 +112,93 @@ def _drain_worker_pools(timeout, ctx=None):
             if pool.is_alive() is False:
                 continue
         except Exception as e:
-            logger.fdebug("[SHUTDOWN] pool.is_alive() check failed for %s: %s" % (pool_attr, e))
+            _record_live_owner(pool_attr, "initial liveness check failed: %s" % e)
             continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            logger.warn("[SHUTDOWN] Drain deadline exhausted; leaving %s for hard-kill backstop" % pool_attr)
+            _record_live_owner(pool_attr, "shared drain deadline exhausted")
             continue
         try:
             pool.join(remaining)
-            logger.fdebug("[SHUTDOWN] Drained worker pool %s" % pool_attr)
         except AssertionError as e:
-            # Must NOT short-circuit the drain — just log and continue so the
-            # journal flush + engine.dispose() still run.
             logger.warn("[SHUTDOWN] AssertionError joining %s: %s" % (pool_attr, e))
         except Exception as e:
             logger.error("[SHUTDOWN] Error joining %s: %s" % (pool_attr, e))
+
+        try:
+            still_alive = pool.is_alive() is not False
+        except Exception as e:
+            _record_live_owner(pool_attr, "post-join liveness check failed: %s" % e)
+            continue
+        if still_alive:
+            _record_live_owner(pool_attr, "still alive after bounded join")
+        else:
+            logger.fdebug("[SHUTDOWN] Drained worker pool %s" % pool_attr)
+
+    # Pipeline pools are admitted producers of finite child work. Close the
+    # registry only after those producers stop, then atomically snapshot and
+    # drain every child they handed off while joining.
+    registered_workers = registry.close() if registry is not None else ()
+    for worker in registered_workers:
+        owner = "background:%s" % worker.name
+        if worker is threading.current_thread():
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _record_live_owner(owner, "shared drain deadline exhausted")
+            continue
+        try:
+            worker.join(remaining)
+        except Exception as e:
+            logger.error("[SHUTDOWN] Error joining %s: %s" % (owner, e))
+        if worker.is_alive():
+            _record_live_owner(owner, "still alive after bounded join")
+        else:
+            logger.fdebug("[SHUTDOWN] Drained %s" % owner)
+
+    return DrainResult(tuple(live_owners))
+
+
+async def _drain_scheduler(loop, drain_executor, scheduler):
+    """Bound scheduler drain and report whether it can still own resources."""
+
+    from comicarr import logger
+
+    if not scheduler:
+        return DrainResult()
+    try:
+        scheduler_shutdown = loop.run_in_executor(drain_executor, lambda: scheduler.shutdown(wait=True))
+        await asyncio.wait_for(asyncio.shield(scheduler_shutdown), timeout=SCHEDULER_DRAIN_TIMEOUT)
+        if getattr(scheduler, "running", True) is not False:
+            logger.error("[SHUTDOWN] APScheduler liveness remains active or uncertain after shutdown")
+            return DrainResult(("APScheduler",))
+        logger.info("[SHUTDOWN] APScheduler stopped and running jobs drained")
+        return DrainResult()
+    except asyncio.TimeoutError:
+        logger.error("[SHUTDOWN] Scheduler drain timed out; APScheduler remains a live owner")
+    except SchedulerNotRunningError:
+        logger.info("[SHUTDOWN] APScheduler was already stopped")
+        return DrainResult()
+    except Exception as e:
+        logger.error("[SHUTDOWN] Error stopping scheduler; APScheduler liveness is uncertain: %s" % e)
+    return DrainResult(("APScheduler",))
+
+
+def _shutdown_executors(drain_executor, executor):
+    """Release shutdown executors exactly once on either terminal path."""
+
+    from comicarr import logger
+
+    try:
+        drain_executor.shutdown(wait=False)
+    except Exception as e:
+        logger.error("[SHUTDOWN] Error shutting down drain executor: %s" % e)
+
+    try:
+        executor.shutdown(wait=False)
+        logger.info("[SHUTDOWN] ThreadPoolExecutor shutdown requested without waiting")
+    except Exception as e:
+        logger.error("[SHUTDOWN] Error shutting down executor: %s" % e)
 
 
 @asynccontextmanager
@@ -161,8 +257,8 @@ async def lifespan(app: FastAPI):
     #   3. bounded pool.join OFF the loop, on a DEDICATED executor
     #      (== final journal flush: workers write the journal synchronously
     #       via the façade, so "drain workers fully" IS the flush guarantee)
-    #   4. ai/cv client close
-    #   5. engine.dispose()                — strictly AFTER the drain
+    #   4. recheck every pool's post-join liveness
+    #   5. ai/cv close + engine.dispose()  — ONLY after all owners stop
     #   6. executor / drain-executor shutdown — AFTER the drain
     #   7. default SIGNAL only if unset (never clobber restart/update/maint)
 
@@ -176,20 +272,7 @@ async def lifespan(app: FastAPI):
     # was already running to finish before queues or resources are retired. A
     # bounded wait preserves the terminal hard-kill liveness path for a hung
     # third-party call; in that case resource disposal is deliberately skipped.
-    scheduler_quiesced = True
-    if ctx.scheduler:
-        try:
-            scheduler_shutdown = loop.run_in_executor(drain_executor, lambda: ctx.scheduler.shutdown(wait=True))
-            await asyncio.wait_for(asyncio.shield(scheduler_shutdown), timeout=SCHEDULER_DRAIN_TIMEOUT)
-            logger.info("[SHUTDOWN] APScheduler stopped and running jobs drained")
-        except asyncio.TimeoutError:
-            scheduler_quiesced = False
-            logger.error("[SHUTDOWN] Scheduler drain timed out; preserving runtime resources for terminal process exit")
-        except SchedulerNotRunningError:
-            logger.info("[SHUTDOWN] APScheduler was already stopped")
-        except Exception as e:
-            scheduler_quiesced = False
-            logger.error("[SHUTDOWN] Error stopping scheduler; preserving runtime resources: %s" % e)
+    scheduler_result = await _drain_scheduler(loop, drain_executor, ctx.scheduler)
 
     # 2. Reject events from any worker that survives long enough to observe
     # shutdown. The EventBus close gate is synchronized with publisher
@@ -200,48 +283,54 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("[SHUTDOWN] Error closing event bus: %s" % e)
 
-    if not scheduler_quiesced:
-        # A job that failed to quiesce may still use the database, clients, or
-        # queues. Returning lets Comicarr.py take its terminal os._exit path;
-        # closing those resources here would recreate the shutdown race.
+    worker_result = DrainResult()
+    if scheduler_result.all_stopped:
+        # 3. Signal every worker queue to stop intake. Workers finish their
+        #    current item, then exit on the sentinel.
+        for q in [
+            ctx.snatched_queue,
+            ctx.nzb_queue,
+            ctx.pp_queue,
+            ctx.search_queue,
+            ctx.ddl_queue,
+            # MASS_ADD reads ADD_LIST as its shutdown sentinel. ISSUE_WATCH_LIST
+            # carries real issue IDs, so it is drained rather than poisoned with a
+            # value that could be treated as an issue during an in-flight loop.
+            ctx.add_list,
+            ctx.refresh_queue,
+        ]:
+            try:
+                q.put("exit")
+            except Exception:
+                pass
+
+        # 3. Bounded worker drain — relocated here from queue_schedule's
+        #    shutdown branch. pool.join(timeout) BLOCKS, so it runs off the
+        #    event loop on a DEDICATED single-thread executor.
         try:
-            drain_executor.shutdown(wait=False)
-            executor.shutdown(wait=False)
+            worker_result = await loop.run_in_executor(
+                drain_executor,
+                _drain_worker_pools,
+                SHUTDOWN_DRAIN_TIMEOUT,
+                ctx,
+            )
+            if worker_result.all_stopped:
+                logger.info("[SHUTDOWN] Worker drain complete; all pools stopped")
         except Exception as e:
-            logger.error("[SHUTDOWN] Error releasing timeout executors: %s" % e)
+            logger.error("[SHUTDOWN] Error during worker drain; liveness is uncertain: %s" % e)
+            worker_result = DrainResult(("worker-pool-state",))
+
+    live_owners = scheduler_result.live_owners + worker_result.live_owners
+    if live_owners:
+        # One preservation branch covers scheduler timeouts, worker timeouts,
+        # and uncertain liveness. Clients, the engine, and the runtime context
+        # remain usable until Comicarr.py reaches its terminal process exit.
+        logger.error(
+            "[SHUTDOWN] Preserving runtime resources for terminal process exit; live owners: %s"
+            % ", ".join(live_owners)
+        )
+        _shutdown_executors(drain_executor, executor)
         return
-
-    # 3. Signal every worker queue to stop intake. Workers finish their current
-    #    item, then exit on the sentinel.
-    for q in [
-        ctx.snatched_queue,
-        ctx.nzb_queue,
-        ctx.pp_queue,
-        ctx.search_queue,
-        ctx.ddl_queue,
-        # MASS_ADD reads ADD_LIST as its shutdown sentinel. ISSUE_WATCH_LIST
-        # carries real issue IDs, so it is drained rather than poisoned with a
-        # value that could be treated as an issue during an in-flight loop.
-        ctx.add_list,
-        ctx.refresh_queue,
-    ]:
-        try:
-            q.put("exit")
-        except Exception:
-            pass
-
-    # 3. Bounded worker drain — relocated here from queue_schedule's shutdown
-    #    branch. pool.join(timeout) BLOCKS, so it runs off the event loop on a
-    #    DEDICATED single-thread executor. It must NOT be scheduled onto
-    #    `executor` (the lifespan's default executor) because that is torn
-    #    down below; a dedicated executor keeps the drain independent of that
-    #    teardown. This MUST complete before engine.dispose() so an in-flight
-    #    worker journal write never hits a disposed engine (R7/R8/AE5).
-    try:
-        await loop.run_in_executor(drain_executor, _drain_worker_pools, SHUTDOWN_DRAIN_TIMEOUT, ctx)
-        logger.info("[SHUTDOWN] Worker drain complete")
-    except Exception as e:
-        logger.error("[SHUTDOWN] Error during worker drain: %s" % e)
 
     # 4. Close async/sync external clients (workers are drained now).
     if ctx.ai_async_client:
@@ -279,16 +368,7 @@ async def lifespan(app: FastAPI):
 
     # 6. Tear down executors — AFTER the drain (the drain used a dedicated
     #    executor, never `executor`, so this order is safe).
-    try:
-        drain_executor.shutdown(wait=False)
-    except Exception as e:
-        logger.error("[SHUTDOWN] Error shutting down drain executor: %s" % e)
-
-    try:
-        executor.shutdown(wait=False)
-        logger.info("[SHUTDOWN] ThreadPoolExecutor shut down")
-    except Exception as e:
-        logger.error("[SHUTDOWN] Error shutting down executor: %s" % e)
+    _shutdown_executors(drain_executor, executor)
 
     # 7. Default the signal ONLY if nothing else set it. Guarding with
     #    `if not comicarr.SIGNAL:` preserves restart/update/maintenance
