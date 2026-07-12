@@ -508,13 +508,15 @@ def initialize(config_file):
         logger.info("Checking to see if the database has all tables....")
         try:
             dbcheck()
-        except RuntimeError as e:
-            # Unique-constraint backup/migration aborts must fail closed — do not
-            # soft-catch them as a generic "Cannot connect to the database".
-            logger.error("[UNIQUE-MIGRATION] Refusing startup after migration abort: %s" % e)
-            raise
         except Exception as e:
-            logger.error("Cannot connect to the database: %s" % e)
+            # Keep the authenticated web diagnostics surface available, but
+            # leave the default fail-closed acquisition gate in place so no
+            # worker can start after an incomplete schema migration.
+            comicarr.ACQUISITION_SCHEMA_READY = False
+            comicarr.ACQUISITION_SCHEMA_ERROR = str(e)[:1000]
+            comicarr.ACQUISITION_WORKERS_BLOCKED = True
+            comicarr.ACQUISITION_BLOCK_REASON = "schema_migration_failed"
+            logger.error("[SCHEMA-MIGRATION] Worker startup blocked after migration failure: %s" % e)
         else:
             # Check if database is empty and set startup flags
             try:
@@ -1480,7 +1482,7 @@ def _ensure_columns(engine, table_name, required_columns):
                 logger.warn("Could not add column %s.%s: %s", table_name, col_name, e)
 
 
-def dbcheck():
+def _legacy_dbcheck():
     from comicarr.db import get_engine
     from comicarr.tables import ddl_info_status_updated
     from comicarr.tables import metadata as sa_metadata
@@ -1871,6 +1873,19 @@ def dbcheck():
     if dynamic_upgrade is True:
         logger.info("Updating db to include some important changes.")
         helpers.upgrade_dynamic()
+
+
+def dbcheck():
+    """Compatibility wrapper for the application-owned Alembic runner.
+
+    Historical startup repair remains below only as a reference for explicitly
+    reviewed adoption revisions. Normal startup must never run ad-hoc DDL or
+    data cleanup outside Alembic revision state.
+    """
+
+    from comicarr.app.core.schema import upgrade_database
+
+    return upgrade_database()
 
 
 # Explicit allowlist of legacy tables that need migration-time UNIQUE enforcement.

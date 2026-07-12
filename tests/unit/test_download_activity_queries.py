@@ -216,15 +216,11 @@ def test_legacy_ddl_schema_migration_adds_column_before_activity_index(tmp_path,
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy-activity.db'}")
     monkeypatch.setattr(comicarr.db, "_engine", engine)
     monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(
-        comicarr,
-        "CONFIG",
-        SimpleNamespace(DYNAMIC_UPDATE=4, OLDCONFIG_VERSION=None),
-    )
-    monkeypatch.setattr(comicarr, "_migrate_unique_constraints", lambda _engine: None)
-
     with engine.begin() as conn:
-        conn.execute(text("CREATE TABLE ddl_info (ID TEXT, status TEXT)"))
+        metadata.create_all(conn)
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
+        conn.execute(text("DROP INDEX ddl_info_status_updated"))
+        conn.execute(text("ALTER TABLE ddl_info DROP COLUMN updated_date"))
 
     statements = []
 

@@ -650,13 +650,13 @@ def test_recheck_inspect_error_still_attempts_migration(legacy_engine):
     assert tuple(["IssueID"]) in _unique_column_sets(legacy_engine, "issues")
 
 
-def test_initialize_source_rethrows_runtime_error_from_dbcheck():
-    """Guard the initialize() fail-closed branch for unique-migration RuntimeError."""
+def test_initialize_source_blocks_workers_after_dbcheck_failure():
+    """Guard the initialization path that preserves diagnostics but blocks workers."""
     import inspect as py_inspect
 
     source = py_inspect.getsource(comicarr.initialize)
     marker = "Checking to see if the database has all tables"
-    dbcheck_branch = source[source.index(marker) : source.index(marker) + 500]
-    assert "except RuntimeError as e:" in dbcheck_branch
-    assert "[UNIQUE-MIGRATION] Refusing startup after migration abort" in dbcheck_branch
-    assert dbcheck_branch.index("except RuntimeError as e:") < dbcheck_branch.index("except Exception as e:")
+    dbcheck_branch = source[source.index(marker) : source.index(marker) + 900]
+    assert "except Exception as e:" in dbcheck_branch
+    assert "ACQUISITION_WORKERS_BLOCKED = True" in dbcheck_branch
+    assert "[SCHEMA-MIGRATION] Worker startup blocked after migration failure" in dbcheck_branch
