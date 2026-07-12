@@ -17,6 +17,7 @@ except ModuleNotFoundError:
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 EXPORT_COMMAND = ["uv", "export", "--locked", "--no-dev", "--no-hashes", "--no-emit-project"]
+SETUP_UV_ACTION = "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b"
 
 
 def _canonical_requirements(contents):
@@ -52,3 +53,15 @@ def test_project_declares_a_setuptools_build_backend():
         "requires": ["setuptools>=61"],
         "build-backend": "setuptools.build_meta",
     }
+
+
+def test_delivery_paths_install_from_the_committed_uv_lock():
+    workflow = (ROOT_DIR / ".github/workflows/test.yml").read_text()
+    dockerfile = (ROOT_DIR / "Dockerfile").read_text()
+
+    assert workflow.count(SETUP_UV_ACTION) == 3
+    assert "uv sync --locked --extra dev" in workflow
+    assert workflow.count("uv sync --locked") >= 3
+    assert "COMICARR_E2E_PYTHON: ${{ github.workspace }}/.venv/bin/python" in workflow
+    assert "uv lock &&" not in dockerfile
+    assert "uv sync --locked --no-dev --compile-bytecode" in dockerfile
