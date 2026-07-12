@@ -1642,7 +1642,7 @@ def _bulk_update_issue_rows(table, rows, fields):
 
     params = [
         {
-            **{key: value for key, value in row.items() if key != "IssueID"},
+            **{f"_value_{field}": row[field] for field in fields},
             "_issue_id": row["IssueID"],
         }
         for row in rows
@@ -1650,7 +1650,7 @@ def _bulk_update_issue_rows(table, rows, fields):
     stmt = (
         update(table)
         .where(table.c.IssueID == bindparam("_issue_id"))
-        .values(**{field: bindparam(field) for field in fields})
+        .values(**{field: bindparam(f"_value_{field}") for field in fields})
     )
     with db.get_engine().begin() as conn:
         conn.execute(stmt, params)

@@ -139,8 +139,13 @@ describe("ImportPage", () => {
       http.get("/api/import", () =>
         HttpResponse.json({
           imports: [],
-          pagination: { page: 1, per_page: 100, total: 0, pages: 0 },
-          summary: { groups: 0, files: 0 },
+          pagination: {
+            total: 0,
+            limit: 50,
+            offset: 0,
+            has_more: false,
+          },
+          summary: { group_count: 0, file_count: 0 },
         }),
       ),
       http.get("/api/import/comic/progress", () =>
