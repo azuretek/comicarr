@@ -16,7 +16,9 @@ from pathlib import Path
 
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import Column, insert, inspect, select, text
+from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
+from sqlalchemy import Column, UniqueConstraint, insert, inspect, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -78,9 +80,14 @@ def _application_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _legacy_fingerprint_error(engine: Engine) -> str | None:
+def _legacy_fingerprint_error(
+    engine: Engine,
+    *,
+    require_control_row: bool = True,
+    require_complete_schema: bool = False,
+) -> str | None:
     inspector = inspect(engine)
-    table_names = set(inspector.get_table_names())
+    table_names = set(inspector.get_table_names()) - {_ALEMBIC_VERSION_TABLE}
     allowed_tables = set(metadata.tables) | _LEGACY_ONLY_TABLES
     unexpected = sorted(table_names - allowed_tables)
     if unexpected:
@@ -89,6 +96,11 @@ def _legacy_fingerprint_error(engine: Engine) -> str | None:
     missing = sorted(_REQUIRED_LEGACY_TABLES - table_names)
     if missing:
         return "is missing required Comicarr tables: %s" % ", ".join(missing)
+
+    if require_complete_schema:
+        missing = sorted(set(metadata.tables) - table_names)
+        if missing:
+            return "is missing tables required by its Comicarr revision: %s" % ", ".join(missing)
 
     for table_name, required_columns in _REQUIRED_LEGACY_COLUMNS.items():
         columns = {column["name"] for column in inspector.get_columns(table_name)}
@@ -103,10 +115,11 @@ def _legacy_fingerprint_error(engine: Engine) -> str | None:
         if unknown_columns:
             return "%s has unrecognized columns: %s" % (table_name, ", ".join(unknown_columns))
 
-    with engine.connect() as connection:
-        has_control_row = connection.execute(text("SELECT 1 FROM mylar_info LIMIT 1")).first() is not None
-    if not has_control_row:
-        return "is missing the mylar_info control row"
+    if require_control_row:
+        with engine.connect() as connection:
+            has_control_row = connection.execute(text("SELECT 1 FROM mylar_info LIMIT 1")).first() is not None
+        if not has_control_row:
+            return "is missing the mylar_info control row"
     return None
 
 
@@ -123,12 +136,44 @@ def classify_database(engine: Engine | None = None) -> DatabaseState:
     if not table_names:
         return DatabaseState.FRESH
     if _ALEMBIC_VERSION_TABLE in table_names:
+        _validate_versioned_database(engine)
         return DatabaseState.VERSIONED
 
     error = _legacy_fingerprint_error(engine)
     if error:
         raise MigrationStateError("database is not a recognized Comicarr database and will not be adopted: %s" % error)
     return DatabaseState.LEGACY
+
+
+def _validate_versioned_database(engine: Engine) -> None:
+    """Fail closed unless the database records one exact Comicarr revision."""
+
+    with engine.connect() as connection:
+        revisions = MigrationContext.configure(connection).get_current_heads()
+
+    if not revisions:
+        raise MigrationStateError("Alembic version table is empty; refusing to mutate an untrusted database")
+    if len(revisions) != 1:
+        raise MigrationStateError(
+            "Alembic version table must contain exactly one revision for Comicarr's single-head migration graph"
+        )
+
+    revision = revisions[0]
+    scripts = ScriptDirectory.from_config(alembic_config(engine))
+    try:
+        resolved = scripts.get_revision(revision)
+    except CommandError as e:
+        raise MigrationStateError("Alembic version table contains an unknown Comicarr revision: %s" % revision) from e
+    if resolved is None or resolved.revision != revision:
+        raise MigrationStateError("Alembic version table contains an unknown Comicarr revision: %s" % revision)
+
+    error = _legacy_fingerprint_error(
+        engine,
+        require_control_row=False,
+        require_complete_schema=True,
+    )
+    if error:
+        raise MigrationStateError("versioned database is not a recognized Comicarr database: %s" % error)
 
 
 def alembic_config(engine: Engine | None = None, connection=None) -> Config:
@@ -141,6 +186,57 @@ def alembic_config(engine: Engine | None = None, connection=None) -> Config:
     if connection is not None:
         config.attributes["connection"] = connection
     return config
+
+
+def autogenerate_include_object(connection: Connection):
+    """Treat full unique indexes as equivalent to table unique constraints.
+
+    SQLite cannot add a table constraint without rebuilding the table, so the
+    reviewed legacy path restores equivalent enforcement with unique indexes.
+    This filter suppresses only the corresponding autogenerate representation
+    difference; absent, partial, or differently ordered enforcement remains a
+    schema diff.
+    """
+
+    metadata_unique_constraints = {
+        (table.name, tuple(column.name for column in constraint.columns))
+        for table in metadata.sorted_tables
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    reflected_unique_indexes = None
+
+    def get_reflected_unique_indexes():
+        nonlocal reflected_unique_indexes
+        if reflected_unique_indexes is not None:
+            return reflected_unique_indexes
+
+        reflected_unique_indexes = set()
+        inspector = inspect(connection)
+        for table_name in set(inspector.get_table_names()) & set(metadata.tables):
+            for index in inspector.get_indexes(table_name):
+                dialect_options = index.get("dialect_options") or {}
+                is_partial = any(
+                    name.endswith("_where") and value is not None for name, value in dialect_options.items()
+                )
+                columns = tuple(index.get("column_names") or ())
+                if index.get("unique") and columns and not is_partial:
+                    reflected_unique_indexes.add((table_name, columns))
+        return reflected_unique_indexes
+
+    def include_object(schema_object, _name, object_type, reflected, compare_to):
+        if compare_to is not None:
+            return True
+        if object_type not in {"index", "unique_constraint"}:
+            return True
+        signature = (schema_object.table.name, tuple(column.name for column in schema_object.columns))
+        if object_type == "unique_constraint" and not reflected:
+            return signature not in get_reflected_unique_indexes()
+        if object_type == "index" and reflected and schema_object.unique:
+            return signature not in metadata_unique_constraints
+        return True
+
+    return include_object
 
 
 def current_revision(engine: Engine | None = None) -> str | None:
