@@ -40,10 +40,22 @@ class EventBus:
         self._subscribers = {}
         self._counter = 0
         self._loop = None
+        self._closing = False
 
     def set_loop(self, loop):
         """Called during lifespan startup to capture the running event loop."""
-        self._loop = loop
+        with self._lock:
+            self._loop = loop
+
+    def close(self):
+        """Reject future publishes once the runtime begins shutting down.
+
+        The close flag and publisher snapshot share one lock. A publish that
+        has already acquired the lock may still be delivered, but no caller
+        can enqueue a new event after this method returns.
+        """
+        with self._lock:
+            self._closing = True
 
     def subscribe(self):
         """Create a new subscriber queue. Returns (sub_id, queue)."""
@@ -98,18 +110,17 @@ class EventBus:
         Uses loop.call_soon_threadsafe() to ensure the event loop is
         properly woken up when events are published from worker threads.
         """
-        if self._loop is None:
-            return
-
-        event = AppEvent(event_type, payload)
         with self._lock:
-            snapshot = list(self._subscribers.values())
+            if self._closing or self._loop is None:
+                return False
 
-        for q in snapshot:
-            try:
-                self._loop.call_soon_threadsafe(self._enqueue_latest, q, event)
-            except RuntimeError:
-                pass  # Event loop closed during shutdown
+            event = AppEvent(event_type, payload)
+            for q in self._subscribers.values():
+                try:
+                    self._loop.call_soon_threadsafe(self._enqueue_latest, q, event)
+                except RuntimeError:
+                    pass  # Event loop closed during shutdown
+        return True
 
     @property
     def subscriber_count(self):

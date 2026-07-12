@@ -106,3 +106,25 @@ def test_importer_thread_projects_mass_add_pool_to_canonical_runtime(monkeypatch
     assert comicarr.MASS_ADD is pool
     assert ctx.add_list.get_nowait() == {"comicid": "12345", "comicname": None}
     pool.start.assert_called_once()
+
+
+def test_refresh_worker_projects_pool_to_canonical_runtime(monkeypatch):
+    """The on-demand refresh worker must share the lifecycle-owned pool and queue."""
+    ctx = AppContext()
+    pool = MagicMock(name="mass_refresh_pool")
+    thread = MagicMock(return_value=pool)
+    monkeypatch.setattr(runtime, "_runtime", ctx)
+    monkeypatch.setattr(comicarr, "MASS_REFRESH", None)
+    monkeypatch.setattr(importer.threading, "Thread", thread)
+
+    assert importer._start_refresh_worker() is True
+
+    assert ctx.mass_refresh_pool is pool
+    assert comicarr.MASS_REFRESH is pool
+    thread.assert_called_once_with(target=importer.updater.addvialist, args=(ctx.refresh_queue,), name="mass-refresh")
+    pool.start.assert_called_once()
+
+    monkeypatch.setattr(importer.threading, "current_thread", lambda: pool)
+    assert importer.refresh_worker_should_retire(ctx.refresh_queue) is True
+    assert ctx.mass_refresh_pool is None
+    assert comicarr.MASS_REFRESH is None

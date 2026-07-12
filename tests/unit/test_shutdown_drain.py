@@ -37,8 +37,8 @@ worker journal write could therefore hit a disposed engine, and the
 ``os.execv``, degrading a restart to a plain stop.
 
 Post-U7 the lifespan owns the single ordered sequence:
-  1. scheduler.shutdown(wait=False)               (stop new pipeline work)
-  2. q.put('exit') for all 5 queues               (stop intake)
+  1. scheduler.shutdown(wait=True), OFF the loop  (quiesce scheduled work)
+  2. EventBus.close(), then q.put('exit')         (stop intake/late events)
   3. bounded pool.join, OFF the event loop, on a DEDICATED executor
      (final journal flush == workers fully drained)
   4. ai/cv client close
@@ -55,16 +55,19 @@ unconditional, non-blocking hard-kill backstop. The
 
 import ast
 import asyncio
+import datetime
 import inspect
 import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
 
 import comicarr
 from comicarr.app.core.context import AppContext
+from comicarr.app.core.events import EventBus
 from comicarr.app.downloads import journal
 from comicarr.app.main import lifespan
 from comicarr.db import get_engine, shutdown_engine
@@ -311,6 +314,126 @@ class TestHappyPath:
 
         assert ctx.add_list.get_nowait() == "exit"
         assert order.index("mass-add-join") < order.index("dispose")
+
+    @pytest.mark.asyncio
+    async def test_shutdown_waits_for_running_scheduler_job_before_dispose(self, _isolated_db):
+        """A real scheduled job must finish its durable write before disposal."""
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        disposed = threading.Event()
+        scheduler = BackgroundScheduler()
+        ctx = _make_ctx(scheduler=scheduler)
+        rkey = journal.release_key("scheduler-1", "test", nzbname="Scheduled Series")
+
+        def _scheduled_write():
+            started.set()
+            assert release.wait(timeout=2)
+            journal.record_transition(rkey, "snatched", issueid="scheduler-1", provider="test")
+            finished.set()
+
+        scheduler.add_job(
+            _scheduled_write,
+            "date",
+            run_date=datetime.datetime.now() + datetime.timedelta(milliseconds=20),
+        )
+        scheduler.start()
+        assert started.wait(timeout=2), "scheduled job did not start"
+
+        engine = get_engine()
+        real_dispose = engine.dispose
+
+        def _track_dispose():
+            disposed.set()
+            return real_dispose()
+
+        shutdown_task = None
+        try:
+            with patch.object(engine, "dispose", side_effect=_track_dispose):
+                shutdown_task = asyncio.create_task(_run_shutdown(ctx, scheduler))
+                await asyncio.sleep(0.05)
+                assert not disposed.is_set(), "engine disposed while a scheduler job was still running"
+                release.set()
+                await asyncio.wait_for(shutdown_task, timeout=2)
+
+            assert finished.is_set()
+            assert disposed.is_set()
+            assert journal.read_open()[0]["release_key"] == rkey
+        finally:
+            release.set()
+            if shutdown_task is not None and not shutdown_task.done():
+                await asyncio.wait_for(shutdown_task, timeout=2)
+            if scheduler.running:
+                scheduler.shutdown(wait=True)
+
+    @pytest.mark.asyncio
+    async def test_scheduler_drain_timeout_preserves_resources_for_terminal_exit(self, _isolated_db, monkeypatch):
+        """A hung scheduler job cannot make lifespan hang or dispose underneath it."""
+        from comicarr.app import main as appmain
+
+        scheduler_started = threading.Event()
+        release_scheduler = threading.Event()
+        scheduler = MagicMock()
+        ctx = _make_ctx(scheduler=scheduler)
+        disposed = threading.Event()
+        monkeypatch.setattr(appmain, "SCHEDULER_DRAIN_TIMEOUT", 0.05)
+
+        def _block_scheduler_shutdown(*, wait):
+            assert wait is True
+            scheduler_started.set()
+            assert release_scheduler.wait(timeout=2)
+
+        scheduler.shutdown.side_effect = _block_scheduler_shutdown
+        engine = get_engine()
+        real_dispose = engine.dispose
+
+        def _track_dispose():
+            disposed.set()
+            return real_dispose()
+
+        try:
+            started_at = time.monotonic()
+            with patch.object(engine, "dispose", side_effect=_track_dispose):
+                await _run_shutdown(ctx, scheduler)
+            elapsed = time.monotonic() - started_at
+
+            assert scheduler_started.is_set()
+            assert elapsed < 1.0
+            assert not disposed.is_set()
+            assert not ctx.disposed
+            assert ctx.snatched_queue.empty()
+        finally:
+            release_scheduler.set()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_rejects_late_event_bus_publication(self, _isolated_db):
+        """A worker publishing during the drain cannot enqueue a late SSE event."""
+        ctx = _make_ctx(scheduler=MagicMock())
+        bus = EventBus()
+        bus.set_loop(asyncio.get_running_loop())
+        _, events = bus.subscribe()
+        ctx.event_bus = bus
+
+        class _LatePublisherPool(_FakePool):
+            def join(self, timeout=None):
+                bus.publish_sync("late", {"source": "worker"})
+                super().join(timeout)
+
+        ctx.sn_pool = _LatePublisherPool()
+        with (
+            patch.object(comicarr, "SNPOOL", None, create=True),
+            patch.object(comicarr, "NZBPOOL", None, create=True),
+            patch.object(comicarr, "SEARCHPOOL", None, create=True),
+            patch.object(comicarr, "PPPOOL", None, create=True),
+            patch.object(comicarr, "DDLPOOL", None, create=True),
+            patch.object(comicarr, "MASS_ADD", None, create=True),
+            patch.object(comicarr, "MASS_REFRESH", None, create=True),
+        ):
+            await _run_shutdown(ctx)
+
+        await asyncio.sleep(0)
+        assert events.empty()
+        assert bus.publish_sync("after_shutdown", {}) is False
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ instance to `app.state.ctx`; it does not construct a second view.
 | State category | Examples | Creation/writer | Reader/shutdown owner | Identity rule |
 | --- | --- | --- | --- | --- |
 | Immutable configuration | paths, `config`, build metadata | startup configuration | routes/services; no disposal | fixed after factory creation |
-| Long-lived services | scheduler, CV session/cache, Metron, AI bundle, event bus | runtime factory; event loop is attached in lifespan | workers/routes; lifespan closes clients after drain | one instance per process |
+| Long-lived services | scheduler, CV session/cache, Metron, AI bundle, event bus | runtime factory; event loop is attached in lifespan | workers/routes; lifespan quiesces jobs, closes the event bus, then closes clients after drain | one instance per process |
 | Queues and locks | `ddl_queued`, all work queues, search/API/DDL locks, acquisition resume lock | existing bootstrap objects adopted by factory | workers, scheduler, routes; lifespan signals queues then drains pools | must be the exact same object, never a copy |
 | Request-visible state | scheduler status, setup/JWT state, import progress, version state | migrated services write with `set_runtime_field()` | system/API readers; discarded with process | bridge serializes migrated writes with `runtime_lock` |
 | Durable-acquisition projection | schema readiness, maintenance block reason, migration reconciliation | `MaintenanceController` database transactions/fences, then runtime projection | startup diagnostics and acquisition workers | durable DB fence is authoritative; context is its live projection |
@@ -66,9 +66,13 @@ instance to `app.state.ctx`; it does not construct a second view.
    through the compatibility bridge so the shutdown owner sees the same pools.
 4. FastAPI lifespan stores that instance on `app.state.ctx`, sets the event-bus
    loop, and re-reads the durable acquisition gate.
-5. Lifespan shutdown stops scheduling, signals queues, joins worker pools off
-   the event loop, closes external clients, disposes the database, then marks
-   the context disposed. `get_context()` fails closed after that point.
+5. Lifespan shutdown quiesces running scheduler jobs off the event loop,
+   closes the event bus to reject late publications, signals queues, joins
+   worker pools off the event loop, closes external clients, disposes the
+   database, then marks the context disposed. If scheduler quiescence times
+   out, it leaves the resources intact for Comicarr.py's terminal exit rather
+   than dispose them underneath the live job. `get_context()` fails closed
+   after normal teardown.
 
 ## Transitional boundary
 

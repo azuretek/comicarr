@@ -19,8 +19,9 @@ Ownership categories and boundaries:
 
 * immutable configuration: paths and ``config`` are fixed after factory
   creation; configuration writes use the existing Config transaction boundary.
-* long-lived services: scheduler, provider sessions, crypto, and AI clients
-  are created once and closed by the lifespan after workers drain.
+* long-lived services: scheduler, provider sessions, crypto, AI clients, and
+  the event bus are created once. Lifespan first quiesces scheduler jobs, then
+  closes the event bus before draining workers and closing other clients.
 * queues and locks: all worker/request-visible queues and locks are adopted by
   identity from the legacy runtime.  The compatibility bridge may expose the
   same object to an unmigrated caller, but it must never clone one.
@@ -32,9 +33,12 @@ Ownership categories and boundaries:
   projected into ``comicarr`` temporarily for legacy engines.  Context is the
   canonical writer for migrated code; the projection is not a second owner.
 
-Shutdown owner/order is the FastAPI lifespan: stop scheduling, signal queues,
-join workers off the event loop, close clients, dispose database resources,
-then mark the context disposed so no later request can use it.
+Shutdown owner/order is the FastAPI lifespan: quiesce scheduled jobs off the
+event loop, close the event bus, signal queues, join workers off the event
+loop, close clients, dispose database resources, then mark the context
+disposed so no later request can use it. If scheduler quiescence times out,
+lifespan leaves runtime resources intact for Comicarr.py's terminal process
+exit instead of disposing them underneath a still-running job.
 
 Type annotations are an explicit exception to the project's "no type hints"
 rule — structured shared-state objects where types genuinely pay for themselves.

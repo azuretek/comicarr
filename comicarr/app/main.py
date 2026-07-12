@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from apscheduler.schedulers.base import SchedulerNotRunningError
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
@@ -43,6 +44,11 @@ from comicarr.app.core.runtime import (
 # NAS deployment. Regardless of this value, the terminal non-blocking
 # hard-kill backstop in comicarr.shutdown() guarantees the process exits.
 SHUTDOWN_DRAIN_TIMEOUT = 30.0
+
+# Scheduler jobs can own the same database and queues as workers. Give an
+# in-flight job a bounded grace period, then preserve live resources for the
+# terminal process exit rather than dispose underneath it.
+SCHEDULER_DRAIN_TIMEOUT = 30.0
 
 # All pipeline worker pools. The bounded join below is RELOCATED here from
 # queue_schedule()'s shutdown branch so the FastAPI lifespan is the single
@@ -150,8 +156,8 @@ async def lifespan(app: FastAPI):
     # happens. The legacy second path (Comicarr.py -> shutdown() -> halt() ->
     # queue_schedule drain) is reduced to signalling + the terminal branch.
     # Order is load-bearing:
-    #   1. scheduler.shutdown(wait=False)  — stop new pipeline work
-    #   2. q.put('exit') for all 5 queues  — stop intake
+    #   1. scheduler.shutdown(wait=True) OFF the loop — quiesce scheduled work
+    #   2. close EventBus, then q.put('exit') for all queues — stop intake
     #   3. bounded pool.join OFF the loop, on a DEDICATED executor
     #      (== final journal flush: workers write the journal synchronously
     #       via the façade, so "drain workers fully" IS the flush guarantee)
@@ -160,15 +166,52 @@ async def lifespan(app: FastAPI):
     #   6. executor / drain-executor shutdown — AFTER the drain
     #   7. default SIGNAL only if unset (never clobber restart/update/maint)
 
-    # 1. Stop accepting new scheduled pipeline work.
+    # The scheduler can have a running job that writes durable state or hands
+    # work to a queue. APScheduler's wait=False leaves that job running, which
+    # would let it outlive engine disposal. Reuse one dedicated executor so
+    # waiting for it never blocks the FastAPI event loop.
+    drain_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shutdown-drain")
+
+    # 1. Stop accepting new scheduled pipeline work and wait for the work that
+    # was already running to finish before queues or resources are retired. A
+    # bounded wait preserves the terminal hard-kill liveness path for a hung
+    # third-party call; in that case resource disposal is deliberately skipped.
+    scheduler_quiesced = True
     if ctx.scheduler:
         try:
-            ctx.scheduler.shutdown(wait=False)
-            logger.info("[SHUTDOWN] APScheduler stopped")
+            scheduler_shutdown = loop.run_in_executor(drain_executor, lambda: ctx.scheduler.shutdown(wait=True))
+            await asyncio.wait_for(asyncio.shield(scheduler_shutdown), timeout=SCHEDULER_DRAIN_TIMEOUT)
+            logger.info("[SHUTDOWN] APScheduler stopped and running jobs drained")
+        except asyncio.TimeoutError:
+            scheduler_quiesced = False
+            logger.error("[SHUTDOWN] Scheduler drain timed out; preserving runtime resources for terminal process exit")
+        except SchedulerNotRunningError:
+            logger.info("[SHUTDOWN] APScheduler was already stopped")
         except Exception as e:
-            logger.error("[SHUTDOWN] Error stopping scheduler: %s" % e)
+            scheduler_quiesced = False
+            logger.error("[SHUTDOWN] Error stopping scheduler; preserving runtime resources: %s" % e)
 
-    # 2. Signal every worker queue to stop intake. Workers finish their current
+    # 2. Reject events from any worker that survives long enough to observe
+    # shutdown. The EventBus close gate is synchronized with publisher
+    # snapshots, so no event can be enqueued after this returns.
+    if ctx.event_bus:
+        try:
+            ctx.event_bus.close()
+        except Exception as e:
+            logger.error("[SHUTDOWN] Error closing event bus: %s" % e)
+
+    if not scheduler_quiesced:
+        # A job that failed to quiesce may still use the database, clients, or
+        # queues. Returning lets Comicarr.py take its terminal os._exit path;
+        # closing those resources here would recreate the shutdown race.
+        try:
+            drain_executor.shutdown(wait=False)
+            executor.shutdown(wait=False)
+        except Exception as e:
+            logger.error("[SHUTDOWN] Error releasing timeout executors: %s" % e)
+        return
+
+    # 3. Signal every worker queue to stop intake. Workers finish their current
     #    item, then exit on the sentinel.
     for q in [
         ctx.snatched_queue,
@@ -194,7 +237,6 @@ async def lifespan(app: FastAPI):
     #    down below; a dedicated executor keeps the drain independent of that
     #    teardown. This MUST complete before engine.dispose() so an in-flight
     #    worker journal write never hits a disposed engine (R7/R8/AE5).
-    drain_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shutdown-drain")
     try:
         await loop.run_in_executor(drain_executor, _drain_worker_pools, SHUTDOWN_DRAIN_TIMEOUT, ctx)
         logger.info("[SHUTDOWN] Worker drain complete")
