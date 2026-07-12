@@ -13,13 +13,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
+from sqlalchemy import create_engine, select
 
 import comicarr
 from comicarr import importer, updater
 from comicarr.app.acquisition.maintenance import MaintenanceBlocked, MaintenanceController, ensure_acquisition_schema
 from comicarr.app.acquisition.runs import RunLedger
 from comicarr.db import get_engine, shutdown_engine
-from comicarr.tables import metadata
+from comicarr.tables import issues, metadata
 
 
 class _LeaseContext:
@@ -36,6 +37,34 @@ class _OpenMaintenance:
 
     def assert_lease_current(self, _lease):
         return True
+
+
+def test_bulk_issue_update_persists_issue_location(monkeypatch):
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(issues.insert(), {"IssueID": "issue-1", "Status": "Wanted"})
+
+    monkeypatch.setattr(updater.db, "get_engine", lambda: engine)
+
+    updater._bulk_update_issue_rows(
+        issues,
+        [
+            {
+                "IssueID": "issue-1",
+                "Status": "Downloaded",
+                "ComicSize": "123",
+                "Location": "Absolute Batman 001.cbz",
+            }
+        ],
+        ("Status", "ComicSize", "Location"),
+    )
+
+    with engine.connect() as conn:
+        row = conn.execute(select(issues).where(issues.c.IssueID == "issue-1")).mappings().one()
+
+    assert row["Status"] == "Downloaded"
+    assert row["Location"] == "Absolute Batman 001.cbz"
 
 
 @pytest.fixture

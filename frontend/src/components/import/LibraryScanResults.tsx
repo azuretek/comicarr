@@ -51,7 +51,21 @@ export default function LibraryScanResults({
     setSelectedIds([]);
   };
 
-  const importableResults = results.filter((r) => !r.already_in_library);
+  const importableResults = results
+    .filter((r) => !r.already_in_library)
+    .sort((left, right) => {
+      const leftIsMatched = Boolean(left.matched && left.match?.comicid);
+      const rightIsMatched = Boolean(right.matched && right.match?.comicid);
+
+      if (leftIsMatched !== rightIsMatched) {
+        return leftIsMatched ? -1 : 1;
+      }
+
+      return left.series_name.localeCompare(right.series_name, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
 
   if (importableResults.length === 0) {
     return (

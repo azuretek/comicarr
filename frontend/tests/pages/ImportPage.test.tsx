@@ -134,6 +134,74 @@ describe("ImportPage", () => {
     ).toBeTruthy();
   });
 
+  it("puts matched scan candidates first and sorts each group alphabetically", async () => {
+    server.use(
+      http.get("/api/import", () =>
+        HttpResponse.json({
+          imports: [],
+          pagination: {
+            total: 0,
+            limit: 50,
+            offset: 0,
+            has_more: false,
+          },
+          summary: { group_count: 0, file_count: 0 },
+        }),
+      ),
+      http.get("/api/import/comic/progress", () =>
+        HttpResponse.json({
+          status: "completed",
+          progress: {},
+          scan_id: "scan-1",
+          results: [
+            { series_name: "Zeta Unmatched", file_count: 1, matched: false },
+            {
+              series_name: "Zeta Matched",
+              file_count: 1,
+              matched: true,
+              match: {
+                comicid: "2",
+                name: "Zeta Match Metadata",
+                confidence: 100,
+              },
+            },
+            { series_name: "Alpha Unmatched", file_count: 1, matched: false },
+            {
+              series_name: "Alpha Matched",
+              file_count: 1,
+              matched: true,
+              match: {
+                comicid: "1",
+                name: "Alpha Match Metadata",
+                confidence: 100,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(<ImportPage />);
+
+    const alphaMatched = await screen.findByText("Alpha Matched");
+    const zetaMatched = screen.getByText("Zeta Matched");
+    const alphaUnmatched = screen.getByText("Alpha Unmatched");
+    const zetaUnmatched = screen.getByText("Zeta Unmatched");
+
+    expect(
+      alphaMatched.compareDocumentPosition(zetaMatched) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      zetaMatched.compareDocumentPosition(alphaUnmatched) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      alphaUnmatched.compareDocumentPosition(zetaUnmatched) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("clears imported manga results and keeps a durable success summary", async () => {
     let scanStarted = false;
     let confirmed = false;

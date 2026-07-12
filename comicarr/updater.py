@@ -1635,6 +1635,27 @@ def foundsearch(
     return
 
 
+def _bulk_update_issue_rows(table, rows, fields):
+    """Persist issue updates without colliding with SQLAlchemy's SET bind names."""
+    if not rows:
+        return
+
+    params = [
+        {
+            **{f"_value_{field}": row[field] for field in fields},
+            "_issue_id": row["IssueID"],
+        }
+        for row in rows
+    ]
+    stmt = (
+        update(table)
+        .where(table.c.IssueID == bindparam("_issue_id"))
+        .values(**{field: bindparam(f"_value_{field}") for field in fields})
+    )
+    with db.get_engine().begin() as conn:
+        conn.execute(stmt, params)
+
+
 def forceRescan(ComicID, archive=None, module=None, recheck=False):
     if module is None:
         module = ""
@@ -2498,34 +2519,8 @@ def forceRescan(ComicID, archive=None, module=None, recheck=False):
     logger.fdebug("[haves] issue_status_generation took %s" % (datetime.datetime.now() - a_start))
 
     b_start = datetime.datetime.now()
-    try:
-        # Batch update issues using SQLAlchemy Core conn.execute(stmt, list_of_dicts)
-        if d_issues:
-            stmt = (
-                update(issues)
-                .where(issues.c.IssueID == bindparam("IssueID"))
-                .values(
-                    Status=bindparam("Status"),
-                    ComicSize=bindparam("ComicSize"),
-                    Location=bindparam("Location"),
-                )
-            )
-            with db.get_engine().begin() as conn:
-                conn.execute(stmt, d_issues)
-        if d_annuals:
-            stmt = (
-                update(annuals)
-                .where(annuals.c.IssueID == bindparam("IssueID"))
-                .values(
-                    Status=bindparam("Status"),
-                    ComicSize=bindparam("ComicSize"),
-                    Location=bindparam("Location"),
-                )
-            )
-            with db.get_engine().begin() as conn:
-                conn.execute(stmt, d_annuals)
-    except Exception as e:
-        logger.warn("Error updating: %s" % e)
+    _bulk_update_issue_rows(issues, d_issues, ("Status", "ComicSize", "Location"))
+    _bulk_update_issue_rows(annuals, d_annuals, ("Status", "ComicSize", "Location"))
     logger.fdebug("[haves] issue_status_writing took %s" % (datetime.datetime.now() - b_start))
 
     # if this far, forced_file is true and the file didn't parse properly due to w/e reason, we need to force the filename to link to the given issueid.
@@ -2636,19 +2631,8 @@ def forceRescan(ComicID, archive=None, module=None, recheck=False):
 
     if any([len(update_iss) > 0, len(update_ann) > 0]):
         r_start = datetime.datetime.now()
-        try:
-            if len(update_iss) > 0:
-                stmt = update(issues).where(issues.c.IssueID == bindparam("IssueID")).values(Status=bindparam("Status"))
-                with db.get_engine().begin() as conn:
-                    conn.execute(stmt, update_iss)
-            if len(update_ann) > 0:
-                stmt = (
-                    update(annuals).where(annuals.c.IssueID == bindparam("IssueID")).values(Status=bindparam("Status"))
-                )
-                with db.get_engine().begin() as conn:
-                    conn.execute(stmt, update_ann)
-        except Exception as e:
-            logger.warn("Error updating: %s" % e)
+        _bulk_update_issue_rows(issues, update_iss, ("Status",))
+        _bulk_update_issue_rows(annuals, update_ann, ("Status",))
         logger.fdebug("[nothaves] issue_status_writing took %s" % (datetime.datetime.now() - r_start))
         logger.info(
             "%s Updated the status of %s issues for %s (%s) that were not found."
