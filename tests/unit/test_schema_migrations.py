@@ -10,7 +10,9 @@
 """Contract tests for the application-owned Alembic migration runner."""
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Text, create_engine, inspect, text
+from sqlalchemy.dialects import mysql
+from sqlalchemy.schema import CreateTable
 
 from comicarr.app.core.schema import (
     DatabaseState,
@@ -19,13 +21,33 @@ from comicarr.app.core.schema import (
     current_revision,
     upgrade_database,
 )
-from comicarr.tables import metadata
+from comicarr.tables import comics, metadata
 
 
 def test_classifier_identifies_a_fresh_database(tmp_path):
     engine = create_engine("sqlite:///%s" % (tmp_path / "fresh.db"))
 
     assert classify_database(engine) is DatabaseState.FRESH
+
+
+def test_mysql_baseline_uses_varchar_for_defaulted_comic_classification_fields():
+    ddl = str(CreateTable(comics).compile(dialect=mysql.dialect()))
+
+    assert "`ContentType` VARCHAR(16) DEFAULT 'comic'" in ddl
+    assert "`ReadingDirection` VARCHAR(16) DEFAULT 'ltr'" in ddl
+
+
+def test_mysql_baseline_uses_bounded_types_for_every_indexed_schema_key():
+    for table in metadata.sorted_tables:
+        key_columns = set(table.primary_key.columns.keys())
+        for constraint in table.constraints:
+            key_columns.update(column.name for column in constraint.columns)
+        for index in table.indexes:
+            key_columns.update(column.name for column in index.columns)
+
+        for column_name in key_columns:
+            mysql_type = table.c[column_name].type.dialect_impl(mysql.dialect())
+            assert not isinstance(mysql_type, Text), "%s.%s remains TEXT in a MySQL key" % (table.name, column_name)
 
 
 def test_classifier_identifies_a_known_unversioned_comicarr_database(tmp_path):

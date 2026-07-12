@@ -43,18 +43,23 @@ from sqlalchemy import (
 
 metadata = MetaData()
 
+# MySQL cannot index TEXT values without a prefix length. Keep the unbounded
+# storage used by SQLite/PostgreSQL while compiling schema keys to a bounded
+# VARCHAR on MySQL so uniqueness and index semantics remain portable.
+MYSQL_KEY_TEXT = Text().with_variant(String(255), "mysql")
+
 # ---------------------------------------------------------------------------
 # comics
 # ---------------------------------------------------------------------------
 comics = Table(
     "comics",
     metadata,
-    Column("ComicID", Text, unique=True),
+    Column("ComicID", MYSQL_KEY_TEXT, unique=True),
     Column("ComicName", Text),
     Column("ComicSortName", Text),
     Column("ComicYear", Text),
     Column("DateAdded", Text),
-    Column("Status", Text),
+    Column("Status", MYSQL_KEY_TEXT),
     Column("IncludeExtras", Integer),
     Column("Have", Integer),
     Column("Total", Integer),
@@ -100,8 +105,10 @@ comics = Table(
     Column("dirlocked", Integer),
     Column("cv_removed", Integer),
     Column("not_updated_db", Text),
-    Column("ContentType", Text, server_default="comic"),
-    Column("ReadingDirection", Text, server_default="ltr"),
+    # MySQL does not permit defaults on TEXT columns; these bounded enum-like
+    # values need portable server defaults for the baseline migration.
+    Column("ContentType", String(16), server_default="comic"),
+    Column("ReadingDirection", String(16), server_default="ltr"),
     Column("MetadataSource", Text),
     Column("ExternalID", Text),
     Column("MangaDexID", Text),
@@ -114,17 +121,17 @@ comics = Table(
 issues = Table(
     "issues",
     metadata,
-    Column("IssueID", Text),
-    Column("ComicName", Text),
+    Column("IssueID", MYSQL_KEY_TEXT),
+    Column("ComicName", MYSQL_KEY_TEXT),
     Column("IssueName", Text),
     Column("Issue_Number", Text),
     Column("DateAdded", Text),
-    Column("Status", Text),
+    Column("Status", MYSQL_KEY_TEXT),
     # Nullable by design. A NULL value means no auditable explicit intent is
     # known; compatibility reads derive policy intent without mutating rows.
     Column("AcquisitionIntent", String(16)),
     Column("Type", Text),
-    Column("ComicID", Text),
+    Column("ComicID", MYSQL_KEY_TEXT),
     Column("ArtworkURL", Text),
     Column("ReleaseDate", Text),
     Column("Location", Text),
@@ -149,13 +156,13 @@ issues = Table(
 annuals = Table(
     "annuals",
     metadata,
-    Column("IssueID", Text),
+    Column("IssueID", MYSQL_KEY_TEXT),
     Column("Issue_Number", Text),
     Column("IssueName", Text),
     Column("IssueDate", Text),
     Column("Status", Text),
     Column("AcquisitionIntent", String(16)),
-    Column("ComicID", Text),
+    Column("ComicID", MYSQL_KEY_TEXT),
     Column("GCDComicID", Text),
     Column("Location", Text),
     Column("ComicSize", Text),
@@ -177,15 +184,15 @@ annuals = Table(
 snatched = Table(
     "snatched",
     metadata,
-    Column("IssueID", Text),
+    Column("IssueID", MYSQL_KEY_TEXT),
     Column("ComicName", Text),
     Column("Issue_Number", Text),
     Column("Size", Integer),
     Column("DateAdded", Text),
-    Column("Status", Text),
+    Column("Status", MYSQL_KEY_TEXT),
     Column("FolderName", Text),
-    Column("ComicID", Text),
-    Column("Provider", Text),
+    Column("ComicID", MYSQL_KEY_TEXT),
+    Column("Provider", MYSQL_KEY_TEXT),
     Column("Hash", Text),
     Column("crc", Text),
     UniqueConstraint("IssueID", "Status", "Provider", name="uq_snatched_issue_status_provider"),
@@ -197,26 +204,26 @@ snatched = Table(
 storyarcs = Table(
     "storyarcs",
     metadata,
-    Column("StoryArcID", Text),
-    Column("ComicName", Text),
+    Column("StoryArcID", MYSQL_KEY_TEXT),
+    Column("ComicName", MYSQL_KEY_TEXT),
     Column("IssueNumber", Text),
     Column("SeriesYear", Text),
     Column("IssueYEAR", Text),
-    Column("StoryArc", Text),
+    Column("StoryArc", MYSQL_KEY_TEXT),
     Column("TotalIssues", Text),
-    Column("Status", Text),
+    Column("Status", MYSQL_KEY_TEXT),
     Column("inCacheDir", Text),
     Column("Location", Text),
-    Column("IssueArcID", Text),
+    Column("IssueArcID", MYSQL_KEY_TEXT),
     Column("ReadingOrder", Integer),
     Column("IssueID", Text),
-    Column("ComicID", Text),
+    Column("ComicID", MYSQL_KEY_TEXT),
     Column("ReleaseDate", Text),
     Column("IssueDate", Text),
     Column("Publisher", Text),
     Column("IssuePublisher", Text),
     Column("IssueName", Text),
-    Column("CV_ArcID", Text),
+    Column("CV_ArcID", MYSQL_KEY_TEXT),
     Column("Int_IssueNumber", Integer),
     Column("DynamicComicName", Text),
     Column("Volume", Text),
@@ -237,10 +244,10 @@ upcoming = Table(
     "upcoming",
     metadata,
     Column("ComicName", Text),
-    Column("IssueNumber", Text),
-    Column("ComicID", Text),
-    Column("IssueID", Text),
-    Column("IssueDate", Text),
+    Column("IssueNumber", MYSQL_KEY_TEXT),
+    Column("ComicID", MYSQL_KEY_TEXT),
+    Column("IssueID", MYSQL_KEY_TEXT),
+    Column("IssueDate", MYSQL_KEY_TEXT),
     Column("Status", Text),
     Column("DisplayComicName", Text),
     UniqueConstraint("ComicID", "IssueNumber", name="uq_upcoming_comicid_issuenum"),
@@ -252,10 +259,10 @@ upcoming = Table(
 nzblog = Table(
     "nzblog",
     metadata,
-    Column("IssueID", Text),
+    Column("IssueID", MYSQL_KEY_TEXT),
     Column("NZBName", Text),
     Column("SARC", Text),
-    Column("PROVIDER", Text),
+    Column("PROVIDER", MYSQL_KEY_TEXT),
     Column("ID", Text),
     Column("AltNZBName", Text),
     Column("OneOff", Text),
@@ -274,8 +281,8 @@ weekly = Table(
     Column("COMIC", String(150)),
     Column("EXTRA", Text),
     Column("STATUS", Text),
-    Column("ComicID", Text),
-    Column("IssueID", Text),
+    Column("ComicID", MYSQL_KEY_TEXT),
+    Column("IssueID", MYSQL_KEY_TEXT),
     Column("CV_Last_Update", Text),
     Column("DynamicName", Text),
     Column("weeknumber", Text),
@@ -294,7 +301,7 @@ weekly = Table(
 importresults = Table(
     "importresults",
     metadata,
-    Column("impID", Text),
+    Column("impID", MYSQL_KEY_TEXT),
     Column("ComicName", Text),
     Column("ComicYear", Text),
     Column("Status", Text),
@@ -305,7 +312,7 @@ importresults = Table(
     Column("DisplayName", Text),
     Column("SRID", Text),
     Column("ComicID", Text),
-    Column("IssueID", Text),
+    Column("IssueID", MYSQL_KEY_TEXT),
     Column("Volume", Text),
     Column("IssueNumber", Text),
     Column("DynamicName", Text),
@@ -326,7 +333,7 @@ importresults = Table(
 readlist = Table(
     "readlist",
     metadata,
-    Column("IssueID", Text),
+    Column("IssueID", MYSQL_KEY_TEXT),
     Column("ComicName", Text),
     Column("Issue_Number", Text),
     Column("Status", Text),
@@ -346,14 +353,14 @@ readlist = Table(
 failed = Table(
     "failed",
     metadata,
-    Column("ID", Text),
+    Column("ID", MYSQL_KEY_TEXT),
     Column("Status", Text),
     Column("ComicID", Text),
-    Column("IssueID", Text),
-    Column("Provider", Text),
+    Column("IssueID", MYSQL_KEY_TEXT),
+    Column("Provider", MYSQL_KEY_TEXT),
     Column("ComicName", Text),
     Column("Issue_Number", Text),
-    Column("NZBName", Text),
+    Column("NZBName", MYSQL_KEY_TEXT),
     Column("DateFailed", Text),
     UniqueConstraint("ID", "Provider", "NZBName", name="uq_failed_id_provider_nzbname"),
 )
@@ -364,7 +371,7 @@ failed = Table(
 rssdb = Table(
     "rssdb",
     metadata,
-    Column("Title", Text, unique=True),
+    Column("Title", MYSQL_KEY_TEXT, unique=True),
     Column("Link", Text),
     Column("Pubdate", Text),
     Column("Site", Text),
@@ -420,7 +427,7 @@ searchresults = Table(
 ref32p = Table(
     "ref32p",
     metadata,
-    Column("ComicID", Text, unique=True),
+    Column("ComicID", MYSQL_KEY_TEXT, unique=True),
     Column("ID", Text),
     Column("Series", Text),
     Column("Updated", Text),
@@ -434,8 +441,8 @@ oneoffhistory = Table(
     metadata,
     Column("ComicName", Text),
     Column("IssueNumber", Text),
-    Column("ComicID", Text),
-    Column("IssueID", Text),
+    Column("ComicID", MYSQL_KEY_TEXT),
+    Column("IssueID", MYSQL_KEY_TEXT),
     Column("Status", Text),
     Column("weeknumber", Text),
     Column("year", Text),
@@ -448,7 +455,7 @@ oneoffhistory = Table(
 jobhistory = Table(
     "jobhistory",
     metadata,
-    Column("JobName", Text),
+    Column("JobName", MYSQL_KEY_TEXT),
     Column("prev_run_datetime", Text),
     Column("prev_run_timestamp", Float),
     Column("next_run_datetime", Text),
@@ -500,7 +507,7 @@ manualresults = Table(
 ddl_info = Table(
     "ddl_info",
     metadata,
-    Column("ID", Text, unique=True),
+    Column("ID", MYSQL_KEY_TEXT, unique=True),
     Column("series", Text),
     Column("year", Text),
     Column("filename", Text),
@@ -508,9 +515,9 @@ ddl_info = Table(
     Column("issueid", Text),
     Column("comicid", Text),
     Column("link", Text),
-    Column("status", Text),
+    Column("status", MYSQL_KEY_TEXT),
     Column("remote_filesize", Text),
-    Column("updated_date", Text),
+    Column("updated_date", MYSQL_KEY_TEXT),
     Column("mainlink", Text),
     Column("issues", Text),
     Column("site", Text),
@@ -530,7 +537,7 @@ ddl_info = Table(
 exceptions_log = Table(
     "exceptions_log",
     metadata,
-    Column("date", Text, unique=True),
+    Column("date", MYSQL_KEY_TEXT, unique=True),
     Column("comicname", Text),
     Column("issuenumber", Text),
     Column("seriesyear", Text),
@@ -580,7 +587,7 @@ notifs = Table(
     "notifs",
     metadata,
     Column("session_id", Integer, primary_key=True),
-    Column("date", Text, primary_key=True),
+    Column("date", MYSQL_KEY_TEXT, primary_key=True),
     Column("event", Text),
     Column("comicid", Text),
     Column("comicname", Text),
@@ -597,7 +604,7 @@ provider_searches = Table(
     "provider_searches",
     metadata,
     Column("id", Integer, unique=True),
-    Column("provider", Text, unique=True),
+    Column("provider", MYSQL_KEY_TEXT, unique=True),
     Column("type", Text),
     Column("lastrun", Integer),
     Column("active", Text),
@@ -620,7 +627,7 @@ ai_activity_log = Table(
     "ai_activity_log",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("timestamp", Text),
+    Column("timestamp", MYSQL_KEY_TEXT),
     Column("feature_type", Text),  # parsing|search|enrichment|reconciliation|insights|chat|arc|pulllist
     Column("action_description", Text),
     Column("model", Text),
@@ -630,7 +637,7 @@ ai_activity_log = Table(
     Column("success", Text),  # true|false
     Column("error_message", Text),
     Column("entity_type", Text),  # comic|issue|storyarc
-    Column("entity_id", Text),
+    Column("entity_id", MYSQL_KEY_TEXT),
 )
 
 # ---------------------------------------------------------------------------
@@ -640,8 +647,8 @@ ai_metadata_history = Table(
     "ai_metadata_history",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("entity_type", Text),  # issue|comic
-    Column("entity_id", Text),
+    Column("entity_type", MYSQL_KEY_TEXT),  # issue|comic
+    Column("entity_id", MYSQL_KEY_TEXT),
     Column("field_name", Text),
     Column("original_value", Text),
     Column("ai_value", Text),
@@ -656,7 +663,7 @@ ai_metadata_history = Table(
 ai_cache = Table(
     "ai_cache",
     metadata,
-    Column("cache_key", Text, unique=True),
+    Column("cache_key", MYSQL_KEY_TEXT, unique=True),
     Column("cache_type", Text),  # insights|suggestions|expansion
     Column("data", Text),  # JSON blob
     Column("created_at", Text),
@@ -675,13 +682,13 @@ ai_cache = Table(
 pipeline_journal = Table(
     "pipeline_journal",
     metadata,
-    Column("release_key", Text, nullable=False),
+    Column("release_key", MYSQL_KEY_TEXT, nullable=False),
     Column("issueid", Text),
     Column("provider", Text),
     Column("downloader_type", Text),
     Column("nzbname", Text),
     Column("hash", Text),
-    Column("stage", Text, nullable=False),  # snatched|downloaded|post_processing|moved|post_processed|failed
+    Column("stage", MYSQL_KEY_TEXT, nullable=False),  # snatched|downloaded|post_processing|moved|post_processed|failed
     Column("stage_rank", Integer, nullable=False),  # derived from stage; drives the monotonic guard
     Column("payload_json", Text),  # reconstruct the SNATCHED_QUEUE/PP_QUEUE item
     Column("fail_reason", Text),  # nullable
