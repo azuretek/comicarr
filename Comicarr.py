@@ -29,7 +29,6 @@ try:
     import comicarr  # noqa: E402
     from comicarr import (  # noqa: E402
         carepackage,
-        dependency_check,
         filechecker,
         logger,
         maintenance,
@@ -531,9 +530,9 @@ def main():
     # for version info if it's already running
     versioncheck.versionload()
 
-    # pip requirements check here
-    r = dependency_check.Req()
-    r.loaders()
+    from comicarr.dependency_check import RuntimeCapabilityDiagnostics
+
+    RuntimeCapabilityDiagnostics().loaders()
 
     if comicarr.CONFIG.LAUNCH_BROWSER and not args_nolaunch:
         comicarr.launch_browser(comicarr.CONFIG.HTTP_HOST, http_port, comicarr.CONFIG.HTTP_ROOT)
