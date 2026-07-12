@@ -1,6 +1,7 @@
 import os
 
-from utorrent.client import UTorrentClient
+from comicarr._vendor.utorrent.client import UTorrentClient
+from comicarr.torrent.contracts import connection_failure
 
 # Only compatible with uTorrent 3.0+
 
@@ -14,16 +15,20 @@ class TorrentClient(object):
             return self.conn
 
         if not host:
-            return False
+            return connection_failure("No host specified")
 
-        if username and password:
-            self.conn = UTorrentClient(host, username, password)
-        else:
-            self.conn = UTorrentClient(host)
+        try:
+            if username and password:
+                self.conn = UTorrentClient(host, username, password)
+            else:
+                self.conn = UTorrentClient(host)
+        except Exception as e:
+            return connection_failure(e)
 
         return self.conn
 
     def find_torrent(self, hash):
+        torrent = False
         try:
             torrent_list = self.conn.list()[1]
 

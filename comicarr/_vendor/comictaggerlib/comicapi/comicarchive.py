@@ -49,8 +49,6 @@ from .comet import CoMet
 from .genericmetadata import GenericMetadata, PageType
 from .filenameparser import FileNameParser
 
-sys.path.insert(0, os.path.abspath("."))
-
 class MetaDataStyle:
     CBI = 0
     CIX = 1

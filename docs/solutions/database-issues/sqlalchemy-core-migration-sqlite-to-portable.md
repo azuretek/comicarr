@@ -171,7 +171,7 @@ Features: batch inserts (5000 rows), string `"None"` -> NULL, empty INT -> NULL,
 
 - `webserve.py` still has ~237 raw SQL calls routed through `raw_select_all()`/`raw_select_one()` — functionally correct but not fully portable to PostgreSQL/MySQL if SQLite-specific syntax remains in those strings.
 - No actual PostgreSQL or MySQL testing done — only SQLite-to-SQLite migration was validated.
-- `cv_cache.py` and `lib/comictaggerlib/` remain SQLite-only (intentionally excluded).
+- `cv_cache.py` and `comicarr/_vendor/comictaggerlib/` remain SQLite-only (intentionally excluded).
 
 ## Prevention: Gotchas for Similar Migrations
 

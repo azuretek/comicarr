@@ -20,10 +20,9 @@
 import os
 import sys
 
-from mega import Mega
-
 import comicarr
 from comicarr import db, helpers, logger
+from comicarr._vendor.mega import Mega
 
 
 class MegaNZ(object):

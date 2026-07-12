@@ -37,7 +37,7 @@ def run(
     comictagger_cmd = os.path.join(comicarr.CMTAGGER_PATH, "comictagger.py")
     logger.fdebug("ComicTagger Path location for internal comictagger.py set to : " + comictagger_cmd)
 
-    # Force comicarr to use cmtagger_path = comicarr.PROG_DIR to force the use of the included lib.
+    # Force comicarr to use cmtagger_path = comicarr.PROG_DIR to force the use of the included vendor.
 
     logger.fdebug(module + " Filename is : " + filename)
 
@@ -150,7 +150,7 @@ def run(
     tagoptions.extend(["-m", tline])
 
     try:
-        # from comictaggerlib import ctversion
+        # from comicarr._vendor.comictaggerlib import ctversion
         ct_check = subprocess.check_output([sys.executable, comictagger_cmd, "--version"], stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError:
         # logger.warn(module + "[WARNING] "command '{}' return with error (code {}): {}".format(e.cmd, e.returncode, e.output))

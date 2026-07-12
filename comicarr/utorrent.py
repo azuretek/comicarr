@@ -20,11 +20,11 @@
 import hashlib
 import re
 
-import bencode
 import requests
 
 import comicarr
 from comicarr import logger
+from comicarr._vendor import bencode
 
 
 class utorrentclient(object):

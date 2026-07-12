@@ -331,7 +331,7 @@ def _do_manual_metatag(issueid, comicid=None, group=False):
     except ImportError:
         logger.warn(
             module
-            + " comictaggerlib not found on system. Ensure the ENTIRE lib directory is located within comicarr/lib/comictaggerlib/ directory."
+            + " comictaggerlib not found on system. Ensure the bundled vendor package is available at comicarr/_vendor/comictaggerlib/."
         )
         metaresponse = "fail"
 

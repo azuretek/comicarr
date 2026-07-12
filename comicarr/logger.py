@@ -93,11 +93,6 @@ if not LOG_LANG.startswith("en"):
                 # concurrentLogHandler/0.8.7 (to deal with windows locks)
                 # since this only happens on windows boxes, if it's nix/mac use the default logger.
                 if comicarr.OS_DETECT == "Windows":
-                    # set the path to the lib here - just to make sure it can detect cloghandler & portalocker.
-                    import sys
-
-                    sys.path.append(os.path.join(comicarr.PROG_DIR, "lib"))
-
                     try:
                         from ConcurrentLogHandler.cloghandler import ConcurrentRotatingFileHandler as RFHandler
 
@@ -201,11 +196,6 @@ else:
         # concurrentLogHandler/0.8.7 (to deal with windows locks)
         # since this only happens on windows boxes, if it's nix/mac use the default logger.
         if platform.system() == "Windows":
-            # set the path to the lib here - just to make sure it can detect cloghandler & portalocker.
-            import sys
-
-            sys.path.append(os.path.join(comicarr.PROG_DIR, "lib"))
-
             try:
                 from ConcurrentLogHandler.cloghandler import ConcurrentRotatingFileHandler as RFHandler
 

@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 import comicarr
 from comicarr import helpers, logger
-from lib.rtorrent import RTorrent
+from comicarr._vendor.rtorrent import RTorrent
 
 
 class TorrentClient(object):
