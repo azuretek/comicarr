@@ -32,6 +32,12 @@ from sqlalchemy import Integer, and_, delete, func, inspect, or_, select
 
 import comicarr
 from comicarr import db, filechecker, getimage, helpers, logger, notifiers, updater, weeklypull
+from comicarr.app.downloads.postprocess_pipeline import (
+    PostProcessContext,
+    PostProcessInputContext,
+    PostProcessInputStage,
+    PostProcessJournalStage,
+)
 from comicarr.app.downloads.pp_commands import safe_walk
 from comicarr.config import get_manga_destination
 from comicarr.manga_parser import parse_manga_filename
@@ -45,6 +51,9 @@ from comicarr.tables import (
     storyarcs,
     weekly,
 )
+
+_POSTPROCESS_JOURNAL_STAGE = PostProcessJournalStage()
+_POSTPROCESS_INPUT_STAGE = PostProcessInputStage()
 
 
 class PostProcessor(object):
@@ -161,43 +170,24 @@ class PostProcessor(object):
         the U4 single-derivation invariant — claim/markers/snatch all share
         the one key — is preserved unchanged.
         """
-        from comicarr.app.downloads import journal
+        return _POSTPROCESS_JOURNAL_STAGE.release_key(
+            self._journal_context(),
+            issue_id=issueid,
+            issue_arc_id=issuearcid,
+        )
 
-        # Secondary story-arc write: an explicit issuearcid override targets
-        # the ARC row (its own "S<IssueArcID>" nzblog entry is being deleted),
-        # not the primary claimed issue row — re-derive for that arc row.
-        explicit_arc_override = issuearcid is not None and issuearcid != self.issuearcid
-
-        # Prefer the canonical key threaded from the PP-consumer atomic claim
-        # (the row the claim advanced) for the PRIMARY item; re-derive for the
-        # secondary arc write and for unjournaled PP.
-        if self.journal_release_key and not explicit_arc_override:
-            return self.journal_release_key
-
-        # For an explicit story-arc override, the arc's durable `snatched`
-        # row is written with IssueID == IssueArcID (the bare arc id, NOT the
-        # "S"-prefixed nzblog form — updater.foundsearch, see recovery.py
-        # ~94-99), so the canonical arc release_key derives from the arc id.
-        # Anchor the derivation on the arc id so the re-derived key advances
-        # the ARC row, not the primary claimed issue row.
-        if explicit_arc_override:
-            ident = {
-                "issueid": issuearcid,
-                "IssueArcID": issuearcid,
-                "comicid": self.comicid,
-                "nzbname": self.nzb_name,
-                "ddl": getattr(self, "ddl", False),
-            }
-            return journal.derive_release_key(ident)
-
-        ident = {
-            "issueid": issueid if issueid is not None else self.issueid,
-            "IssueArcID": issuearcid if issuearcid is not None else self.issuearcid,
-            "comicid": self.comicid,
-            "nzbname": self.nzb_name,
-            "ddl": getattr(self, "ddl", False),
-        }
-        return journal.derive_release_key(ident)
+    def _journal_context(self):
+        return PostProcessContext(
+            issue_id=self.issueid,
+            issue_arc_id=self.issuearcid,
+            comic_id=self.comicid,
+            nzb_name=self.nzb_name,
+            nzb_folder=self.nzb_folder,
+            api_call=getattr(self, "apicall", False),
+            ddl=getattr(self, "ddl", False),
+            canonical_release_key=self.journal_release_key,
+            log_module=self.module,
+        )
 
     def _journal_pp(self, stage, issueid=None, issuearcid=None, payload=None, conn=None):
         """Record a PP-marker journal transition.
@@ -215,36 +205,14 @@ class PostProcessor(object):
         post_processing/moved. The swallow-and-continue contract applies ONLY
         to the own-transaction (conn is None) additive markers.
         """
-        from comicarr.app.downloads import journal
-
-        rkey = None
-        try:
-            rkey = self._journal_release_key(issueid=issueid, issuearcid=issuearcid)
-            if payload is None:
-                payload = {
-                    "issueid": issueid if issueid is not None else self.issueid,
-                    "issuearcid": issuearcid if issuearcid is not None else self.issuearcid,
-                    "comicid": self.comicid,
-                    "nzb_name": self.nzb_name,
-                    "nzb_folder": self.nzb_folder,
-                    "apicall": getattr(self, "apicall", False),
-                    "ddl": getattr(self, "ddl", False),
-                }
-            journal.record_transition(
-                rkey,
-                stage,
-                payload=payload,
-                conn=conn,
-                issueid=issueid if issueid is not None else self.issueid,
-            )
-            logger.fdebug("%s [JOURNAL] %s for %s" % (self.module, stage, rkey))
-        except Exception as e:
-            # conn-mode: must roll the whole block back (a swallowed failure
-            # would delete nzblog while the journal still said
-            # post_processing/moved). Own-txn additive markers swallow.
-            if conn is not None:
-                raise
-            logger.error("%s [JOURNAL] %s transition failed (inert, continuing): %s" % (self.module, stage, e))
+        _POSTPROCESS_JOURNAL_STAGE.transition(
+            self._journal_context(),
+            stage,
+            issue_id=issueid,
+            issue_arc_id=issuearcid,
+            payload=payload,
+            conn=conn,
+        )
 
     def _log(self, message, level=logger):  # .message):  #level=logger.MESSAGE):
         """
@@ -624,71 +592,25 @@ class PostProcessor(object):
         self._log("nzb folder: %s" % self.nzb_folder)
         logger.fdebug("%s nzb name: %s" % (module, self.nzb_name))
         logger.fdebug("%s nzb folder: %s" % (module, self.nzb_folder))
-        if self.ddl is False:
-            if comicarr.USE_SABNZBD == 1:
-                if self.nzb_name != "Manual Run":
-                    logger.fdebug("%s Using SABnzbd" % module)
-                    logger.fdebug("%s NZB name as passed from SABnzbd: %s" % (module, self.nzb_name))
-
-                if self.nzb_name == "Manual Run":
-                    logger.fdebug("%s Manual Run Post-Processing enabled." % module)
-                else:
-                    # if the SAB Directory option is enabled, let's use that folder name and append the jobname.
-                    if all(
-                        [
-                            comicarr.CONFIG.SAB_DIRECT_UNPACK,
-                            comicarr.CONFIG.SAB_DIRECTORY is not None,
-                            comicarr.CONFIG.SAB_DIRECTORY != "None",
-                        ]
-                    ):
-                        if os.path.exists(os.path.join(self.nzb_folder, self.nzb_name)):
-                            logger.fdebug(
-                                "%s SABnzbd Download folder option enabled. Using directory of : %s"
-                                % (module, self.nzb_folder)
-                            )
-                        else:
-                            tmpchk = os.path.join(
-                                comicarr.CONFIG.SAB_DIRECTORY, self.nzb_name
-                            )  # .encode(comicarr.SYS_ENCODING)
-                            if os.path.exists(tmpchk):
-                                self.nzb_folder = tmpchk
-                                logger.fdebug(
-                                    "%s SABnzbd Download folder option enabled. Directory set to : %s"
-                                    % (module, self.nzb_folder)
-                                )
-                            else:
-                                tmpchk2 = os.path.join(comicarr.CONFIG.SAB_DIRECTORY, os.path.basename(self.nzb_folder))
-                                if os.path.exists(tmpchk2):
-                                    self.nzb_folder = tmpchk2
-                                    logger.fdebug(
-                                        "%s SABnzbd Download folder option enabled. Directory set to : %s"
-                                        % (module, self.nzb_folder)
-                                    )
-                                else:
-                                    logger.warn(
-                                        "Unable to locate directory within %s location. I have unsucessfully attempted to locate the following paths: %s & %s"
-                                        % (comicarr.CONFIG.SAB_DIRECTORY, tmpchk, tmpchk2)
-                                    )
-                                    self.valreturn.append({"self.log": self.log, "mode": "stop"})
-                                    return self.queue.put(self.valreturn)
-
-            if comicarr.USE_NZBGET == 1:
-                if self.nzb_name != "Manual Run":
-                    logger.fdebug("%s Using NZBGET" % module)
-                    logger.fdebug("%s NZB name as passed from NZBGet: %s" % (module, self.nzb_name))
-                # if the NZBGet Directory option is enabled, let's use that folder name and append the jobname.
-                if self.nzb_name == "Manual Run":
-                    logger.fdebug("%s Manual Run Post-Processing enabled." % module)
-                elif all([comicarr.CONFIG.NZBGET_DIRECTORY is not None, comicarr.CONFIG.NZBGET_DIRECTORY != "None"]):
-                    logger.fdebug("%s NZB name as passed from NZBGet: %s" % (module, self.nzb_name))
-                    self.nzb_folder = os.path.join(
-                        comicarr.CONFIG.NZBGET_DIRECTORY, self.nzb_name
-                    )  # .encode(comicarr.SYS_ENCODING)
-                    logger.fdebug(
-                        "%s NZBGET Download folder option enabled. Directory set to : %s" % (module, self.nzb_folder)
-                    )
-        else:
-            logger.fdebug("%s Now performing post-processing of %s sent from DDL" % (module, self.nzb_name))
+        use_sabnzbd = comicarr.USE_SABNZBD == 1
+        use_nzbget = comicarr.USE_NZBGET == 1
+        input_result = _POSTPROCESS_INPUT_STAGE.resolve(
+            PostProcessInputContext(
+                nzb_name=self.nzb_name,
+                nzb_folder=self.nzb_folder,
+                module=module,
+                ddl=self.ddl,
+                use_sabnzbd=use_sabnzbd,
+                use_nzbget=use_nzbget,
+                sab_direct_unpack=(comicarr.CONFIG.SAB_DIRECT_UNPACK if use_sabnzbd else False),
+                sab_directory=(comicarr.CONFIG.SAB_DIRECTORY if use_sabnzbd else None),
+                nzbget_directory=(comicarr.CONFIG.NZBGET_DIRECTORY if use_nzbget else None),
+            )
+        )
+        self.nzb_folder = input_result.folder
+        if input_result.error is not None:
+            self.valreturn.append({"self.log": self.log, "mode": "stop"})
+            return self.queue.put(self.valreturn)
 
         self.oneoffinlist = False
 
