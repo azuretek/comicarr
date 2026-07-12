@@ -32,7 +32,12 @@ from sqlalchemy import Integer, and_, delete, func, inspect, or_, select
 
 import comicarr
 from comicarr import db, filechecker, getimage, helpers, logger, notifiers, updater, weeklypull
-from comicarr.app.downloads.postprocess_pipeline import PostProcessContext, PostProcessJournalStage
+from comicarr.app.downloads.postprocess_pipeline import (
+    PostProcessContext,
+    PostProcessInputContext,
+    PostProcessInputStage,
+    PostProcessJournalStage,
+)
 from comicarr.app.downloads.pp_commands import safe_walk
 from comicarr.config import get_manga_destination
 from comicarr.manga_parser import parse_manga_filename
@@ -48,6 +53,7 @@ from comicarr.tables import (
 )
 
 _POSTPROCESS_JOURNAL_STAGE = PostProcessJournalStage()
+_POSTPROCESS_INPUT_STAGE = PostProcessInputStage()
 
 
 class PostProcessor(object):
@@ -586,71 +592,25 @@ class PostProcessor(object):
         self._log("nzb folder: %s" % self.nzb_folder)
         logger.fdebug("%s nzb name: %s" % (module, self.nzb_name))
         logger.fdebug("%s nzb folder: %s" % (module, self.nzb_folder))
-        if self.ddl is False:
-            if comicarr.USE_SABNZBD == 1:
-                if self.nzb_name != "Manual Run":
-                    logger.fdebug("%s Using SABnzbd" % module)
-                    logger.fdebug("%s NZB name as passed from SABnzbd: %s" % (module, self.nzb_name))
-
-                if self.nzb_name == "Manual Run":
-                    logger.fdebug("%s Manual Run Post-Processing enabled." % module)
-                else:
-                    # if the SAB Directory option is enabled, let's use that folder name and append the jobname.
-                    if all(
-                        [
-                            comicarr.CONFIG.SAB_DIRECT_UNPACK,
-                            comicarr.CONFIG.SAB_DIRECTORY is not None,
-                            comicarr.CONFIG.SAB_DIRECTORY != "None",
-                        ]
-                    ):
-                        if os.path.exists(os.path.join(self.nzb_folder, self.nzb_name)):
-                            logger.fdebug(
-                                "%s SABnzbd Download folder option enabled. Using directory of : %s"
-                                % (module, self.nzb_folder)
-                            )
-                        else:
-                            tmpchk = os.path.join(
-                                comicarr.CONFIG.SAB_DIRECTORY, self.nzb_name
-                            )  # .encode(comicarr.SYS_ENCODING)
-                            if os.path.exists(tmpchk):
-                                self.nzb_folder = tmpchk
-                                logger.fdebug(
-                                    "%s SABnzbd Download folder option enabled. Directory set to : %s"
-                                    % (module, self.nzb_folder)
-                                )
-                            else:
-                                tmpchk2 = os.path.join(comicarr.CONFIG.SAB_DIRECTORY, os.path.basename(self.nzb_folder))
-                                if os.path.exists(tmpchk2):
-                                    self.nzb_folder = tmpchk2
-                                    logger.fdebug(
-                                        "%s SABnzbd Download folder option enabled. Directory set to : %s"
-                                        % (module, self.nzb_folder)
-                                    )
-                                else:
-                                    logger.warn(
-                                        "Unable to locate directory within %s location. I have unsucessfully attempted to locate the following paths: %s & %s"
-                                        % (comicarr.CONFIG.SAB_DIRECTORY, tmpchk, tmpchk2)
-                                    )
-                                    self.valreturn.append({"self.log": self.log, "mode": "stop"})
-                                    return self.queue.put(self.valreturn)
-
-            if comicarr.USE_NZBGET == 1:
-                if self.nzb_name != "Manual Run":
-                    logger.fdebug("%s Using NZBGET" % module)
-                    logger.fdebug("%s NZB name as passed from NZBGet: %s" % (module, self.nzb_name))
-                # if the NZBGet Directory option is enabled, let's use that folder name and append the jobname.
-                if self.nzb_name == "Manual Run":
-                    logger.fdebug("%s Manual Run Post-Processing enabled." % module)
-                elif all([comicarr.CONFIG.NZBGET_DIRECTORY is not None, comicarr.CONFIG.NZBGET_DIRECTORY != "None"]):
-                    logger.fdebug("%s NZB name as passed from NZBGet: %s" % (module, self.nzb_name))
-                    self.nzb_folder = os.path.join(
-                        comicarr.CONFIG.NZBGET_DIRECTORY, self.nzb_name
-                    )  # .encode(comicarr.SYS_ENCODING)
-                    logger.fdebug(
-                        "%s NZBGET Download folder option enabled. Directory set to : %s" % (module, self.nzb_folder)
-                    )
-        else:
-            logger.fdebug("%s Now performing post-processing of %s sent from DDL" % (module, self.nzb_name))
+        use_sabnzbd = comicarr.USE_SABNZBD == 1
+        use_nzbget = comicarr.USE_NZBGET == 1
+        input_result = _POSTPROCESS_INPUT_STAGE.resolve(
+            PostProcessInputContext(
+                nzb_name=self.nzb_name,
+                nzb_folder=self.nzb_folder,
+                module=module,
+                ddl=self.ddl,
+                use_sabnzbd=use_sabnzbd,
+                use_nzbget=use_nzbget,
+                sab_direct_unpack=(comicarr.CONFIG.SAB_DIRECT_UNPACK if use_sabnzbd else False),
+                sab_directory=(comicarr.CONFIG.SAB_DIRECTORY if use_sabnzbd else None),
+                nzbget_directory=(comicarr.CONFIG.NZBGET_DIRECTORY if use_nzbget else None),
+            )
+        )
+        self.nzb_folder = input_result.folder
+        if input_result.error is not None:
+            self.valreturn.append({"self.log": self.log, "mode": "stop"})
+            return self.queue.put(self.valreturn)
 
         self.oneoffinlist = False
 

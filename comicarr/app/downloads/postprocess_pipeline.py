@@ -9,6 +9,7 @@
 
 """Restart-safe stages used by the legacy post-processing facade."""
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +40,91 @@ class PostProcessTransitionResult:
     stage: str
     recorded: bool
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class PostProcessInputContext:
+    """Downloader inputs needed to resolve the folder presented to PP."""
+
+    nzb_name: str
+    nzb_folder: str
+    module: str
+    ddl: bool
+    use_sabnzbd: bool
+    use_nzbget: bool
+    sab_direct_unpack: bool
+    sab_directory: str | None
+    nzbget_directory: str | None
+
+
+@dataclass(frozen=True)
+class PostProcessInputResult:
+    """Resolved input folder or a stop reason for the compatibility facade."""
+
+    folder: str
+    error: str | None = None
+
+
+class PostProcessInputStage:
+    """Resolve downloader-specific paths without mutating facade state."""
+
+    def __init__(self, path_exists=os.path.exists, log=logger):
+        self._path_exists = path_exists
+        self._log = log
+
+    def resolve(self, context: PostProcessInputContext) -> PostProcessInputResult:
+        folder = context.nzb_folder
+        if context.ddl:
+            self._log.fdebug(f"{context.module} Now performing post-processing of {context.nzb_name} sent from DDL")
+            return PostProcessInputResult(folder)
+
+        if context.use_sabnzbd:
+            if context.nzb_name != "Manual Run":
+                self._log.fdebug(f"{context.module} Using SABnzbd")
+                self._log.fdebug(f"{context.module} NZB name as passed from SABnzbd: {context.nzb_name}")
+
+            if context.nzb_name == "Manual Run":
+                self._log.fdebug(f"{context.module} Manual Run Post-Processing enabled.")
+            elif context.sab_direct_unpack and context.sab_directory not in (None, "None"):
+                if self._path_exists(os.path.join(folder, context.nzb_name)):
+                    self._log.fdebug(
+                        f"{context.module} SABnzbd Download folder option enabled. Using directory of : {folder}"
+                    )
+                else:
+                    job_folder = os.path.join(context.sab_directory, context.nzb_name)
+                    basename_folder = os.path.join(context.sab_directory, os.path.basename(folder))
+                    if self._path_exists(job_folder):
+                        folder = job_folder
+                        self._log.fdebug(
+                            f"{context.module} SABnzbd Download folder option enabled. Directory set to : {folder}"
+                        )
+                    elif self._path_exists(basename_folder):
+                        folder = basename_folder
+                        self._log.fdebug(
+                            f"{context.module} SABnzbd Download folder option enabled. Directory set to : {folder}"
+                        )
+                    else:
+                        error = (
+                            f"Unable to locate directory within {context.sab_directory} location. "
+                            "I have unsucessfully attempted to locate the following paths: "
+                            f"{job_folder} & {basename_folder}"
+                        )
+                        self._log.warn(error)
+                        return PostProcessInputResult(folder, error)
+
+        if context.use_nzbget:
+            if context.nzb_name != "Manual Run":
+                self._log.fdebug(f"{context.module} Using NZBGET")
+                self._log.fdebug(f"{context.module} NZB name as passed from NZBGet: {context.nzb_name}")
+
+            if context.nzb_name == "Manual Run":
+                self._log.fdebug(f"{context.module} Manual Run Post-Processing enabled.")
+            elif context.nzbget_directory not in (None, "None"):
+                self._log.fdebug(f"{context.module} NZB name as passed from NZBGet: {context.nzb_name}")
+                folder = os.path.join(context.nzbget_directory, context.nzb_name)
+                self._log.fdebug(f"{context.module} NZBGET Download folder option enabled. Directory set to : {folder}")
+
+        return PostProcessInputResult(folder)
 
 
 class PostProcessJournalStage:

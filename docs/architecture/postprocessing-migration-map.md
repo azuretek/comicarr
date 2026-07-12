@@ -59,10 +59,13 @@ completed journal stages rather than repeating irreversible file work.
 
 1. Journal transition stage with explicit context and an injectable journal
    adapter; `_journal_release_key()` and `_journal_pp()` remain facade methods.
-2. Filesystem operation/result stage, preserving the journal bracket and
+2. Downloader input-resolution stage with explicit SAB/NZBGet configuration
+   and an injectable path probe; `Process()` retains the historical queue-stop
+   facade for missing SAB paths.
+3. Filesystem operation/result stage, preserving the journal bracket and
    retry rule.
-3. Database reconciliation stage using downloads/series query boundaries.
-4. Cleanup and notification stages after durable completion.
+4. Database reconciliation stage using downloads/series query boundaries.
+5. Cleanup and notification stages after durable completion.
 
 Each stage must retain focused success, expected-failure, and
 side-effect/idempotency coverage before the next extraction begins.
