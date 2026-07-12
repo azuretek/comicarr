@@ -1059,6 +1059,21 @@ def _symlink_or_skip(link_path, target_path):
 
 
 class TestConfigTransactions:
+    def test_legacy_cherrypy_logging_setting_is_ignored_but_preserved(self, tmp_path, monkeypatch):
+        cfg, config_path, config_module = _make_real_config(tmp_path, monkeypatch)
+        if not config_module.config.has_section("Interface"):
+            config_module.config.add_section("Interface")
+        config_module.config.set("Interface", "cherrypy_logging", "True")
+
+        cfg.config_vals()
+
+        assert not hasattr(cfg, "CHERRYPY_LOGGING")
+        assert cfg.writeconfig() is True
+
+        persisted = configparser.ConfigParser()
+        persisted.read(config_path)
+        assert persisted.getboolean("Interface", "cherrypy_logging") is True
+
     def test_locked_value_write_processes_before_provider_sequence(self, tmp_path, monkeypatch):
         """Provider payloads are applied before sequencing without releasing the write lock."""
         cfg, _config_path, _config_module = _make_real_config(tmp_path, monkeypatch)

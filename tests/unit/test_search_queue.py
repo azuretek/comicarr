@@ -23,6 +23,7 @@ from comicarr.app.acquisition.models import ItemOutcome
 from comicarr.app.acquisition.runs import RunLedger
 from comicarr.app.search import service
 from comicarr.app.search.commands import (
+    enqueue_failed_download_retry,
     enqueue_search_command,
     evaluate_search_candidate,
     replay_search_obligations,
@@ -219,6 +220,34 @@ def test_enqueue_persists_obligation_before_queue_handoff(acquisition_ledger):
 
     assert command.run_id == "search-run"
     assert acquisition_ledger.get_run("search-run")["accepted_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("annchk", "issue_id", "entity_type"),
+    (("no", "issue-1", "issue"), ("yes", "annual-1", "annual")),
+)
+def test_failed_download_retry_persists_manual_command(acquisition_ledger, annchk, issue_id, entity_type):
+    work = queue.Queue()
+
+    command = enqueue_failed_download_retry(
+        {
+            "comicid": "comic-1",
+            "issueid": issue_id,
+            "comicname": "Saga",
+            "issuenumber": "1",
+            "annchk": annchk,
+        },
+        work_queue=work,
+        ledger=acquisition_ledger,
+        run_id="failed-download-retry",
+    )
+
+    queued = work.get_nowait()
+    assert command.entity_type == entity_type
+    assert command.manual is True
+    assert queued["entity_type"] == entity_type
+    assert queued["manual"] is True
+    assert acquisition_ledger.get_item("failed-download-retry", entity_type, issue_id)["state"] == "accepted"
 
 
 def test_fast_worker_terminal_state_does_not_fail_queue_handoff(acquisition_ledger):
