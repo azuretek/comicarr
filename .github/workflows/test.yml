@@ -61,6 +61,69 @@ jobs:
           name: backend-python-${{ matrix.python-version }}
           fail_ci_if_error: false
 
+  migration-dialects:
+    name: Schema migrations (${{ matrix.dialect }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dialect: sqlite
+            extra: ""
+            database_url: sqlite:////tmp/comicarr-migrations.db
+          - dialect: postgresql
+            extra: postgres
+            database_url: postgresql://comicarr:comicarr@127.0.0.1:5432/comicarr
+          - dialect: mysql
+            extra: mysql-pure
+            database_url: mysql+pymysql://comicarr:comicarr@127.0.0.1:3306/comicarr
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: comicarr
+          POSTGRES_USER: comicarr
+          POSTGRES_PASSWORD: comicarr
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U comicarr -d comicarr"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: comicarr
+          MYSQL_USER: comicarr
+          MYSQL_PASSWORD: comicarr
+          MYSQL_ROOT_PASSWORD: root
+        ports: [3306:3306]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install migration dependencies
+        run: uv sync --locked --extra dev ${{ matrix.extra && format('--extra {0}', matrix.extra) || '' }}
+
+      - name: Upgrade and check reviewed schema
+        env:
+          DATABASE_URL: ${{ matrix.database_url }}
+        run: |
+          uv run alembic upgrade head
+          uv run alembic current
+          uv run alembic check
+
   # ===========================================================================
   # Frontend Tests
   # ===========================================================================
