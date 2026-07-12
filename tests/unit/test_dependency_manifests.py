@@ -7,10 +7,8 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
+import subprocess
 from pathlib import Path
-
-from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
 
 try:
     import tomllib
@@ -18,25 +16,39 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+EXPORT_COMMAND = ["uv", "export", "--locked", "--no-dev", "--no-hashes", "--no-emit-project"]
 
 
-def _dependency_names(requirements):
-    return {canonicalize_name(Requirement(requirement).name) for requirement in requirements}
+def _canonical_requirements(contents):
+    return [
+        line
+        for line in contents.splitlines()
+        if line and not line.startswith("#") and not line.startswith("    #")
+    ]
 
 
-def _requirements_txt_names():
-    names = set()
+def _locked_runtime_export():
+    result = subprocess.run(
+        EXPORT_COMMAND,
+        cwd=ROOT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return _canonical_requirements(result.stdout)
 
-    for raw_line in (ROOT_DIR / "requirements.txt").read_text().splitlines():
-        requirement = raw_line.strip()
-        if requirement and not requirement.startswith("#"):
-            names.add(canonicalize_name(Requirement(requirement).name))
 
-    return names
+def test_requirements_txt_matches_the_locked_runtime_export():
+    generated_export = _locked_runtime_export()
+    requirements_txt = _canonical_requirements((ROOT_DIR / "requirements.txt").read_text())
+
+    assert requirements_txt == generated_export
 
 
-def test_requirements_txt_contains_all_pyproject_runtime_dependencies():
+def test_project_declares_a_setuptools_build_backend():
     pyproject = tomllib.loads((ROOT_DIR / "pyproject.toml").read_text())
-    runtime_dependencies = _dependency_names(pyproject["project"]["dependencies"])
 
-    assert runtime_dependencies - _requirements_txt_names() == set()
+    assert pyproject["build-system"] == {
+        "requires": ["setuptools>=61"],
+        "build-backend": "setuptools.build_meta",
+    }

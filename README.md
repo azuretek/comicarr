@@ -77,6 +77,18 @@ uv sync
 pip install -r requirements.txt
 ```
 
+`pyproject.toml` is the editable runtime dependency source and `uv.lock` is
+the reproducible resolution. `requirements.txt` is a generated compatibility
+export for pip-based installs; do not edit it by hand.
+
+When changing a dependency, update the project metadata, then run:
+
+```bash
+uv lock
+uv export --locked --no-dev --no-hashes --no-emit-project --output-file requirements.txt
+uv run pytest tests/unit/test_dependency_manifests.py -q
+```
+
 3. Build the frontend:
 
 ```bash

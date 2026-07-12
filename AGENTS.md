@@ -17,6 +17,8 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 |--------|---------|
 | Install (backend) | `uv sync` |
 | Install (dev) | `uv sync --extra dev` |
+| Validate dependency lock | `uv lock --check` |
+| Refresh pip compatibility export | `uv export --locked --no-dev --no-hashes --no-emit-project --output-file requirements.txt` |
 | Install (frontend) | `cd frontend && npm ci` |
 | Run app | `python3 Comicarr.py --nolaunch` |
 | Dev frontend | `cd frontend && npm run dev` |

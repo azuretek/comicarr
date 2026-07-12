@@ -55,6 +55,10 @@ dev = [
     "tomli>=2.0; python_version < '3.11'",
 ]
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools.packages.find]
 include = ["comicarr*"]
 
