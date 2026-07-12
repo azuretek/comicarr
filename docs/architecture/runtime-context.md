@@ -72,9 +72,10 @@ instance to `app.state.ctx`; it does not construct a second view.
 
 ## Transitional boundary
 
-The system router, acquisition maintenance gate, and `weeklypullit` state
-writer are the first migrated ownership boundary. `tests/unit/test_runtime_context.py`
-keeps an explicit allowlist for direct `comicarr.<UPPERCASE>` accesses in those
-files; it is empty. The larger `app/system/service.py` scheduler surface
-remains a documented compatibility consumer until its coherent ownership wave,
+The system router, acquisition maintenance gate, `weeklypullit` state writer,
+and the bounded AI runtime consumers are the first migrated ownership boundary.
+`tests/unit/test_runtime_context.py` keeps an explicit allowlist for direct
+`comicarr.<UPPERCASE>` accesses in those files; it is empty. The larger
+`app/system/service.py` scheduler surface and non-selected domains remain
+documented compatibility consumers until their coherent ownership waves,
 rather than being silently rewritten in this change.

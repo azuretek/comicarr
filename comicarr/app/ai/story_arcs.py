@@ -18,10 +18,10 @@ and saves to the storyarcs table.
 import time
 import uuid
 
-import comicarr
 from comicarr import logger
 from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
+from comicarr.app.ai.runtime import get_ai_runtime
 from comicarr.app.ai.sanitize import sanitize_input
 from comicarr.app.ai.schemas import ReadingOrder
 from comicarr.app.ai.structured import request_structured
@@ -33,15 +33,16 @@ def generate_reading_order(arc_description):
     Each issue dict has: series_name, issue_number, title, reading_order_position.
     Returns empty list if AI is not configured or on error.
     """
-    if comicarr.AI_CLIENT is None:
+    ctx = get_ai_runtime()
+    if ctx is None or ctx.ai_client is None or ctx.config is None:
         logger.fdebug("[AI-ARC] AI not configured, cannot generate reading order")
         return {"success": False, "error": "AI is not configured", "issues": []}
 
-    if not comicarr.AI_CIRCUIT_BREAKER.allow_request():
+    if ctx.ai_circuit_breaker is None or not ctx.ai_circuit_breaker.allow_request():
         logger.fdebug("[AI-ARC] Circuit breaker open, skipping reading order generation")
         return {"success": False, "error": "AI service temporarily unavailable", "issues": []}
 
-    if not comicarr.AI_RATE_LIMITER.can_request():
+    if ctx.ai_rate_limiter is None or not ctx.ai_rate_limiter.can_request():
         logger.fdebug("[AI-ARC] Rate limit reached, skipping reading order generation")
         return {"success": False, "error": "AI rate limit reached, try again later", "issues": []}
 
@@ -63,16 +64,16 @@ def generate_reading_order(arc_description):
     start_time = time.time()
     try:
         result = request_structured(
-            client=comicarr.AI_CLIENT,
-            model=comicarr.CONFIG.AI_MODEL,
+            client=ctx.ai_client,
+            model=ctx.config.AI_MODEL,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             schema_class=ReadingOrder,
             temperature=0.2,
-            timeout=getattr(comicarr.CONFIG, "AI_TIMEOUT", 30) or 30,
+            timeout=getattr(ctx.config, "AI_TIMEOUT", 30) or 30,
         )
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_success()
+        ctx.ai_circuit_breaker.record_success()
 
         issues = []
         for item in result.issues:
@@ -92,7 +93,7 @@ def generate_reading_order(arc_description):
         ai_service.log_activity(
             feature_type="storyarc",
             action="Generated reading order for '%s' (%d issues)" % (sanitized[:50], len(issues)),
-            model=comicarr.CONFIG.AI_MODEL,
+            model=ctx.config.AI_MODEL,
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -106,11 +107,11 @@ def generate_reading_order(arc_description):
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_failure()
+        ctx.ai_circuit_breaker.record_failure()
         ai_service.log_activity(
             feature_type="storyarc",
             action="Reading order generation failed for '%s'" % sanitized[:50],
-            model=getattr(comicarr.CONFIG, "AI_MODEL", "") or "",
+            model=getattr(ctx.config, "AI_MODEL", "") or "",
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,

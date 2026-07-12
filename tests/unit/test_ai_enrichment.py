@@ -184,40 +184,45 @@ class TestStoreHistory:
 
 
 class TestEnrichMetadata:
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_skips_when_ai_not_configured(self, mock_cm, tmp_path):
-        mock_cm.AI_CLIENT = None
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_skips_when_ai_not_configured(self, mock_get_runtime, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = None
         cbz_path = _make_cbz(tmp_path)
         assert enrich_metadata(cbz_path, "12345") == 0
 
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_skips_when_circuit_breaker_open(self, mock_cm, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=False)
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_skips_when_circuit_breaker_open(self, mock_get_runtime, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=False)
         cbz_path = _make_cbz(tmp_path)
         assert enrich_metadata(cbz_path, "12345") == 0
 
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_skips_when_rate_limiter_at_cap(self, mock_cm, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=False)
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_skips_when_rate_limiter_at_cap(self, mock_get_runtime, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=False)
         cbz_path = _make_cbz(tmp_path)
         assert enrich_metadata(cbz_path, "12345") == 0
 
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_skips_when_all_fields_populated(self, mock_cm, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_skips_when_all_fields_populated(self, mock_get_runtime, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
         cbz_path = _make_cbz(tmp_path, genre="Superhero", age_rating="T+")
         assert enrich_metadata(cbz_path, "12345") == 0
 
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_skips_when_no_context_fields(self, mock_cm, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_skips_when_no_context_fields(self, mock_get_runtime, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
         # Create CBZ with all context fields blank
         cbz_path = _make_cbz(
             tmp_path,
@@ -236,12 +241,13 @@ class TestEnrichMetadata:
     @patch("comicarr.app.ai.enrichment._store_history")
     @patch("comicarr.app.ai.enrichment.ai_service")
     @patch("comicarr.app.ai.enrichment.request_structured")
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_filters_out_fields_not_in_blank_list(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_filters_out_fields_not_in_blank_list(self, mock_get_runtime, mock_req, mock_svc, mock_store, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         # Genre is already populated, AgeRating is blank
         cbz_path = _make_cbz(tmp_path, genre="Superhero", age_rating="")
@@ -259,13 +265,14 @@ class TestEnrichMetadata:
     @patch("comicarr.app.ai.enrichment._store_history")
     @patch("comicarr.app.ai.enrichment.ai_service")
     @patch("comicarr.app.ai.enrichment.request_structured")
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_only_enriches_genre_and_age_rating(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_only_enriches_genre_and_age_rating(self, mock_get_runtime, mock_req, mock_svc, mock_store, tmp_path):
         """AI returns Summary and Characters — they must NOT be written."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         cbz_path = _make_cbz(tmp_path, genre="", age_rating="")
 
@@ -294,12 +301,13 @@ class TestEnrichMetadata:
     @patch("comicarr.app.ai.enrichment._store_history")
     @patch("comicarr.app.ai.enrichment.ai_service")
     @patch("comicarr.app.ai.enrichment.request_structured")
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_happy_path_blank_genre_filled(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_happy_path_blank_genre_filled(self, mock_get_runtime, mock_req, mock_svc, mock_store, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         cbz_path = _make_cbz(tmp_path, genre="", age_rating="")
 
@@ -317,7 +325,7 @@ class TestEnrichMetadata:
         mock_store.assert_called_once_with("12345", {"Genre": "Superhero", "AgeRating": "T+"})
 
         # Verify circuit breaker success recorded
-        mock_cm.AI_CIRCUIT_BREAKER.record_success.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_success.assert_called_once()
 
         # Verify activity logged
         mock_svc.log_activity.assert_called_once()
@@ -326,12 +334,13 @@ class TestEnrichMetadata:
 
     @patch("comicarr.app.ai.enrichment.ai_service")
     @patch("comicarr.app.ai.enrichment.request_structured")
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_ai_error_records_failure(self, mock_cm, mock_req, mock_svc, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_ai_error_records_failure(self, mock_get_runtime, mock_req, mock_svc, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         cbz_path = _make_cbz(tmp_path, genre="", age_rating="")
 
@@ -340,19 +349,20 @@ class TestEnrichMetadata:
         result = enrich_metadata(cbz_path, "12345")
         assert result == 0
 
-        mock_cm.AI_CIRCUIT_BREAKER.record_failure.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_failure.assert_called_once()
         mock_svc.log_activity.assert_called_once()
         assert mock_svc.log_activity.call_args[1]["success"] is False
 
     @patch("comicarr.app.ai.enrichment._store_history")
     @patch("comicarr.app.ai.enrichment.ai_service")
     @patch("comicarr.app.ai.enrichment.request_structured")
-    @patch("comicarr.app.ai.enrichment.comicarr")
-    def test_skips_when_ai_returns_empty_values(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.enrichment.get_ai_runtime")
+    def test_skips_when_ai_returns_empty_values(self, mock_get_runtime, mock_req, mock_svc, mock_store, tmp_path):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         cbz_path = _make_cbz(tmp_path, genre="", age_rating="")
 

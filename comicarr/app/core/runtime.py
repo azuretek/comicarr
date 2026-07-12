@@ -159,8 +159,8 @@ def _adopt_legacy_runtime():
 def _initialize_ai_clients(ctx):
     """Create one AI client bundle at the runtime lifecycle boundary.
 
-    AI consumers remain on their existing legacy aliases for this ownership
-    wave; the aliases receive these same instances through the bridge below.
+    Canonical consumers read this context bundle. Remaining legacy aliases
+    receive these same instances through the temporary bridge below.
     """
     ai_config = ctx.config
     if not ai_config or not getattr(ai_config, "AI_BASE_URL", None) or not getattr(ai_config, "AI_API_KEY", None):

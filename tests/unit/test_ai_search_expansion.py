@@ -15,15 +15,17 @@ from unittest.mock import MagicMock, patch
 from comicarr.app.ai.schemas import SearchExpansion
 
 
-def _configure_available_ai(mock_comicarr):
-    mock_comicarr.AI_CLIENT = MagicMock()
-    mock_comicarr.AI_CIRCUIT_BREAKER = MagicMock()
-    mock_comicarr.AI_CIRCUIT_BREAKER.allow_request.return_value = True
-    mock_comicarr.AI_RATE_LIMITER = MagicMock()
-    mock_comicarr.AI_RATE_LIMITER.can_request.return_value = True
-    mock_comicarr.CONFIG = MagicMock()
-    mock_comicarr.CONFIG.AI_MODEL = "gpt-4"
-    mock_comicarr.CONFIG.AI_TIMEOUT = 30
+def _configure_available_ai(mock_get_ai_runtime):
+    mock_ctx = mock_get_ai_runtime.return_value
+    mock_ctx.ai_client = MagicMock()
+    mock_ctx.ai_circuit_breaker = MagicMock()
+    mock_ctx.ai_circuit_breaker.allow_request.return_value = True
+    mock_ctx.ai_rate_limiter = MagicMock()
+    mock_ctx.ai_rate_limiter.can_request.return_value = True
+    mock_ctx.config = MagicMock()
+    mock_ctx.config.AI_MODEL = "gpt-4"
+    mock_ctx.config.AI_TIMEOUT = 30
+    return mock_ctx
 
 
 class TestExpandSearchQueries:
@@ -32,9 +34,9 @@ class TestExpandSearchQueries:
     @patch("comicarr.app.ai.search_expansion.ai_service")
     @patch("comicarr.app.ai.search_expansion.ai_queries")
     @patch("comicarr.app.ai.search_expansion.request_structured")
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_returns_alternates_on_success(self, mock_comicarr, mock_structured, mock_queries, mock_ai_service):
-        _configure_available_ai(mock_comicarr)
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_returns_alternates_on_success(self, mock_get_ai_runtime, mock_structured, mock_queries, mock_ai_service):
+        mock_ctx = _configure_available_ai(mock_get_ai_runtime)
         mock_queries.get_cache_entry.return_value = None
         mock_queries.get_alternate_search.return_value = None
         mock_structured.return_value = SearchExpansion(queries=["The Amazing Spider-Man", "ASM", "Spider-Man Marvel"])
@@ -44,30 +46,31 @@ class TestExpandSearchQueries:
         result = expand_search_queries("12345", "Spider-Man", publisher="Marvel", year="2020")
 
         assert result == ["The Amazing Spider-Man", "ASM", "Spider-Man Marvel"]
-        mock_comicarr.AI_CIRCUIT_BREAKER.record_success.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_success.assert_called_once()
         mock_ai_service.log_activity.assert_called_once()
 
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_ai_not_configured_returns_empty(self, mock_comicarr):
-        mock_comicarr.AI_CLIENT = None
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_ai_not_configured_returns_empty(self, mock_get_ai_runtime):
+        mock_ctx = mock_get_ai_runtime.return_value
+        mock_ctx.ai_client = None
 
         from comicarr.app.ai.search_expansion import expand_search_queries
 
         assert expand_search_queries("12345", "Spider-Man") == []
 
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_circuit_breaker_open_returns_empty(self, mock_comicarr):
-        _configure_available_ai(mock_comicarr)
-        mock_comicarr.AI_CIRCUIT_BREAKER.allow_request.return_value = False
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_circuit_breaker_open_returns_empty(self, mock_get_ai_runtime):
+        mock_ctx = _configure_available_ai(mock_get_ai_runtime)
+        mock_ctx.ai_circuit_breaker.allow_request.return_value = False
 
         from comicarr.app.ai.search_expansion import expand_search_queries
 
         assert expand_search_queries("12345", "Spider-Man") == []
 
     @patch("comicarr.app.ai.search_expansion.ai_queries")
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_already_has_five_expansions_returns_empty(self, mock_comicarr, mock_queries):
-        _configure_available_ai(mock_comicarr)
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_already_has_five_expansions_returns_empty(self, mock_get_ai_runtime, mock_queries):
+        _configure_available_ai(mock_get_ai_runtime)
         mock_queries.get_cache_entry.return_value = {"data": json.dumps(["alt1", "alt2", "alt3", "alt4", "alt5"])}
 
         from comicarr.app.ai.search_expansion import expand_search_queries
@@ -77,11 +80,11 @@ class TestExpandSearchQueries:
     @patch("comicarr.app.ai.search_expansion.ai_service")
     @patch("comicarr.app.ai.search_expansion.ai_queries")
     @patch("comicarr.app.ai.search_expansion.request_structured")
-    @patch("comicarr.app.ai.search_expansion.comicarr")
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
     def test_deduplicates_against_existing_alternates(
-        self, mock_comicarr, mock_structured, mock_queries, mock_ai_service
+        self, mock_get_ai_runtime, mock_structured, mock_queries, mock_ai_service
     ):
-        _configure_available_ai(mock_comicarr)
+        _configure_available_ai(mock_get_ai_runtime)
         mock_queries.get_cache_entry.return_value = None
         mock_queries.get_alternate_search.return_value = {"AlternateSearch": "The Dark Knight"}
         mock_structured.return_value = SearchExpansion(queries=["The Dark Knight", "TDK", "Batman Dark Knight"])
@@ -93,9 +96,11 @@ class TestExpandSearchQueries:
     @patch("comicarr.app.ai.search_expansion.ai_service")
     @patch("comicarr.app.ai.search_expansion.ai_queries")
     @patch("comicarr.app.ai.search_expansion.request_structured")
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_deduplicates_against_series_name(self, mock_comicarr, mock_structured, mock_queries, mock_ai_service):
-        _configure_available_ai(mock_comicarr)
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_deduplicates_against_series_name(
+        self, mock_get_ai_runtime, mock_structured, mock_queries, mock_ai_service
+    ):
+        _configure_available_ai(mock_get_ai_runtime)
         mock_queries.get_cache_entry.return_value = None
         mock_queries.get_alternate_search.return_value = None
         mock_structured.return_value = SearchExpansion(queries=["batman", "The Dark Knight"])
@@ -107,9 +112,9 @@ class TestExpandSearchQueries:
     @patch("comicarr.app.ai.search_expansion.ai_service")
     @patch("comicarr.app.ai.search_expansion.ai_queries")
     @patch("comicarr.app.ai.search_expansion.request_structured")
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_llm_timeout_returns_empty(self, mock_comicarr, mock_structured, mock_queries, mock_ai_service):
-        _configure_available_ai(mock_comicarr)
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_llm_timeout_returns_empty(self, mock_get_ai_runtime, mock_structured, mock_queries, mock_ai_service):
+        mock_ctx = _configure_available_ai(mock_get_ai_runtime)
         mock_queries.get_cache_entry.return_value = None
         mock_queries.get_alternate_search.return_value = None
         mock_structured.side_effect = TimeoutError("Request timed out")
@@ -117,14 +122,14 @@ class TestExpandSearchQueries:
         from comicarr.app.ai.search_expansion import expand_search_queries
 
         assert expand_search_queries("12345", "Spider-Man") == []
-        mock_comicarr.AI_CIRCUIT_BREAKER.record_failure.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_failure.assert_called_once()
 
     @patch("comicarr.app.ai.search_expansion.ai_service")
     @patch("comicarr.app.ai.search_expansion.ai_queries")
     @patch("comicarr.app.ai.search_expansion.request_structured")
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_llm_returns_empty_array(self, mock_comicarr, mock_structured, mock_queries, mock_ai_service):
-        _configure_available_ai(mock_comicarr)
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_llm_returns_empty_array(self, mock_get_ai_runtime, mock_structured, mock_queries, mock_ai_service):
+        mock_ctx = _configure_available_ai(mock_get_ai_runtime)
         mock_queries.get_cache_entry.return_value = None
         mock_queries.get_alternate_search.return_value = None
         mock_structured.return_value = SearchExpansion(queries=[])
@@ -132,12 +137,12 @@ class TestExpandSearchQueries:
         from comicarr.app.ai.search_expansion import expand_search_queries
 
         assert expand_search_queries("12345", "Spider-Man") == []
-        mock_comicarr.AI_CIRCUIT_BREAKER.record_success.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_success.assert_called_once()
 
-    @patch("comicarr.app.ai.search_expansion.comicarr")
-    def test_rate_limit_reached_returns_empty(self, mock_comicarr):
-        _configure_available_ai(mock_comicarr)
-        mock_comicarr.AI_RATE_LIMITER.can_request.return_value = False
+    @patch("comicarr.app.ai.search_expansion.get_ai_runtime")
+    def test_rate_limit_reached_returns_empty(self, mock_get_ai_runtime):
+        mock_ctx = _configure_available_ai(mock_get_ai_runtime)
+        mock_ctx.ai_rate_limiter.can_request.return_value = False
 
         from comicarr.app.ai.search_expansion import expand_search_queries
 

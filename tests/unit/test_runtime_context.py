@@ -33,6 +33,13 @@ RUNTIME_GLOBAL_ALLOWLIST = {
     "comicarr/app/system/router.py": set(),
     "comicarr/app/acquisition/maintenance.py": set(),
     "comicarr/weeklypullit.py": set(),
+    "comicarr/app/ai/enrichment.py": set(),
+    "comicarr/app/ai/parsing.py": set(),
+    "comicarr/app/ai/pull_list.py": set(),
+    "comicarr/app/ai/reconciliation.py": set(),
+    "comicarr/app/ai/search_expansion.py": set(),
+    "comicarr/app/ai/service.py": set(),
+    "comicarr/app/ai/story_arcs.py": set(),
 }
 
 
@@ -143,6 +150,8 @@ def test_runtime_factory_owns_and_projects_one_ai_client_bundle(_legacy_runtime_
     assert ctx.ai_async_client is async_client
     assert comicarr.AI_CLIENT is sync_client
     assert comicarr.AI_ASYNC_CLIENT is async_client
+    assert comicarr.AI_CIRCUIT_BREAKER is ctx.ai_circuit_breaker
+    assert comicarr.AI_RATE_LIMITER is ctx.ai_rate_limiter
 
 
 def test_runtime_access_fails_closed_before_initialization():
