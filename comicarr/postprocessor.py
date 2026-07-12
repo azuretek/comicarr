@@ -32,6 +32,7 @@ from sqlalchemy import Integer, and_, delete, func, inspect, or_, select
 
 import comicarr
 from comicarr import db, filechecker, getimage, helpers, logger, notifiers, updater, weeklypull
+from comicarr.app.downloads.postprocess_pipeline import PostProcessContext, PostProcessJournalStage
 from comicarr.app.downloads.pp_commands import safe_walk
 from comicarr.config import get_manga_destination
 from comicarr.manga_parser import parse_manga_filename
@@ -45,6 +46,8 @@ from comicarr.tables import (
     storyarcs,
     weekly,
 )
+
+_POSTPROCESS_JOURNAL_STAGE = PostProcessJournalStage()
 
 
 class PostProcessor(object):
@@ -161,43 +164,24 @@ class PostProcessor(object):
         the U4 single-derivation invariant — claim/markers/snatch all share
         the one key — is preserved unchanged.
         """
-        from comicarr.app.downloads import journal
+        return _POSTPROCESS_JOURNAL_STAGE.release_key(
+            self._journal_context(),
+            issue_id=issueid,
+            issue_arc_id=issuearcid,
+        )
 
-        # Secondary story-arc write: an explicit issuearcid override targets
-        # the ARC row (its own "S<IssueArcID>" nzblog entry is being deleted),
-        # not the primary claimed issue row — re-derive for that arc row.
-        explicit_arc_override = issuearcid is not None and issuearcid != self.issuearcid
-
-        # Prefer the canonical key threaded from the PP-consumer atomic claim
-        # (the row the claim advanced) for the PRIMARY item; re-derive for the
-        # secondary arc write and for unjournaled PP.
-        if self.journal_release_key and not explicit_arc_override:
-            return self.journal_release_key
-
-        # For an explicit story-arc override, the arc's durable `snatched`
-        # row is written with IssueID == IssueArcID (the bare arc id, NOT the
-        # "S"-prefixed nzblog form — updater.foundsearch, see recovery.py
-        # ~94-99), so the canonical arc release_key derives from the arc id.
-        # Anchor the derivation on the arc id so the re-derived key advances
-        # the ARC row, not the primary claimed issue row.
-        if explicit_arc_override:
-            ident = {
-                "issueid": issuearcid,
-                "IssueArcID": issuearcid,
-                "comicid": self.comicid,
-                "nzbname": self.nzb_name,
-                "ddl": getattr(self, "ddl", False),
-            }
-            return journal.derive_release_key(ident)
-
-        ident = {
-            "issueid": issueid if issueid is not None else self.issueid,
-            "IssueArcID": issuearcid if issuearcid is not None else self.issuearcid,
-            "comicid": self.comicid,
-            "nzbname": self.nzb_name,
-            "ddl": getattr(self, "ddl", False),
-        }
-        return journal.derive_release_key(ident)
+    def _journal_context(self):
+        return PostProcessContext(
+            issue_id=self.issueid,
+            issue_arc_id=self.issuearcid,
+            comic_id=self.comicid,
+            nzb_name=self.nzb_name,
+            nzb_folder=self.nzb_folder,
+            api_call=getattr(self, "apicall", False),
+            ddl=getattr(self, "ddl", False),
+            canonical_release_key=self.journal_release_key,
+            log_module=self.module,
+        )
 
     def _journal_pp(self, stage, issueid=None, issuearcid=None, payload=None, conn=None):
         """Record a PP-marker journal transition.
@@ -215,36 +199,14 @@ class PostProcessor(object):
         post_processing/moved. The swallow-and-continue contract applies ONLY
         to the own-transaction (conn is None) additive markers.
         """
-        from comicarr.app.downloads import journal
-
-        rkey = None
-        try:
-            rkey = self._journal_release_key(issueid=issueid, issuearcid=issuearcid)
-            if payload is None:
-                payload = {
-                    "issueid": issueid if issueid is not None else self.issueid,
-                    "issuearcid": issuearcid if issuearcid is not None else self.issuearcid,
-                    "comicid": self.comicid,
-                    "nzb_name": self.nzb_name,
-                    "nzb_folder": self.nzb_folder,
-                    "apicall": getattr(self, "apicall", False),
-                    "ddl": getattr(self, "ddl", False),
-                }
-            journal.record_transition(
-                rkey,
-                stage,
-                payload=payload,
-                conn=conn,
-                issueid=issueid if issueid is not None else self.issueid,
-            )
-            logger.fdebug("%s [JOURNAL] %s for %s" % (self.module, stage, rkey))
-        except Exception as e:
-            # conn-mode: must roll the whole block back (a swallowed failure
-            # would delete nzblog while the journal still said
-            # post_processing/moved). Own-txn additive markers swallow.
-            if conn is not None:
-                raise
-            logger.error("%s [JOURNAL] %s transition failed (inert, continuing): %s" % (self.module, stage, e))
+        _POSTPROCESS_JOURNAL_STAGE.transition(
+            self._journal_context(),
+            stage,
+            issue_id=issueid,
+            issue_arc_id=issuearcid,
+            payload=payload,
+            conn=conn,
+        )
 
     def _log(self, message, level=logger):  # .message):  #level=logger.MESSAGE):
         """
