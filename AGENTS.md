@@ -24,6 +24,7 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 | Test backend | `pytest tests/unit -v` |
 | Test frontend | `cd frontend && npm run test:run` |
 | Lint backend | `ruff check comicarr/` |
+| Lint modern backend | `npm run lint:modern` (`comicarr/app` + `Comicarr.py`) |
 | Format check | `ruff format --check comicarr/` |
 | Format fix | `ruff format comicarr/` |
 | Lint frontend | `cd frontend && npm run lint` |
@@ -57,7 +58,8 @@ Domain packages under `comicarr/app/`: `series`, `search`, `downloads`, `system`
 ## Style & anti-patterns
 
 - **Formatting**: `ruff format` enforced in CI and pre-commit; do not use Black
-- **Lint**: `ruff check comicarr/`; frontend ESLint + Prettier enforced in CI and pre-commit
+- **Lint**: `ruff check comicarr/`; modern FastAPI-layer code (`comicarr/app/**` and `Comicarr.py`) must also pass `npm run lint:modern`, which ratchets `E722`, `F821`, `F823`, and `B904`. Frontend ESLint + Prettier are enforced in CI and pre-commit.
+- **Legacy boundary**: global Ruff waivers remain for inherited modules; do not add new waivers in modern code or expand legacy scope without a focused cleanup plan.
 - **Type hints**: do not mass-add to large legacy modules (`search.py`, `postprocessor.py`); new `comicarr/app/**` code may use annotations like neighboring files
 - Always `except Exception as e` — never bare `except:`
 - GPL license header on new Python files

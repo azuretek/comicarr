@@ -23,6 +23,7 @@ Comicarr is built on the foundation of Mylar3 with a completely rebuilt React 19
 | Test backend | `pytest tests/unit -v` |
 | Test frontend | `cd frontend && npm run test:run` |
 | Lint backend | `ruff check comicarr/` |
+| Lint modern backend | `npm run lint:modern` (`comicarr/app` + `Comicarr.py`) |
 | Format check | `ruff format --check comicarr/` |
 | Format fix | `ruff format comicarr/` |
 | Lint frontend | `cd frontend && npm run lint` |
@@ -91,7 +92,8 @@ Conventional PR titles keep history readable, but they do not control releases. 
 
 - **Do NOT mass-add type hints** to large legacy modules (`search.py`, `postprocessor.py`, etc.)
 - **New code under `comicarr/app/`** may use annotations matching neighboring files
-- **Do NOT use bare `except:` clauses** - Always catch `Exception as e`
+- **Do NOT use bare `except:` clauses** - Always catch `Exception as e`; modern backend code is enforced by the strict `lint:modern` lane for `E722`, `F821`, `F823`, and `B904`.
+- **Do NOT weaken the modern lint boundary** with new `# noqa` markers or by expanding legacy waivers; inherited global suppressions remain temporary and are handled by focused cleanup plans.
 - **Do NOT use Black or other external formatters** - Use `ruff format` only (enforced by CI and pre-commit)
 - **Do NOT use `bun` for frontend** - Use `npm` commands only
 - **Do NOT omit GPL license header** from new Python files

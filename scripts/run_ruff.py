@@ -28,6 +28,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Keep the modern-layer ratchet in one place. Package scripts, hooks, and CI
+# all invoke ``python scripts/run_ruff.py modern`` so their target scope and
+# rule selection cannot drift independently.
+MODERN_TARGETS = ("comicarr/app", "Comicarr.py")
+MODERN_RULES = ("E722", "F821", "F823", "B904")
+
 
 def _ruff_command() -> list[str]:
     win = sys.platform == "win32"
@@ -61,8 +67,10 @@ def _ruff_command() -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["modern"]:
+        args = ["check", *MODERN_TARGETS, "--select", ",".join(MODERN_RULES)]
     cmd = _ruff_command() + args
-    return int(subprocess.call(cmd) or 0)
+    return int(subprocess.call(cmd, cwd=ROOT) or 0)
 
 
 if __name__ == "__main__":

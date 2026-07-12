@@ -147,6 +147,28 @@ def test_download_false_present_incomplete_is_in_progress(monkeypatch):
     assert result["snatch_status"] == "IN PROGRESS"
 
 
+def test_deluge_monitor_copies_the_resolved_incomplete_file(monkeypatch):
+    """Monitoring an incomplete Deluge item copies its real file path."""
+    monkeypatch.setattr(comicarr, "USE_DELUGE", True)
+    monkeypatch.setattr(comicarr, "USE_RTORRENT", False)
+
+    fake_client = MagicMock()
+    fake_client.connect.return_value = True
+    fake_client.get_torrent.return_value = _deluge_torrent(finished=False)
+
+    with (
+        patch("comicarr.torrent.clients.deluge.TorrentClient", return_value=fake_client),
+        patch("shutil.copy") as copy,
+    ):
+        result = service.torrentinfo(torrent_hash=HASH40, download=False, monitor=True)
+
+    assert result["snatch_status"] == "IN PROGRESS"
+    copy.assert_called_once_with("/downloads/Saga.cbz", "/downloads/Saga.cbz.copy")
+    assert result["copied_filepath"] == "/downloads/Saga.cbz.copy"
+    fake_client.stop_torrent.assert_called_once_with(HASH40)
+    fake_client.start_torrent.assert_called_once_with(HASH40)
+
+
 def test_deluge_connect_failure_dict_is_monitor_error_not_not_found(monkeypatch):
     """Deluge connect returns truthy {status: False}; must not fall through to NOT FOUND."""
     monkeypatch.setattr(comicarr, "USE_DELUGE", True)

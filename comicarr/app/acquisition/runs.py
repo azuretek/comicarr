@@ -121,7 +121,7 @@ class RunLedger:
             existing = self.get_run(run_id)
             immutable = ("command_kind", "trigger", "scope_type", "scope_id")
             if existing is None or any(existing[key] != values[key] for key in immutable):
-                raise ValueError("run_id already belongs to a different acquisition command")
+                raise ValueError("run_id already belongs to a different acquisition command") from None
         return self.get_run(run_id)
 
     def get_run(self, run_id):
@@ -168,7 +168,7 @@ class RunLedger:
             if existing is None:
                 raise
             if encoded is not None and existing["payload_json"] not in (None, encoded):
-                raise ValueError("accepted acquisition item payload is immutable")
+                raise ValueError("accepted acquisition item payload is immutable") from None
             if existing["payload_json"] is None and encoded is not None:
                 with self.engine.begin() as conn:
                     conn.execute(
