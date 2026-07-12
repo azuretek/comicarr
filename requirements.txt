@@ -140,7 +140,7 @@ tenacity==9.1.2
     # via comicarr
 tomli==2.4.0 ; python_full_version < '3.11'
     # via alembic
-tqdm==4.67.3
+tqdm==4.68.4
     # via openai
 typing-extensions==4.15.0
     # via
