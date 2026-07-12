@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.4
+
+### Patch Changes
+
+- 2e0b8da: Fix library scan reconciliation so detected files are recorded on their issues, and sort matched scan results before unmatched folders.
+
 ## 0.19.3
 
 ### Patch Changes
