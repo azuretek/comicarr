@@ -15,7 +15,8 @@ the home dashboard view.
 from datetime import datetime, timedelta
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.dashboard import queries as dashboard_queries
 from comicarr.app.downloads import queries as dl_queries
 from comicarr.app.storyarcs import service as storyarcs_service
 
@@ -49,13 +50,7 @@ def get_dashboard_data(ctx):
     # Recent activity is a bounded preview. Full history retains all rows.
     try:
         cutoff = recent_activity_cutoff().strftime("%Y-%m-%d %H:%M:%S")
-        recent = db.DBConnection().select(
-            "SELECT s.ComicName, s.Issue_Number, s.DateAdded, s.Status, s.Provider, "
-            "s.ComicID, s.IssueID, c.ComicImage "
-            "FROM snatched s LEFT JOIN comics c ON s.ComicID = c.ComicID "
-            "WHERE s.DateAdded >= ? ORDER BY s.DateAdded DESC LIMIT 10",
-            [cutoff],
-        )
+        recent = dashboard_queries.get_recent_activity(cutoff)
         result["recently_downloaded"] = recent or []
     except Exception as e:
         logger.error("[DASHBOARD] Error fetching recent downloads: %s" % e)
@@ -68,12 +63,7 @@ def get_dashboard_data(ctx):
 
     # Stats: aggregate from comics (combined + per content type)
     try:
-        stats = db.DBConnection().selectone(
-            "SELECT COUNT(*) as total_series, "
-            "COALESCE(SUM(Have), 0) as total_issues, "
-            "COALESCE(SUM(Total), 0) as total_expected "
-            "FROM comics WHERE Status != 'Paused'"
-        )
+        stats = dashboard_queries.get_library_stats()
         if stats:
             total_expected = stats.get("total_expected", 0) or 0
             total_issues = stats.get("total_issues", 0) or 0
@@ -86,12 +76,7 @@ def get_dashboard_data(ctx):
             result["stats"].setdefault("queue_count", 0)
 
         # Manga-specific stats
-        manga_stats = db.DBConnection().selectone(
-            "SELECT COUNT(*) as manga_series, "
-            "COALESCE(SUM(Have), 0) as manga_have, "
-            "COALESCE(SUM(Total), 0) as manga_total "
-            "FROM comics WHERE Status != 'Paused' AND ContentType = 'manga'"
-        )
+        manga_stats = dashboard_queries.get_library_stats("manga")
         if manga_stats:
             manga_total = manga_stats.get("manga_total", 0) or 0
             manga_have = manga_stats.get("manga_have", 0) or 0
@@ -101,12 +86,7 @@ def get_dashboard_data(ctx):
             result["stats"]["manga_completion_pct"] = round(manga_have / manga_total * 100, 1) if manga_total > 0 else 0
 
         # Comic-specific stats (non-manga)
-        comic_stats = db.DBConnection().selectone(
-            "SELECT COUNT(*) as comic_series, "
-            "COALESCE(SUM(Have), 0) as comic_have, "
-            "COALESCE(SUM(Total), 0) as comic_total "
-            "FROM comics WHERE Status != 'Paused' AND (ContentType IS NULL OR ContentType = 'comic')"
-        )
+        comic_stats = dashboard_queries.get_library_stats("comic")
         if comic_stats:
             result["stats"]["comic_series"] = comic_stats.get("comic_series", 0)
             result["stats"]["comic_have"] = comic_stats.get("comic_have", 0) or 0
@@ -132,11 +112,7 @@ def get_dashboard_data(ctx):
     if comicarr.AI_CLIENT is not None or ai_base_url:
         result["ai_configured"] = True
         try:
-            activity = db.DBConnection().select(
-                "SELECT timestamp, feature_type, action_description, "
-                "prompt_tokens, completion_tokens, success "
-                "FROM ai_activity_log ORDER BY timestamp DESC LIMIT 5"
-            )
+            activity = dashboard_queries.get_recent_ai_activity()
             result["ai_activity"] = activity or []
         except Exception as e:
             logger.error("[DASHBOARD] Error fetching AI activity: %s" % e)

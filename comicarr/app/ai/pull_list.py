@@ -20,7 +20,8 @@ import time
 from datetime import datetime, timedelta
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
 from comicarr.app.ai.schemas import PullSuggestions
 from comicarr.app.ai.structured import request_structured
@@ -158,10 +159,7 @@ def get_collection_patterns():
 
     try:
         # Get publisher distribution
-        publisher_rows = db.DBConnection().select(
-            "SELECT ComicPublisher, COUNT(*) as count FROM comics "
-            "WHERE Status = 'Active' GROUP BY ComicPublisher ORDER BY count DESC LIMIT 10"
-        )
+        publisher_rows = ai_queries.get_active_publisher_counts()
         if publisher_rows:
             patterns["publishers"] = [
                 {"name": r["ComicPublisher"], "count": r["count"]} for r in publisher_rows if r.get("ComicPublisher")
@@ -169,24 +167,15 @@ def get_collection_patterns():
             patterns["top_publishers"] = [r["ComicPublisher"] for r in publisher_rows[:5] if r.get("ComicPublisher")]
 
         # Get series count
-        count_rows = db.DBConnection().select("SELECT COUNT(*) as count FROM comics WHERE Status = 'Active'")
-        if count_rows:
-            patterns["series_count"] = count_rows[0].get("count", 0)
+        patterns["series_count"] = ai_queries.get_active_series_count()
 
         # Get monitored series names (for context)
-        series_rows = db.DBConnection().select(
-            "SELECT ComicName FROM comics WHERE Status = 'Active' ORDER BY ComicSortName LIMIT 30"
-        )
-        if series_rows:
-            patterns["monitored_series"] = [r["ComicName"] for r in series_rows if r.get("ComicName")]
+        patterns["monitored_series"] = ai_queries.get_active_series_names()
 
         # Get average completion rate
-        completion_rows = db.DBConnection().select(
-            "SELECT AVG(CAST(Have AS FLOAT) / NULLIF(CAST(Total AS FLOAT), 0) * 100) as avg_pct "
-            "FROM comics WHERE Status = 'Active' AND Total > 0"
-        )
-        if completion_rows and completion_rows[0].get("avg_pct") is not None:
-            patterns["avg_completion"] = round(completion_rows[0]["avg_pct"], 1)
+        average_completion = ai_queries.get_active_completion_rate()
+        if average_completion is not None:
+            patterns["avg_completion"] = round(average_completion, 1)
 
     except Exception as e:
         logger.error("[AI-PULLLIST] Failed to gather collection patterns: %s" % e)
@@ -203,11 +192,7 @@ def get_cached_suggestions():
 def _get_weekly_releases():
     """Get this week's releases that are NOT currently tracked by the user."""
     try:
-        results = db.DBConnection().select(
-            "SELECT COMIC, PUBLISHER, ISSUE, STATUS FROM weekly "
-            "WHERE STATUS IS NULL OR STATUS = '' "
-            "ORDER BY PUBLISHER, COMIC LIMIT 100"
-        )
+        results = ai_queries.get_untracked_weekly_releases()
         return results if results else []
     except Exception as e:
         logger.error("[AI-PULLLIST] Failed to get weekly releases: %s" % e)
@@ -217,11 +202,9 @@ def _get_weekly_releases():
 def _get_cached_suggestions():
     """Retrieve cached suggestions if still fresh. Returns list or None."""
     try:
-        rows = db.DBConnection().select(
-            "SELECT data, expires_at FROM ai_cache WHERE cache_key = ? AND cache_type = ?", [CACHE_KEY, CACHE_TYPE]
-        )
-        if rows and rows[0].get("data"):
-            expires_at = rows[0].get("expires_at", "")
+        row = ai_queries.get_cache_entry(CACHE_KEY, CACHE_TYPE)
+        if row and row.get("data"):
+            expires_at = row.get("expires_at", "")
             if expires_at:
                 try:
                     expiry = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
@@ -229,7 +212,7 @@ def _get_cached_suggestions():
                         return None
                 except (ValueError, TypeError):
                     pass
-            return json.loads(rows[0]["data"])
+            return json.loads(row["data"])
     except Exception as e:
         logger.error("[AI-PULLLIST] Cache read error: %s" % e)
     return None
@@ -240,16 +223,12 @@ def _cache_suggestions(suggestions):
     try:
         now = datetime.utcnow()
         expires = now + timedelta(hours=CACHE_TTL_HOURS)
-        db.DBConnection().action(
-            "INSERT OR REPLACE INTO ai_cache (cache_key, cache_type, data, created_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [
-                CACHE_KEY,
-                CACHE_TYPE,
-                json.dumps(suggestions),
-                now.strftime("%Y-%m-%d %H:%M:%S"),
-                expires.strftime("%Y-%m-%d %H:%M:%S"),
-            ],
+        ai_queries.upsert_cache_entry(
+            CACHE_KEY,
+            CACHE_TYPE,
+            json.dumps(suggestions),
+            now.strftime("%Y-%m-%d %H:%M:%S"),
+            expires.strftime("%Y-%m-%d %H:%M:%S"),
         )
     except Exception as e:
         logger.error("[AI-PULLLIST] Cache write error: %s" % e)

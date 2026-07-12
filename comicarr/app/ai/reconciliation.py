@@ -19,7 +19,8 @@ If AI is not configured, existing behaviour (CV wins) is preserved.
 import time
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
 from comicarr.app.ai.enrichment import _write_comicinfo
 from comicarr.app.ai.sanitize import spotlight_wrap
@@ -175,16 +176,28 @@ def _store_reconciliation_history(issue_id, conflicts, resolved):
         if ai_value is None:
             continue
         # Row for comicinfo provider value
-        db.DBConnection().action(
-            "INSERT INTO ai_metadata_history "
-            "(entity_type, entity_id, field_name, original_value, ai_value, source, provider, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ["issue", issue_id, field, sources["comicinfo"], ai_value, "reconciliation", "comicinfo", now],
+        ai_queries.insert_metadata_history(
+            {
+                "entity_type": "issue",
+                "entity_id": issue_id,
+                "field_name": field,
+                "original_value": sources["comicinfo"],
+                "ai_value": ai_value,
+                "source": "reconciliation",
+                "provider": "comicinfo",
+                "created_at": now,
+            }
         )
         # Row for cv provider value
-        db.DBConnection().action(
-            "INSERT INTO ai_metadata_history "
-            "(entity_type, entity_id, field_name, original_value, ai_value, source, provider, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ["issue", issue_id, field, sources["cv"], ai_value, "reconciliation", "cv", now],
+        ai_queries.insert_metadata_history(
+            {
+                "entity_type": "issue",
+                "entity_id": issue_id,
+                "field_name": field,
+                "original_value": sources["cv"],
+                "ai_value": ai_value,
+                "source": "reconciliation",
+                "provider": "cv",
+                "created_at": now,
+            }
         )

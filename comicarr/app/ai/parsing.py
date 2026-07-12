@@ -15,7 +15,8 @@ for structured metadata extraction when regex-based parsing fails.
 import time
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
 from comicarr.app.ai.sanitize import sanitize_input
 from comicarr.app.ai.schemas import FilenameParse
@@ -122,24 +123,18 @@ def _validate_against_library(series_name):
         return False
 
     # Exact match first
-    result = db.DBConnection().select(
-        "SELECT ComicID FROM comics WHERE ComicName = ? OR DynamicComicName = ? LIMIT 1",
-        [series_name, series_name.lower().strip()],
-    )
+    result = ai_queries.find_exact_library_match(series_name, series_name.lower().strip())
     if result:
         return True
 
     # Case-insensitive match
-    result = db.DBConnection().select(
-        "SELECT ComicID FROM comics WHERE LOWER(ComicName) = LOWER(?) LIMIT 1", [series_name]
-    )
+    result = ai_queries.find_case_insensitive_library_match(series_name)
     if result:
         return True
 
     # Check AlternateSearch field (##-delimited)
-    result = db.DBConnection().select("SELECT AlternateSearch FROM comics WHERE AlternateSearch IS NOT NULL")
     search_lower = series_name.lower()
-    for row in result or []:
+    for row in ai_queries.get_alternate_search_values():
         alternates = (row.get("AlternateSearch") or "").split("##")
         for alt in alternates:
             if alt.strip().lower() == search_lower:

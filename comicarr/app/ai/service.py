@@ -15,7 +15,8 @@ import datetime
 import time
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 
 
 def log_activity(
@@ -35,24 +36,20 @@ def log_activity(
     success_str = "true" if success else "false"
 
     try:
-        db.DBConnection().action(
-            "INSERT INTO ai_activity_log "
-            "(timestamp, feature_type, action_description, model, prompt_tokens, "
-            "completion_tokens, latency_ms, success, error_message, entity_type, entity_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                timestamp,
-                feature_type,
-                action,
-                model,
-                prompt_tokens,
-                completion_tokens,
-                latency_ms,
-                success_str,
-                error_message,
-                entity_type,
-                entity_id,
-            ],
+        ai_queries.insert_activity(
+            {
+                "timestamp": timestamp,
+                "feature_type": feature_type,
+                "action_description": action,
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "latency_ms": latency_ms,
+                "success": success_str,
+                "error_message": error_message,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+            }
         )
     except Exception as e:
         logger.error("[AI-SERVICE] Failed to log activity: %s" % e)
@@ -80,10 +77,7 @@ def log_activity(
 def get_activity(limit=50, offset=0):
     """Read recent activity log entries."""
     try:
-        rows = db.DBConnection().select(
-            "SELECT * FROM ai_activity_log ORDER BY id DESC LIMIT ? OFFSET ?",
-            [limit, offset],
-        )
+        rows = ai_queries.get_activity(limit, offset)
         return rows if rows else []
     except Exception as e:
         logger.error("[AI-SERVICE] Failed to read activity log: %s" % e)

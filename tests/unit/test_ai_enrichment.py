@@ -11,9 +11,9 @@
 
 import os
 import zipfile
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import MagicMock, patch
 
 from comicarr.app.ai.enrichment import (
     ENRICHABLE_FIELDS,
@@ -45,16 +45,32 @@ _COMICINFO_TEMPLATE = """\
 """
 
 
-def _make_cbz(tmp_path, title="Batman #1", series="Batman", number="1",
-              publisher="DC Comics", year="2020", writer="Tom King",
-              penciller="David Finch", genre="", age_rating="",
-              filename="test.cbz", include_comicinfo=True):
+def _make_cbz(
+    tmp_path,
+    title="Batman #1",
+    series="Batman",
+    number="1",
+    publisher="DC Comics",
+    year="2020",
+    writer="Tom King",
+    penciller="David Finch",
+    genre="",
+    age_rating="",
+    filename="test.cbz",
+    include_comicinfo=True,
+):
     """Create a minimal CBZ with a ComicInfo.xml for testing."""
     cbz_path = os.path.join(str(tmp_path), filename)
     xml = _COMICINFO_TEMPLATE.format(
-        title=title, series=series, number=number, publisher=publisher,
-        year=year, writer=writer, penciller=penciller,
-        genre=genre, age_rating=age_rating,
+        title=title,
+        series=series,
+        number=number,
+        publisher=publisher,
+        year=year,
+        writer=writer,
+        penciller=penciller,
+        genre=genre,
+        age_rating=age_rating,
     )
     with zipfile.ZipFile(cbz_path, "w") as zf:
         if include_comicinfo:
@@ -86,10 +102,12 @@ def _make_mock_rate_limiter(can=True):
 # _read_comicinfo
 # ---------------------------------------------------------------------------
 
+
 class TestReadComicinfo:
     def test_reads_fields_from_cbz(self, tmp_path):
-        cbz_path = _make_cbz(tmp_path, series="Spider-Man", number="300",
-                             publisher="Marvel", genre="Superhero", age_rating="T+")
+        cbz_path = _make_cbz(
+            tmp_path, series="Spider-Man", number="300", publisher="Marvel", genre="Superhero", age_rating="T+"
+        )
         result = _read_comicinfo(cbz_path)
         assert result is not None
         assert result["Series"] == "Spider-Man"
@@ -119,6 +137,7 @@ class TestReadComicinfo:
 # _write_comicinfo
 # ---------------------------------------------------------------------------
 
+
 class TestWriteComicinfo:
     def test_writes_enriched_values(self, tmp_path):
         cbz_path = _make_cbz(tmp_path, genre="", age_rating="")
@@ -142,31 +161,27 @@ class TestWriteComicinfo:
 # _store_history
 # ---------------------------------------------------------------------------
 
+
 class TestStoreHistory:
-    @patch("comicarr.app.ai.enrichment.db")
-    def test_writes_to_ai_metadata_history(self, mock_db):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
+    @patch("comicarr.app.ai.enrichment.ai_queries")
+    def test_writes_to_ai_metadata_history(self, mock_queries):
 
         _store_history("12345", {"Genre": "Superhero", "AgeRating": "T+"})
-        assert conn.action.call_count == 2
+        assert mock_queries.insert_metadata_history.call_count == 2
 
-        # Check first call
-        call_args = conn.action.call_args_list[0]
-        sql = call_args[0][0]
-        params = call_args[0][1]
-        assert "INSERT INTO ai_metadata_history" in sql
-        assert params[0] == "issue"
-        assert params[1] == "12345"
-        assert params[2] == "Genre"
-        assert params[3] is None  # original_value
-        assert params[4] == "Superhero"
-        assert params[5] == "enrichment"
+        inserted = mock_queries.insert_metadata_history.call_args_list[0].args[0]
+        assert inserted["entity_type"] == "issue"
+        assert inserted["entity_id"] == "12345"
+        assert inserted["field_name"] == "Genre"
+        assert inserted["original_value"] is None
+        assert inserted["ai_value"] == "Superhero"
+        assert inserted["source"] == "enrichment"
 
 
 # ---------------------------------------------------------------------------
 # enrich_metadata
 # ---------------------------------------------------------------------------
+
 
 class TestEnrichMetadata:
     @patch("comicarr.app.ai.enrichment.comicarr")
@@ -205,8 +220,16 @@ class TestEnrichMetadata:
         mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
         # Create CBZ with all context fields blank
         cbz_path = _make_cbz(
-            tmp_path, title="", series="", number="", publisher="",
-            year="", writer="", penciller="", genre="", age_rating="",
+            tmp_path,
+            title="",
+            series="",
+            number="",
+            publisher="",
+            year="",
+            writer="",
+            penciller="",
+            genre="",
+            age_rating="",
         )
         assert enrich_metadata(cbz_path, "12345") == 0
 
@@ -224,9 +247,7 @@ class TestEnrichMetadata:
         cbz_path = _make_cbz(tmp_path, genre="Superhero", age_rating="")
 
         # AI returns both Genre and AgeRating — only AgeRating should be accepted
-        mock_req.return_value = MetadataEnrichment(
-            fields={"Genre": "Action", "AgeRating": "T+"}
-        )
+        mock_req.return_value = MetadataEnrichment(fields={"Genre": "Action", "AgeRating": "T+"})
 
         result = enrich_metadata(cbz_path, "12345")
         assert result == 1
@@ -282,9 +303,7 @@ class TestEnrichMetadata:
 
         cbz_path = _make_cbz(tmp_path, genre="", age_rating="")
 
-        mock_req.return_value = MetadataEnrichment(
-            fields={"Genre": "Superhero", "AgeRating": "T+"}
-        )
+        mock_req.return_value = MetadataEnrichment(fields={"Genre": "Superhero", "AgeRating": "T+"})
 
         result = enrich_metadata(cbz_path, "12345")
         assert result == 2
@@ -338,9 +357,7 @@ class TestEnrichMetadata:
         cbz_path = _make_cbz(tmp_path, genre="", age_rating="")
 
         # AI returns empty/whitespace values
-        mock_req.return_value = MetadataEnrichment(
-            fields={"Genre": "", "AgeRating": "   "}
-        )
+        mock_req.return_value = MetadataEnrichment(fields={"Genre": "", "AgeRating": "   "})
 
         result = enrich_metadata(cbz_path, "12345")
         assert result == 0
@@ -351,47 +368,38 @@ class TestEnrichMetadata:
 # revert_field
 # ---------------------------------------------------------------------------
 
+
 class TestRevertField:
-    @patch("comicarr.app.ai.enrichment.db")
-    def test_validates_issue_exists(self, mock_db):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
-        conn.select.return_value = []
+    @patch("comicarr.app.ai.enrichment.ai_queries")
+    def test_validates_issue_exists(self, mock_queries):
+        mock_queries.issue_exists.return_value = False
 
         with pytest.raises(ValueError, match="Issue .* not found"):
             revert_field("99999", "Genre", "/path/to/comic.cbz")
 
     @patch("comicarr.app.ai.enrichment._write_comicinfo")
-    @patch("comicarr.app.ai.enrichment.db")
-    def test_reverts_field_to_empty(self, mock_db, mock_write):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
-        conn.select.return_value = [{"IssueID": "12345"}]
+    @patch("comicarr.app.ai.enrichment.ai_queries")
+    def test_reverts_field_to_empty(self, mock_queries, mock_write):
+        mock_queries.issue_exists.return_value = True
 
         revert_field("12345", "Genre", "/path/to/comic.cbz")
 
         mock_write.assert_called_once_with("/path/to/comic.cbz", {"Genre": ""})
 
     @patch("comicarr.app.ai.enrichment._write_comicinfo")
-    @patch("comicarr.app.ai.enrichment.db")
-    def test_deletes_history_entry(self, mock_db, mock_write):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
-        conn.select.return_value = [{"IssueID": "12345"}]
+    @patch("comicarr.app.ai.enrichment.ai_queries")
+    def test_deletes_history_entry(self, mock_queries, mock_write):
+        mock_queries.issue_exists.return_value = True
 
         revert_field("12345", "Genre", "/path/to/comic.cbz")
 
-        # Second call should be the DELETE
-        delete_call = conn.action.call_args
-        sql = delete_call[0][0]
-        params = delete_call[0][1]
-        assert "DELETE FROM ai_metadata_history" in sql
-        assert params == ["issue", "12345", "Genre", "enrichment"]
+        mock_queries.delete_metadata_history.assert_called_once_with("issue", "12345", "Genre", "enrichment")
 
 
 # ---------------------------------------------------------------------------
 # ENRICHABLE_FIELDS constant
 # ---------------------------------------------------------------------------
+
 
 class TestEnrichableFields:
     def test_only_genre_and_age_rating(self):

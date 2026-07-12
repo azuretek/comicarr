@@ -19,7 +19,8 @@ import time
 import uuid
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
 from comicarr.app.ai.sanitize import sanitize_input
 from comicarr.app.ai.schemas import ReadingOrder
@@ -135,9 +136,7 @@ def enrich_with_providers(issues):
 
         try:
             # Search the comics table for a matching series
-            results = db.DBConnection().select(
-                "SELECT ComicID, ComicName FROM comics WHERE ComicName LIKE ? LIMIT 5", ["%%%s%%" % series_name]
-            )
+            results = ai_queries.find_series_candidates(series_name)
 
             if results:
                 # Take the best match (first result)
@@ -147,12 +146,9 @@ def enrich_with_providers(issues):
 
                 # Try to find the specific issue
                 if comic_id and issue_number:
-                    issue_results = db.DBConnection().select(
-                        "SELECT IssueID FROM issues WHERE ComicID = ? AND Issue_Number = ? LIMIT 1",
-                        [comic_id, issue_number],
-                    )
-                    if issue_results:
-                        issue["issue_id"] = issue_results[0].get("IssueID")
+                    issue_result = ai_queries.find_issue_by_comic_and_number(comic_id, issue_number)
+                    if issue_result:
+                        issue["issue_id"] = issue_result.get("IssueID")
 
         except Exception as e:
             logger.error('[AI-ARC] Provider enrichment error for "%s #%s": %s' % (series_name, issue_number, e))
@@ -178,16 +174,14 @@ def map_to_library(issues):
         try:
             # Check the issues table for this specific issue
             if issue_id:
-                result = db.DBConnection().select("SELECT Status FROM issues WHERE IssueID = ? LIMIT 1", [issue_id])
+                result = ai_queries.get_issue_status_by_id(issue_id)
             elif issue_number:
-                result = db.DBConnection().select(
-                    "SELECT Status FROM issues WHERE ComicID = ? AND Issue_Number = ? LIMIT 1", [comic_id, issue_number]
-                )
+                result = ai_queries.get_issue_status_by_comic_and_number(comic_id, issue_number)
             else:
                 result = None
 
             if result:
-                status = result[0].get("Status", "")
+                status = result.get("Status", "")
                 if status in ("Downloaded", "Archived"):
                     issue["library_status"] = "owned"
                 elif status == "Wanted":
@@ -234,26 +228,7 @@ def save_arc(arc_name, issues):
                 "DateAdded": now,
             }
 
-            db.DBConnection().action(
-                "INSERT OR REPLACE INTO storyarcs "
-                "(StoryArcID, StoryArc, ComicName, IssueNumber, IssueName, ReadingOrder, "
-                "ComicID, IssueID, Status, IssueArcID, Manual, DateAdded) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    values["StoryArcID"],
-                    values["StoryArc"],
-                    values["ComicName"],
-                    values["IssueNumber"],
-                    values["IssueName"],
-                    values["ReadingOrder"],
-                    values["ComicID"],
-                    values["IssueID"],
-                    values["Status"],
-                    values["IssueArcID"],
-                    values["Manual"],
-                    values["DateAdded"],
-                ],
-            )
+            ai_queries.replace_storyarc(values)
 
         logger.fdebug('[AI-ARC] Saved arc "%s" with %d issues (ID: %s)' % (arc_name, len(issues), arc_id))
         return {"success": True, "arc_id": arc_id}

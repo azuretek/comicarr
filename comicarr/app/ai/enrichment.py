@@ -23,7 +23,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
 from comicarr.app.ai.sanitize import sanitize_input, spotlight_wrap
 from comicarr.app.ai.schemas import MetadataEnrichment
@@ -222,28 +223,29 @@ def _store_history(issue_id, enriched_fields):
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     for field_name, ai_value in enriched_fields.items():
-        db.DBConnection().action(
-            "INSERT INTO ai_metadata_history "
-            "(entity_type, entity_id, field_name, original_value, ai_value, source, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ["issue", issue_id, field_name, None, ai_value, "enrichment", now],
+        ai_queries.insert_metadata_history(
+            {
+                "entity_type": "issue",
+                "entity_id": issue_id,
+                "field_name": field_name,
+                "original_value": None,
+                "ai_value": ai_value,
+                "source": "enrichment",
+                "created_at": now,
+            }
         )
 
 
 def revert_field(issue_id, field_name, cbz_path):
     """Revert an AI-enriched field back to blank."""
     # Validate issue exists
-    issue = db.DBConnection().select("SELECT IssueID FROM issues WHERE IssueID = ?", [issue_id])
-    if not issue:
+    if not ai_queries.issue_exists(issue_id):
         raise ValueError("Issue %s not found" % issue_id)
 
     # Remove enriched value from CBZ (set field to empty)
     _write_comicinfo(cbz_path, {field_name: ""})
 
     # Delete history entry
-    db.DBConnection().action(
-        "DELETE FROM ai_metadata_history WHERE entity_type = ? AND entity_id = ? AND field_name = ? AND source = ?",
-        ["issue", issue_id, field_name, "enrichment"],
-    )
+    ai_queries.delete_metadata_history("issue", issue_id, field_name, "enrichment")
 
     logger.fdebug("[AI-ENRICH] Reverted %s for issue %s" % (field_name, issue_id))

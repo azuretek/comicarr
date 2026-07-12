@@ -18,6 +18,7 @@ from comicarr.app.core.context import AppContext, get_context
 from comicarr.app.core.security import require_session
 from comicarr.app.storyarcs import service as storyarcs_service
 from comicarr.app.system import service as system_service
+from comicarr.app.weekly import queries as weekly_queries
 
 router = APIRouter(prefix="/api/weekly", tags=["weekly"])
 
@@ -26,15 +27,11 @@ router = APIRouter(prefix="/api/weekly", tags=["weekly"])
 @router.get("/", dependencies=[Depends(require_session)])
 def get_weekly(ctx: AppContext = Depends(get_context)):
     """Return industry releases for the application current Sunday-based week."""
-    from comicarr import db, logger
+    from comicarr import logger
 
     try:
         week, year = storyarcs_service.get_current_week()
-        rows = db.DBConnection().select(
-            "SELECT COMIC, ISSUE, PUBLISHER, SHIPDATE, STATUS, ComicID, IssueID "
-            "FROM weekly WHERE weeknumber = ? AND year = ? ORDER BY COMIC ASC",
-            [str(int(week)), year],
-        )
+        rows = weekly_queries.get_weekly_releases(week, year)
         return rows or []
     except Exception as e:
         logger.error("[WEEKLY] Error fetching weekly data: %s" % e)

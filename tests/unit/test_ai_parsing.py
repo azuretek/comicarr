@@ -18,6 +18,7 @@ from comicarr.app.ai.schemas import FilenameParse
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_mock_config():
     cfg = MagicMock()
     cfg.AI_MODEL = "gpt-4o-mini"
@@ -49,6 +50,7 @@ def _make_ai_result(series="Batman", issue="42", year="2024", volume=None):
 # ---------------------------------------------------------------------------
 # _build_parse_dict
 # ---------------------------------------------------------------------------
+
 
 class TestBuildParseDict:
     def test_correct_keys_and_status(self):
@@ -93,44 +95,36 @@ class TestBuildParseDict:
 # _validate_against_library
 # ---------------------------------------------------------------------------
 
+
 class TestValidateAgainstLibrary:
-    @patch("comicarr.app.ai.parsing.db")
-    def test_exact_match(self, mock_db):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
-        conn.select.return_value = [{"ComicID": "123"}]
+    @patch("comicarr.app.ai.parsing.ai_queries")
+    def test_exact_match(self, mock_queries):
+        mock_queries.find_exact_library_match.return_value = {"ComicID": "123"}
 
         assert _validate_against_library("Batman") is True
-        conn.select.assert_called_once()
+        mock_queries.find_exact_library_match.assert_called_once_with("Batman", "batman")
 
-    @patch("comicarr.app.ai.parsing.db")
-    def test_case_insensitive_match(self, mock_db):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
-        # First call (exact) returns nothing, second (case insensitive) returns match
-        conn.select.side_effect = [[], [{"ComicID": "456"}]]
+    @patch("comicarr.app.ai.parsing.ai_queries")
+    def test_case_insensitive_match(self, mock_queries):
+        mock_queries.find_exact_library_match.return_value = None
+        mock_queries.find_case_insensitive_library_match.return_value = {"ComicID": "456"}
 
         assert _validate_against_library("batman") is True
-        assert conn.select.call_count == 2
+        mock_queries.find_case_insensitive_library_match.assert_called_once_with("batman")
 
-    @patch("comicarr.app.ai.parsing.db")
-    def test_alternate_search_match(self, mock_db):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
-        # Exact: no match, case-insensitive: no match, alternate search: has data
-        conn.select.side_effect = [
-            [],
-            [],
-            [{"AlternateSearch": "Dark Knight##The Batman##TDK"}],
-        ]
+    @patch("comicarr.app.ai.parsing.ai_queries")
+    def test_alternate_search_match(self, mock_queries):
+        mock_queries.find_exact_library_match.return_value = None
+        mock_queries.find_case_insensitive_library_match.return_value = None
+        mock_queries.get_alternate_search_values.return_value = [{"AlternateSearch": "Dark Knight##The Batman##TDK"}]
 
         assert _validate_against_library("The Batman") is True
 
-    @patch("comicarr.app.ai.parsing.db")
-    def test_no_match(self, mock_db):
-        conn = MagicMock()
-        mock_db.DBConnection.return_value = conn
-        conn.select.side_effect = [[], [], []]
+    @patch("comicarr.app.ai.parsing.ai_queries")
+    def test_no_match(self, mock_queries):
+        mock_queries.find_exact_library_match.return_value = None
+        mock_queries.find_case_insensitive_library_match.return_value = None
+        mock_queries.get_alternate_search_values.return_value = []
 
         assert _validate_against_library("NonexistentComic") is False
 
@@ -142,6 +136,7 @@ class TestValidateAgainstLibrary:
 # ---------------------------------------------------------------------------
 # ai_parse_filename
 # ---------------------------------------------------------------------------
+
 
 class TestAiParseFilename:
     """Tests for the main ai_parse_filename entry point."""
@@ -294,12 +289,24 @@ class TestAiParseFilename:
 
         # Keys required by listFiles() justparse path
         required_keys = [
-            "parse_status", "sub", "comicfilename", "comiclocation",
-            "series_name", "series_name_decoded", "issueid",
-            "alt_series", "alt_issue", "dynamic_name",
-            "series_volume", "issue_year", "issue_number",
-            "scangroup", "reading_order", "booktype",
-            "justthedigits", "annual_comicid",
+            "parse_status",
+            "sub",
+            "comicfilename",
+            "comiclocation",
+            "series_name",
+            "series_name_decoded",
+            "issueid",
+            "alt_series",
+            "alt_issue",
+            "dynamic_name",
+            "series_volume",
+            "issue_year",
+            "issue_number",
+            "scangroup",
+            "reading_order",
+            "booktype",
+            "justthedigits",
+            "annual_comicid",
         ]
         for key in required_keys:
             assert key in result, "Missing key: %s" % key

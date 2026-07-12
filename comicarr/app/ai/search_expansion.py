@@ -21,7 +21,8 @@ import time
 from datetime import datetime
 
 import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
 from comicarr.app.ai.sanitize import sanitize_input
 from comicarr.app.ai.schemas import SearchExpansion
@@ -130,16 +131,19 @@ def persist_successful_expansion(comic_id, successful_alternate):
     current = _get_alternate_search(comic_id)
     if successful_alternate.lower() not in {a.lower() for a in current}:
         new_value = "##".join(current + [successful_alternate]) if current else successful_alternate
-        db.DBConnection().action("UPDATE comics SET AlternateSearch = ? WHERE ComicID = ?", [new_value, comic_id])
+        ai_queries.update_alternate_search(comic_id, new_value)
 
     # Track in ai_cache for counting AI expansions
     existing = _get_ai_expansions(comic_id)
     existing.append(successful_alternate)
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-    db.DBConnection().action(
-        "INSERT OR REPLACE INTO ai_cache (cache_key, cache_type, data, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
-        ["expansion_%s" % comic_id, "expansion", json.dumps(existing), now, "9999-12-31"],
+    ai_queries.upsert_cache_entry(
+        "expansion_%s" % comic_id,
+        "expansion",
+        json.dumps(existing),
+        now,
+        "9999-12-31",
     )
 
     logger.fdebug('[AI-SEARCH] Persisted expansion "%s" for comic %s' % (successful_alternate, comic_id))
@@ -147,20 +151,18 @@ def persist_successful_expansion(comic_id, successful_alternate):
 
 def _get_alternate_search(comic_id):
     """Get current AlternateSearch values for a comic."""
-    result = db.DBConnection().select("SELECT AlternateSearch FROM comics WHERE ComicID = ?", [comic_id])
-    if result and result[0].get("AlternateSearch"):
-        return [a.strip() for a in result[0]["AlternateSearch"].split("##") if a.strip()]
+    result = ai_queries.get_alternate_search(comic_id)
+    if result and result.get("AlternateSearch"):
+        return [a.strip() for a in result["AlternateSearch"].split("##") if a.strip()]
     return []
 
 
 def _get_ai_expansions(comic_id):
     """Get AI-generated expansions from cache."""
-    result = db.DBConnection().select(
-        "SELECT data FROM ai_cache WHERE cache_key = ? AND cache_type = ?", ["expansion_%s" % comic_id, "expansion"]
-    )
-    if result and result[0].get("data"):
+    result = ai_queries.get_cache_entry("expansion_%s" % comic_id, "expansion")
+    if result and result.get("data"):
         try:
-            return json.loads(result[0]["data"])
+            return json.loads(result["data"])
         except (json.JSONDecodeError, TypeError):
             pass
     return []
