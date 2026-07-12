@@ -32,6 +32,7 @@ from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
+from comicarr.app.core.schema import current_revision, upgrade_database
 from comicarr.tables import UPSERT_KEYS, metadata
 
 
@@ -270,10 +271,11 @@ def migrate(source_url, target_url, batch_size=5000):
         if host_part not in ("localhost", "127.0.0.1", "::1"):
             print(f"  WARNING: Target host is '{host_part}' (non-localhost)")
 
-    # Create tables on target
-    print("Creating tables on target...")
-    metadata.create_all(target_engine)
-    print("  Tables created.")
+    # The target must have a reviewed schema history before any data crosses
+    # dialects. Never bypass this with metadata.create_all().
+    print("Upgrading target to Alembic head...")
+    target_head = upgrade_database(target_engine)
+    print(f"  Target is at revision {target_head}.")
 
     source_inspector = inspect(source_engine)
     source_tables = set(source_inspector.get_table_names())
@@ -400,6 +402,10 @@ def migrate(source_url, target_url, batch_size=5000):
             match = "MISMATCH"
             verify_ok = False
         print(f"  {table_name:25s}  source={src_count:>8,d}  target={tgt_count:>8,d}  {match}")
+
+    if current_revision(target_engine) != target_head:
+        verify_ok = False
+        print("  schema revision  target is no longer at the expected Alembic head  FAILED")
 
     print("\n=== Migration Summary ===")
     print(f"  Total rows migrated: {total_migrated:,d}")
