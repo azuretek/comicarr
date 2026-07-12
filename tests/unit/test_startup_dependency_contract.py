@@ -28,6 +28,7 @@ def test_cli_help_runs_without_starting_the_application():
         cwd=ROOT_DIR,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 0, result.stderr

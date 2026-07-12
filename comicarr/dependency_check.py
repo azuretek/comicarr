@@ -38,7 +38,7 @@ class RuntimeCapabilityDiagnostics:
 
         if comicarr.CONFIG.UNRAR_CMD:
             commands.append(comicarr.CONFIG.UNRAR_CMD)
-            logger.fdebug("unrar_cmd location added to cmd checker: %s" % comicarr.CONFIG.UNRAR_CMD)
+            logger.fdebug("[DEPENDENCY-CHECK] unrar_cmd location added to cmd checker: %s" % comicarr.CONFIG.UNRAR_CMD)
 
         settings_path = os.path.join(comicarr.CONFIG.CT_SETTINGSPATH, "settings")
         config = configparser.ConfigParser()
@@ -48,9 +48,11 @@ class RuntimeCapabilityDiagnostics:
                 configured_path = config.get("settings", "rar_exe_path", fallback=None)
                 if configured_path:
                     commands.append(configured_path)
-                    logger.fdebug("comictagger .settings file path added to cmd checker: %s" % configured_path)
+                    logger.fdebug(
+                        "[DEPENDENCY-CHECK] comictagger .settings file path added to cmd checker: %s" % configured_path
+                    )
         except (OSError, configparser.Error) as e:
-            logger.fdebug("Unable to read comictagger settings: %s" % e)
+            logger.fdebug("[DEPENDENCY-CHECK] Unable to read comictagger settings: %s" % e)
 
         if platform.system() == "Windows":
             commands.append("RaR")
@@ -61,7 +63,7 @@ class RuntimeCapabilityDiagnostics:
         for command in self._unrar_candidates():
             executable = shutil.which(command)
             if executable:
-                logger.fdebug("Found unrar executable: %s" % executable)
+                logger.fdebug("[DEPENDENCY-CHECK] Found unrar executable: %s" % executable)
                 comicarr.REQS["rar"] = {"rar_failure": False, "rar_message": executable}
                 return
 
@@ -75,5 +77,5 @@ class RuntimeCapabilityDiagnostics:
         except OSError:
             messages = None
 
-        logger.info("release_messages: %s" % (messages,))
+        logger.info("[DEPENDENCY-CHECK] release_messages: %s" % (messages,))
         comicarr.REQS["release_messages"] = messages
