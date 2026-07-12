@@ -19,7 +19,7 @@
 Manga library scanner — walks MANGA_DIR, groups files by series,
 matches against MangaDex metadata, and populates the library.
 
-Mirrors librarysync.py but for manga content.
+Provides the manga-specific counterpart to the retired comic library scanner.
 """
 
 import os
