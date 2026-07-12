@@ -44,7 +44,7 @@ from comicarr.app.common.dates import normalize_utc_datetime
 from comicarr.app.core.security import LoginRateLimiter
 from comicarr.tables import comics, jobhistory, storyarcs
 
-# Shared rate limiter instance (same object used by CherryPy and FastAPI)
+# Shared rate limiter instance for authentication endpoints.
 _rate_limiter = LoginRateLimiter()
 _fallback_weekly_refresh_lock = threading.Lock()
 

@@ -10,9 +10,8 @@
 """
 FastAPI middleware — CSRF protection, security headers, setup gate.
 
-CSRF is a global middleware (not per-route) so it's impossible to forget
-when adding new routes. During transition, CherryPy's tools.csrf is
-disabled under the WSGI bridge to avoid double-checking.
+CSRF is global middleware (not per-route), so it is impossible to forget
+when adding new routes.
 """
 
 from starlette.middleware.base import BaseHTTPMiddleware

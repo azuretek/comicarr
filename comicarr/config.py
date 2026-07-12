@@ -162,7 +162,6 @@ _CONFIG_DEFINITIONS = OrderedDict(
         "AUTHENTICATION": (int, "Interface", 2),
         "LOGIN_TIMEOUT": (int, "Interface", 43800),
         "ALPHAINDEX": (bool, "Interface", True),
-        "CHERRYPY_LOGGING": (bool, "Interface", False),
         "API_ENABLED": (bool, "API", False),
         "API_KEY": (str, "API", None),
         "CALENDAR_DEFAULT_DAYS": (int, "API", 90),

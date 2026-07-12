@@ -102,7 +102,7 @@ def create_session_token(username, secret_key, generation, login_timeout=43800):
 
 
 def validate_jwt_token(token, secret_key, current_generation):
-    """Single validation function shared by FastAPI AND CherryPy shim.
+    """Validate a JWT session token for the FastAPI application.
 
     Returns the username on success, None on failure.
     """

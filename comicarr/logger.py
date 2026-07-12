@@ -236,8 +236,6 @@ else:
         logging.getLogger("apscheduler.threadpool").setLevel(logging.WARN)
         logging.getLogger("apscheduler.scheduler").propagate = False
         logging.getLogger("apscheduler.threadpool").propagate = False
-        logging.getLogger("cherrypy").propagate = False
-
         # Close and remove old handlers. This is required to reinit the loggers
         # at runtime
         for handler in logger.handlers[:]:
@@ -357,3 +355,26 @@ else:
     message = logger.info
     exception = logger.exception
     fdebug = logger.debug
+
+
+def configure_log_level(level):
+    """Reconfigure application logging without depending on a web controller."""
+    if level is None:
+        level = 1
+    comicarr.LOG_LEVEL = level
+    if LOG_LANG.startswith("en"):
+        initLogger(
+            console=comicarr.QUIET if level == 0 else not comicarr.QUIET,
+            log_dir=comicarr.CONFIG.LOG_DIR,
+            max_logsize=comicarr.CONFIG.MAX_LOGSIZE,
+            max_logfiles=comicarr.CONFIG.MAX_LOGFILES,
+            loglevel=level,
+        )
+    else:
+        comicarr_log.stopLogger()
+        comicarr_log.initLogger(
+            loglevel=level,
+            log_dir=comicarr.CONFIG.LOG_DIR,
+            max_logsize=comicarr.CONFIG.MAX_LOGSIZE,
+            max_logfiles=comicarr.CONFIG.MAX_LOGFILES,
+        )

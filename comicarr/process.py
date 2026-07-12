@@ -85,10 +85,6 @@ class Process(object):
                 while True:
                     if chk[0]["mode"] == "fail":
                         logger.info("Initiating Failed Download handling")
-                        if chk[0]["annchk"] == "no":
-                            mode = "want"
-                        else:
-                            mode = "want_ann"
                         self.failed = True
                         break
                     elif chk[0]["mode"] == "stop":
@@ -113,19 +109,9 @@ class Process(object):
                 failchk = ppqueue.get()
                 if failchk[0]["mode"] == "retry":
                     logger.info("Attempting to return to search module with " + str(failchk[0]["issueid"]))
-                    if failchk[0]["annchk"] == "no":
-                        mode = "want"
-                    else:
-                        mode = "want_ann"
-                    qq = comicarr.webserve.WebInterface()
-                    qq.queueit(
-                        mode=mode,
-                        ComicName=failchk[0]["comicname"],
-                        ComicIssue=failchk[0]["issuenumber"],
-                        ComicID=failchk[0]["comicid"],
-                        IssueID=failchk[0]["issueid"],
-                        manualsearch=True,
-                    )
+                    from comicarr.app.search.commands import enqueue_failed_download_retry
+
+                    enqueue_failed_download_retry(failchk[0])
                 elif failchk[0]["mode"] == "stop":
                     pass
                 else:
@@ -140,10 +126,6 @@ class Process(object):
             while True:
                 if chk[0]["mode"] == "fail":
                     logger.info("Initiating Failed Download handling")
-                    if chk[0]["annchk"] == "no":
-                        mode = "want"
-                    else:
-                        mode = "want_ann"
                     self.failed = True
                     break
                 elif chk[0]["mode"] == "stop":

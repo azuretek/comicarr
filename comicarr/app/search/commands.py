@@ -218,6 +218,39 @@ def enqueue_search_command(
     return command
 
 
+def enqueue_failed_download_retry(
+    failure,
+    *,
+    work_queue=None,
+    ledger=None,
+    run_id=None,
+    maintenance=None,
+):
+    """Persist and dispatch a manual retry from legacy failed-download data."""
+    if not isinstance(failure, Mapping):
+        raise SearchCommandError("Failed-download retry must be an object")
+
+    values = {str(key).lower(): value for key, value in failure.items()}
+    entity_type = "annual" if str(values.get("annchk", "no")).strip().lower() != "no" else "issue"
+    return enqueue_search_command(
+        {
+            "issueid": values.get("issueid"),
+            "comicid": values.get("comicid"),
+            "comicname": values.get("comicname"),
+            "issuenumber": values.get("issuenumber"),
+            "manual": True,
+            "entity_type": entity_type,
+        },
+        trigger="failed_download_retry",
+        work_queue=work_queue,
+        ledger=ledger,
+        run_id=run_id,
+        maintenance=maintenance,
+        scope_type=entity_type,
+        scope_id=values.get("issueid"),
+    )
+
+
 def _put_with_maintenance_lease(command, work_queue, maintenance=None):
     from comicarr.app.acquisition.maintenance import MaintenanceController
 

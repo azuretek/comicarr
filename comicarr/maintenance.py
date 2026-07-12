@@ -506,9 +506,8 @@ class Maintenance(object):
             self.sql_close_db()
 
     def toggle_logging(self, level):
-        # force set logging to warning level only so the progress indicator can be displayed in console
-        wc = comicarr.webserve.WebInterface()
-        wc.toggleVerbose(level=level)
+        """Temporarily reconfigure logging for maintenance progress output."""
+        logger.configure_log_level(level)
 
     def backup_files(self, cfg=False, dbs=False, backupinfo=None):
         cfgloop = []

@@ -419,21 +419,39 @@ class SABnzbd(object):
                     logger.warn("[Sabnzbd Completed History Removal] Unable to remove item from history..")
 
     def sab_versioncheck(self):
+        params = {"mode": "version", "output": "json", "apikey": comicarr.CONFIG.SAB_APIKEY}
         try:
-            sc = comicarr.webserve.WebInterface()
-            sab_check = sc.SABtest(
-                sabhost=comicarr.CONFIG.SAB_HOST,
-                sabusername=comicarr.CONFIG.SAB_USERNAME,
-                sabpassword=comicarr.CONFIG.SAB_PASSWORD,
-                sabapikey=comicarr.CONFIG.SAB_APIKEY,
+            response = requests.get(
+                self.sab_url,
+                params=params,
+                verify=comicarr.CONFIG.SAB_VERIFY,
+                timeout=30,
             )
         except Exception as e:
             logger.warn(
                 "[SABNZBD-VERSION-TEST] Exception encountered trying to retrieve SABnzbd version: %s. Setting history length to last 200 items."
                 % e
             )
-            sab_check = "some value"
-        else:
-            sab_check = None
+            return "some value"
 
-        return sab_check
+        if response.status_code != 200:
+            logger.warn(
+                "[SABNZBD-VERSION-TEST] SABnzbd version endpoint returned status %s. Setting history length to last 200 items."
+                % response.status_code
+            )
+            return "some value"
+
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            version = response.text.strip()
+        else:
+            version = payload.get("version") if isinstance(payload, dict) else response.text.strip()
+
+        if not version:
+            logger.warn("[SABNZBD-VERSION-TEST] SABnzbd returned no version. Setting history length to last 200 items.")
+            return "some value"
+
+        comicarr.CONFIG.SAB_VERSION = str(version)
+        logger.fdebug("[SABNZBD-VERSION-TEST] Detected SABnzbd version: %s" % comicarr.CONFIG.SAB_VERSION)
+        return None
