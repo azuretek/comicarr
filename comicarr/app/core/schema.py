@@ -1,0 +1,347 @@
+#  Copyright (C) 2026 Comicarr contributors
+#
+#  This file is part of Comicarr.
+#
+#  Comicarr is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+
+"""Application-owned Alembic migration entry points and adoption checks."""
+
+from __future__ import annotations
+
+from enum import Enum
+from pathlib import Path
+
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from sqlalchemy import Column, insert, inspect, select, text
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from alembic import command
+from comicarr.db import get_engine
+from comicarr.tables import metadata
+
+
+class DatabaseState(str, Enum):
+    """The only database states that the automatic runner accepts."""
+
+    FRESH = "fresh"
+    VERSIONED = "versioned"
+    LEGACY = "legacy"
+
+
+class MigrationStateError(RuntimeError):
+    """A nonempty database failed the conservative adoption fingerprint."""
+
+
+_ALEMBIC_VERSION_TABLE = "alembic_version"
+_LEGACY_ONLY_TABLES = {"readinglist"}
+_REQUIRED_LEGACY_TABLES = {"comics", "issues", "annuals", "mylar_info"}
+_REQUIRED_LEGACY_COLUMNS = {
+    "comics": {"ComicID", "ComicName"},
+    "issues": {"IssueID", "ComicID", "ComicName"},
+    "annuals": {"IssueID", "Issue_Number"},
+    "mylar_info": {"DatabaseVersion"},
+}
+_READINGLIST_TO_STORYARCS_COLUMNS = (
+    "StoryArcID",
+    "ComicName",
+    "IssueNumber",
+    "SeriesYear",
+    "IssueYEAR",
+    "StoryArc",
+    "TotalIssues",
+    "Status",
+    "inCacheDir",
+    "Location",
+    "IssueArcID",
+    "ReadingOrder",
+    "IssueID",
+    "ComicID",
+    "ReleaseDate",
+    "IssueDate",
+    "Publisher",
+    "IssuePublisher",
+    "IssueName",
+    "CV_ArcID",
+    "Int_IssueNumber",
+    "DynamicComicName",
+    "Volume",
+    "Manual",
+)
+
+
+def _application_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _legacy_fingerprint_error(engine: Engine) -> str | None:
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    allowed_tables = set(metadata.tables) | _LEGACY_ONLY_TABLES
+    unexpected = sorted(table_names - allowed_tables)
+    if unexpected:
+        return "contains unrecognized tables: %s" % ", ".join(unexpected)
+
+    missing = sorted(_REQUIRED_LEGACY_TABLES - table_names)
+    if missing:
+        return "is missing required Comicarr tables: %s" % ", ".join(missing)
+
+    for table_name, required_columns in _REQUIRED_LEGACY_COLUMNS.items():
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            return "%s is missing identifying columns: %s" % (table_name, ", ".join(missing_columns))
+
+    expected_columns = {name: {column.name for column in table.columns} for name, table in metadata.tables.items()}
+    for table_name in table_names - _LEGACY_ONLY_TABLES:
+        actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        unknown_columns = sorted(actual_columns - expected_columns[table_name])
+        if unknown_columns:
+            return "%s has unrecognized columns: %s" % (table_name, ", ".join(unknown_columns))
+
+    with engine.connect() as connection:
+        has_control_row = connection.execute(text("SELECT 1 FROM mylar_info LIMIT 1")).first() is not None
+    if not has_control_row:
+        return "is missing the mylar_info control row"
+    return None
+
+
+def classify_database(engine: Engine | None = None) -> DatabaseState:
+    """Classify a database before any Alembic stamp or schema mutation.
+
+    A legacy database is accepted only when it matches a conservative Comicarr
+    fingerprint. Everything else fails closed so a database from another
+    application can never be stamped accidentally.
+    """
+
+    engine = engine or get_engine()
+    table_names = set(inspect(engine).get_table_names())
+    if not table_names:
+        return DatabaseState.FRESH
+    if _ALEMBIC_VERSION_TABLE in table_names:
+        return DatabaseState.VERSIONED
+
+    error = _legacy_fingerprint_error(engine)
+    if error:
+        raise MigrationStateError("database is not a recognized Comicarr database and will not be adopted: %s" % error)
+    return DatabaseState.LEGACY
+
+
+def alembic_config(engine: Engine | None = None, connection=None) -> Config:
+    """Create Alembic configuration without duplicating application credentials."""
+
+    root = _application_root()
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "alembic"))
+    config.attributes["engine"] = engine or get_engine()
+    if connection is not None:
+        config.attributes["connection"] = connection
+    return config
+
+
+def current_revision(engine: Engine | None = None) -> str | None:
+    """Return the current Alembic revision without creating a second engine."""
+
+    engine = engine or get_engine()
+    with engine.connect() as connection:
+        return MigrationContext.configure(connection).get_current_revision()
+
+
+def _copy_column_for_add(column):
+    """Return the portable portion of a declared column for Alembic ADD COLUMN."""
+
+    return Column(
+        column.name,
+        column.type,
+        nullable=column.nullable,
+        server_default=column.server_default,
+    )
+
+
+def _has_single_column_unique_enforcement(connection: Connection, table_name: str, column_name: str) -> bool:
+    """Return whether a legacy table enforces a declared ``unique=True`` column."""
+
+    inspector = inspect(connection)
+    expected_columns = [column_name]
+    for constraint in inspector.get_unique_constraints(table_name):
+        if constraint.get("column_names") == expected_columns:
+            return True
+    for index in inspector.get_indexes(table_name):
+        if index.get("unique") and index.get("column_names") == expected_columns:
+            dialect_options = index.get("dialect_options") or {}
+            if not any(name.endswith("_where") and value is not None for name, value in dialect_options.items()):
+                return True
+    return False
+
+
+def _add_missing_single_column_unique_constraints(connection: Connection) -> None:
+    """Restore unique enforcement that ``create_all(checkfirst=True)`` cannot add."""
+
+    quote = connection.dialect.identifier_preparer.quote_identifier
+    for table in metadata.sorted_tables:
+        for column in table.columns:
+            if not column.unique or _has_single_column_unique_enforcement(connection, table.name, column.name):
+                continue
+            index_name = "uq_%s_%s" % (table.name, column.name.lower())
+            try:
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX %s ON %s (%s)" % (quote(index_name), quote(table.name), quote(column.name))
+                    )
+                )
+            except SQLAlchemyError as error:
+                raise MigrationStateError(
+                    "legacy adoption could not restore unique enforcement for %s.%s" % (table.name, column.name)
+                ) from error
+
+
+def apply_legacy_schema_compatibility(connection: Connection) -> None:
+    """Apply the reviewed, non-destructive structural legacy adoption step.
+
+    This function is called exclusively from revision ``0002_legacy_adoption``.
+    It intentionally rejects additions that need a non-null value for existing
+    rows; those require a separately reviewed migration instead of a hidden
+    startup repair.
+    """
+
+    from alembic import op
+
+    original_tables = set(inspect(connection).get_table_names())
+    migrate_readinglist = "readinglist" in original_tables and "storyarcs" not in original_tables
+    metadata.create_all(connection, checkfirst=True)
+    inspector = inspect(connection)
+    for table in metadata.sorted_tables:
+        existing_columns = {column["name"] for column in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing_columns:
+                continue
+            if not column.nullable and column.server_default is None:
+                raise MigrationStateError(
+                    "legacy adoption requires a value for %s.%s; run an explicit repair before upgrading"
+                    % (table.name, column.name)
+                )
+            op.add_column(table.name, _copy_column_for_add(column))
+
+    for table in metadata.sorted_tables:
+        for index in table.indexes:
+            index.create(connection, checkfirst=True)
+
+    _add_missing_single_column_unique_constraints(connection)
+
+    if migrate_readinglist:
+        _migrate_readinglist_to_storyarcs(connection)
+
+    # Legacy atomic-upsert tables need either a unique constraint or a SQLite
+    # partial index. The existing helper performs its documented backup before
+    # deterministic de-duplication and raises if enforcement cannot be proven.
+    import comicarr
+
+    comicarr._migrate_unique_constraints(connection)
+
+    _seed_acquisition_schema_ledger(connection)
+
+
+def _migrate_readinglist_to_storyarcs(connection: Connection) -> None:
+    """Move the one known reading-list layout without guessing at source data."""
+
+    available_columns = {column["name"] for column in inspect(connection).get_columns("readinglist")}
+    missing_columns = sorted(set(_READINGLIST_TO_STORYARCS_COLUMNS) - available_columns)
+    if missing_columns:
+        raise MigrationStateError(
+            "readinglist does not match the supported legacy layout; missing columns: %s" % ", ".join(missing_columns)
+        )
+    columns = ", ".join(_READINGLIST_TO_STORYARCS_COLUMNS)
+    connection.execute(text("INSERT INTO storyarcs(%s) SELECT %s FROM readinglist" % (columns, columns)))
+    connection.execute(text("DROP TABLE readinglist"))
+
+
+def _seed_acquisition_schema_ledger(connection: Connection) -> None:
+    """Record the current acquisition shape inside the same Alembic connection."""
+
+    from datetime import datetime, timezone
+
+    from comicarr.app.acquisition.maintenance import (
+        CONTROL_ID,
+        RECONCILIATION_CONTROL_ID,
+        SCHEMA_COMPONENT,
+        SCHEMA_VERSION,
+    )
+    from comicarr.tables import acquisition_maintenance, acquisition_reconciliation, acquisition_schema_versions
+
+    now = datetime.now(timezone.utc).isoformat()
+    recorded_versions = set(
+        connection.execute(
+            select(acquisition_schema_versions.c.version).where(
+                acquisition_schema_versions.c.component == SCHEMA_COMPONENT
+            )
+        ).scalars()
+    )
+    for version in range(1, SCHEMA_VERSION + 1):
+        if version not in recorded_versions:
+            connection.execute(
+                insert(acquisition_schema_versions).values(
+                    component=SCHEMA_COMPONENT,
+                    version=version,
+                    applied_at=now,
+                )
+            )
+
+    if (
+        connection.execute(
+            select(acquisition_maintenance.c.control_id).where(acquisition_maintenance.c.control_id == CONTROL_ID)
+        ).first()
+        is None
+    ):
+        connection.execute(
+            insert(acquisition_maintenance).values(
+                control_id=CONTROL_ID,
+                epoch=0,
+                active=0,
+                owner=None,
+                run_id=None,
+                reason=None,
+                acquired_at=None,
+                heartbeat_at=None,
+                released_at=None,
+            )
+        )
+    if (
+        connection.execute(
+            select(acquisition_reconciliation.c.control_id).where(
+                acquisition_reconciliation.c.control_id == RECONCILIATION_CONTROL_ID
+            )
+        ).first()
+        is None
+    ):
+        connection.execute(
+            insert(acquisition_reconciliation).values(
+                control_id=RECONCILIATION_CONTROL_ID,
+                state="ready",
+                reason=None,
+                updated_at=now,
+            )
+        )
+
+
+def upgrade_database(engine: Engine | None = None) -> str | None:
+    """Adopt a recognized database and upgrade it to the reviewed Alembic head."""
+
+    engine = engine or get_engine()
+    state = classify_database(engine)
+    with engine.connect() as connection:
+        config = alembic_config(engine, connection)
+        if state is DatabaseState.LEGACY:
+            command.stamp(config, "0001_baseline")
+        command.upgrade(config, "head")
+    # Alembic owns mutation; the acquisition component now only validates its
+    # operational ledger and projects the fail-closed worker gate.
+    from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
+
+    acquisition_status = ensure_acquisition_schema(engine)
+    if not acquisition_status.ready:
+        raise RuntimeError("acquisition schema verification failed: %s" % acquisition_status.error)
+    return current_revision(engine)

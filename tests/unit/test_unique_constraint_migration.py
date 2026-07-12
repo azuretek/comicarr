@@ -200,6 +200,22 @@ def test_sqlite_migration_recognizes_existing_table_unique_constraint(legacy_eng
     assert not any(index["name"] == "uq_issues_issueid" for index in inspector.get_indexes("issues"))
 
 
+def test_sqlite_migration_reuses_the_callers_active_connection(legacy_engine):
+    with legacy_engine.begin() as conn:
+        _create_legacy_table(conn, "issues", ["IssueID", "ComicName"])
+
+        def forbid_second_engine_connection(*_args, **_kwargs):
+            raise AssertionError("migration opened a second engine connection")
+
+        event.listen(legacy_engine, "engine_connect", forbid_second_engine_connection)
+        try:
+            comicarr._migrate_unique_constraints(conn, backup_func=_successful_backup)
+        finally:
+            event.remove(legacy_engine, "engine_connect", forbid_second_engine_connection)
+
+    assert tuple(["IssueID"]) in _unique_column_sets(legacy_engine, "issues")
+
+
 def test_sqlite_upsert_remains_compatible_with_new_full_unique_constraints(legacy_engine):
     metadata.create_all(legacy_engine)
 
@@ -650,13 +666,13 @@ def test_recheck_inspect_error_still_attempts_migration(legacy_engine):
     assert tuple(["IssueID"]) in _unique_column_sets(legacy_engine, "issues")
 
 
-def test_initialize_source_rethrows_runtime_error_from_dbcheck():
-    """Guard the initialize() fail-closed branch for unique-migration RuntimeError."""
+def test_initialize_source_blocks_workers_after_dbcheck_failure():
+    """Guard the initialization path that preserves diagnostics but blocks workers."""
     import inspect as py_inspect
 
     source = py_inspect.getsource(comicarr.initialize)
     marker = "Checking to see if the database has all tables"
-    dbcheck_branch = source[source.index(marker) : source.index(marker) + 500]
-    assert "except RuntimeError as e:" in dbcheck_branch
-    assert "[UNIQUE-MIGRATION] Refusing startup after migration abort" in dbcheck_branch
-    assert dbcheck_branch.index("except RuntimeError as e:") < dbcheck_branch.index("except Exception as e:")
+    dbcheck_branch = source[source.index(marker) : source.index(marker) + 900]
+    assert "except Exception as e:" in dbcheck_branch
+    assert "ACQUISITION_WORKERS_BLOCKED = True" in dbcheck_branch
+    assert "[SCHEMA-MIGRATION] Worker startup blocked after migration failure" in dbcheck_branch

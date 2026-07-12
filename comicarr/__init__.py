@@ -508,13 +508,16 @@ def initialize(config_file):
         logger.info("Checking to see if the database has all tables....")
         try:
             dbcheck()
-        except RuntimeError as e:
-            # Unique-constraint backup/migration aborts must fail closed — do not
-            # soft-catch them as a generic "Cannot connect to the database".
-            logger.error("[UNIQUE-MIGRATION] Refusing startup after migration abort: %s" % e)
-            raise
         except Exception as e:
-            logger.error("Cannot connect to the database: %s" % e)
+            # Keep the authenticated web diagnostics surface available, but
+            # leave the default fail-closed acquisition gate in place so no
+            # worker can start after an incomplete schema migration.
+            diagnostic_error = _redact_diagnostic_error(e)
+            comicarr.ACQUISITION_SCHEMA_READY = False
+            comicarr.ACQUISITION_SCHEMA_ERROR = diagnostic_error
+            comicarr.ACQUISITION_WORKERS_BLOCKED = True
+            comicarr.ACQUISITION_BLOCK_REASON = "schema_migration_failed"
+            logger.error("[SCHEMA-MIGRATION] Worker startup blocked after migration failure: %s" % diagnostic_error)
         else:
             # Check if database is empty and set startup flags
             try:
@@ -1481,396 +1484,29 @@ def _ensure_columns(engine, table_name, required_columns):
 
 
 def dbcheck():
-    from comicarr.db import get_engine
-    from comicarr.tables import ddl_info_status_updated
-    from comicarr.tables import metadata as sa_metadata
+    """Compatibility wrapper for the application-owned Alembic runner.
 
-    engine = get_engine()
+    Normal startup must never run ad-hoc DDL or data cleanup outside Alembic
+    revision state.
+    """
 
-    # --- Legacy readinglist -> storyarcs migration (very old databases) ---
-    inspector = inspect(engine)
-    existing_tables = set(inspector.get_table_names())
-    if "readinglist" in existing_tables and "storyarcs" not in existing_tables:
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "CREATE TABLE IF NOT EXISTS storyarcs(StoryArcID TEXT, ComicName TEXT, "
-                        "IssueNumber TEXT, SeriesYear TEXT, IssueYEAR TEXT, StoryArc TEXT, "
-                        "TotalIssues TEXT, Status TEXT, inCacheDir TEXT, Location TEXT, "
-                        "IssueArcID TEXT, ReadingOrder INT, IssueID TEXT, ComicID TEXT, "
-                        "ReleaseDate TEXT, IssueDate TEXT, Publisher TEXT, IssuePublisher TEXT, "
-                        "IssueName TEXT, CV_ArcID TEXT, Int_IssueNumber INT, DynamicComicName TEXT, "
-                        "Volume TEXT, Manual TEXT, DateAdded TEXT, DigitalDate TEXT, Type TEXT, "
-                        "Aliases TEXT, ArcImage TEXT, StoreDate TEXT)"
-                    )
-                )
-                conn.execute(
-                    text(
-                        "INSERT INTO storyarcs(StoryArcID, ComicName, IssueNumber, SeriesYear, "
-                        "IssueYEAR, StoryArc, TotalIssues, Status, inCacheDir, Location, "
-                        "IssueArcID, ReadingOrder, IssueID, ComicID, ReleaseDate, IssueDate, "
-                        "Publisher, IssuePublisher, IssueName, CV_ArcID, Int_IssueNumber, "
-                        "DynamicComicName, Volume, Manual) SELECT StoryArcID, ComicName, "
-                        "IssueNumber, SeriesYear, IssueYEAR, StoryArc, TotalIssues, Status, "
-                        "inCacheDir, Location, IssueArcID, ReadingOrder, IssueID, ComicID, "
-                        "StoreDate, IssueDate, Publisher, IssuePublisher, IssueName, CV_ArcID, "
-                        "Int_IssueNumber, DynamicComicName, Volume, Manual FROM readinglist"
-                    )
-                )
-                conn.execute(text("DROP TABLE readinglist"))
-        except (OperationalError, ProgrammingError):
-            logger.warn("Unable to update readinglist table to new storyarc table format.")
+    from comicarr.app.core.schema import upgrade_database
 
-    # --- Create all tables and indexes from SQLAlchemy metadata ---
-    sa_metadata.create_all(engine)
+    return upgrade_database()
 
-    # --- Schema migrations: add columns missing from older databases ---
-    # For new installations, create_all() creates tables with all columns.
-    # For upgrades, these ensure missing columns are added.
 
-    dynamic_upgrade = False
+def _redact_diagnostic_error(error):
+    """Remove credentials from errors returned by authenticated diagnostics."""
 
-    # -- Comics Table --
-    comics_cols = [
-        ("LastUpdated", "TEXT"),
-        ("QUALalt_vers", "TEXT"),
-        ("QUALtype", "TEXT"),
-        ("QUALscanner", "TEXT"),
-        ("QUALquality", "TEXT"),
-        ("AlternateSearch", "TEXT"),
-        ("ComicVersion", "TEXT"),
-        ("SortOrder", "INTEGER"),
-        ("UseFuzzy", "TEXT"),
-        ("DetailURL", "TEXT"),
-        ("ForceContinuing", "INTEGER"),
-        ("intLatestIssue", "INTEGER"),
-        ("ComicName_Filesafe", "TEXT"),
-        ("AlternateFileName", "TEXT"),
-        ("ComicImageURL", "TEXT"),
-        ("ComicImageALTURL", "TEXT"),
-        ("NewPublish", "TEXT"),
-        ("AllowPacks", "TEXT"),
-        ("Type", "TEXT"),
-        ("Corrected_SeriesYear", "TEXT"),
-        ("Corrected_Type", "TEXT"),
-        ("TorrentID_32P", "TEXT"),
-        ("LatestIssueID", "TEXT"),
-        ("Collects", "TEXT"),
-        ("IgnoreType", "INTEGER"),
-        ("FirstImageSize", "INTEGER"),
-        ("AgeRating", "TEXT"),
-        ("PublisherImprint", "TEXT"),
-        ("DescriptionEdit", "TEXT"),
-        ("FilesUpdated", "TEXT"),
-        ("dirlocked", "INTEGER"),
-        ("seriesjsonPresent", "INT"),
-        ("cv_removed", "INT"),
-        ("ContentType", "TEXT DEFAULT 'comic'"),
-        ("ReadingDirection", "TEXT DEFAULT 'ltr'"),
-        ("MetadataSource", "TEXT"),
-        ("ExternalID", "TEXT"),
-        ("MangaDexID", "TEXT"),
-        ("MalID", "TEXT"),
-        ("not_updated_db", "TEXT"),
-    ]
-    _ensure_columns(engine, "comics", comics_cols)
-
-    # Check DynamicComicName separately (has side effect)
-    inspector = inspect(engine)
-    comics_existing = {c["name"] for c in inspector.get_columns("comics")}
-    if "DynamicComicName" not in comics_existing:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE comics ADD COLUMN DynamicComicName TEXT"))
-        except (OperationalError, ProgrammingError):
-            pass
-        dynamic_upgrade = True
-    elif CONFIG.DYNAMIC_UPDATE < 3:
-        dynamic_upgrade = True
-
-    # -- Issues Table --
-    issues_cols = [
-        ("ComicSize", "TEXT"),
-        ("inCacheDIR", "TEXT"),
-        ("AltIssueNumber", "TEXT"),
-        ("IssueDate_Edit", "TEXT"),
-        ("ImageURL", "TEXT"),
-        ("ImageURL_ALT", "TEXT"),
-        ("DigitalDate", "TEXT"),
-        ("forced_file", "INT"),
-        ("ChapterNumber", "TEXT"),
-        ("VolumeNumber", "TEXT"),
-    ]
-    _ensure_columns(engine, "issues", issues_cols)
-
-    # -- ImportResults Table --
-    importresults_cols = [
-        ("WatchMatch", "TEXT"),
-        ("IssueCount", "TEXT"),
-        ("ComicLocation", "TEXT"),
-        ("ComicFilename", "TEXT"),
-        ("impID", "TEXT"),
-        ("implog", "TEXT"),
-        ("DisplayName", "TEXT"),
-        ("SRID", "TEXT"),
-        ("ComicID", "TEXT"),
-        ("IssueID", "TEXT"),
-        ("Volume", "TEXT"),
-        ("IssueNumber", "TEXT"),
-        ("DynamicName", "TEXT"),
-        ("MatchConfidence", "INTEGER"),
-        ("SuggestedComicID", "TEXT"),
-        ("SuggestedComicName", "TEXT"),
-        ("SuggestedIssueID", "TEXT"),
-        ("IgnoreFile", "INTEGER DEFAULT 0"),
-        ("MatchSource", "TEXT"),
-    ]
-    _ensure_columns(engine, "importresults", importresults_cols)
-
-    # -- Readlist Table --
-    readlist_cols = [
-        ("inCacheDIR", "TEXT"),
-        ("Location", "TEXT"),
-        ("IssueDate", "TEXT"),
-        ("SeriesYear", "TEXT"),
-        ("ComicID", "TEXT"),
-        ("StatusChange", "TEXT"),
-    ]
-    _ensure_columns(engine, "readlist", readlist_cols)
-
-    # -- Weekly Table --
-    weekly_cols = [
-        ("ComicID", "TEXT"),
-        ("IssueID", "TEXT"),
-        ("DynamicName", "TEXT"),
-        ("CV_Last_Update", "TEXT"),
-        ("weeknumber", "TEXT"),
-        ("year", "TEXT"),
-        ("volume", "TEXT"),
-        ("seriesyear", "TEXT"),
-        ("annuallink", "TEXT"),
-        ("format", "TEXT"),
-    ]
-    _ensure_columns(engine, "weekly", weekly_cols)
-
-    # -- Nzblog Table --
-    nzblog_cols = [
-        ("SARC", "TEXT"),
-        ("PROVIDER", "TEXT"),
-        ("ID", "TEXT"),
-        ("AltNZBName", "TEXT"),
-        ("OneOff", "TEXT"),
-    ]
-    _ensure_columns(engine, "nzblog", nzblog_cols)
-
-    # -- Annuals Table --
-    annuals_cols = [
-        ("Location", "TEXT"),
-        ("ComicSize", "TEXT"),
-        ("Int_IssueNumber", "INT"),
-        ("ReleaseDate", "TEXT"),
-        ("ReleaseComicID", "TEXT"),
-        ("ReleaseComicName", "TEXT"),
-        ("IssueDate_Edit", "TEXT"),
-        ("DateAdded", "TEXT"),
-        ("DigitalDate", "TEXT"),
-        ("Deleted", "INT DEFAULT 0"),
-    ]
-    _ensure_columns(engine, "annuals", annuals_cols)
-
-    # Check ComicName in annuals separately (has side effect)
-    annuals_existing = {c["name"] for c in inspect(engine).get_columns("annuals")}
-    annual_update = "no"
-    if "ComicName" not in annuals_existing:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE annuals ADD COLUMN ComicName TEXT"))
-        except (OperationalError, ProgrammingError):
-            pass
-        annual_update = "yes"
-
-    if annual_update == "yes":
-        logger.info("Updating Annuals table for new fields - one-time update.")
-        helpers.annual_update()
-
-    # -- Snatched Table --
-    snatched_cols = [("Provider", "TEXT"), ("Hash", "TEXT"), ("crc", "TEXT")]
-    _ensure_columns(engine, "snatched", snatched_cols)
-
-    # -- Upcoming Table --
-    _ensure_columns(engine, "upcoming", [("DisplayComicName", "TEXT")])
-
-    # -- StoryArcs Table --
-    storyarcs_cols = [
-        ("ComicID", "TEXT"),
-        ("StoreDate", "TEXT"),
-        ("IssueDate", "TEXT"),
-        ("Publisher", "TEXT"),
-        ("IssuePublisher", "TEXT"),
-        ("IssueName", "TEXT"),
-        ("CV_ArcID", "TEXT"),
-        ("Int_IssueNumber", "INT"),
-        ("Volume", "TEXT"),
-        ("Manual", "TEXT"),
-        ("DateAdded", "TEXT"),
-        ("DigitalDate", "TEXT"),
-        ("Type", "TEXT"),
-        ("Aliases", "TEXT"),
-        ("ArcImage", "TEXT"),
-    ]
-    _ensure_columns(engine, "storyarcs", storyarcs_cols)
-
-    # Check DynamicComicName in storyarcs separately (has side effect)
-    storyarcs_existing = {c["name"] for c in inspect(engine).get_columns("storyarcs")}
-    if "DynamicComicName" not in storyarcs_existing:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE storyarcs ADD COLUMN DynamicComicName TEXT"))
-        except (OperationalError, ProgrammingError):
-            pass
-        dynamic_upgrade = True
-    elif CONFIG.DYNAMIC_UPDATE < 4:
-        dynamic_upgrade = True
-
-    # -- SearchResults Table --
-    searchresults_cols = [
-        ("SRID", "TEXT"),
-        ("Series", "TEXT"),
-        ("sresults", "TEXT"),
-        ("ogcname", "TEXT"),
-    ]
-    _ensure_columns(engine, "searchresults", searchresults_cols)
-
-    # -- FutureUpcoming Table --
-    _ensure_columns(engine, "futureupcoming", [("weeknumber", "TEXT"), ("year", "TEXT")])
-
-    # -- Failed Table --
-    _ensure_columns(engine, "failed", [("DateFailed", "TEXT")])
-
-    # -- Ref32p Table --
-    _ensure_columns(engine, "ref32p", [("Updated", "TEXT")])
-
-    # -- Jobhistory Table --
-    _ensure_columns(
-        engine,
-        "jobhistory",
-        [
-            ("status", "TEXT"),
-            ("last_success_timestamp", "FLOAT"),
-            ("last_failure_timestamp", "FLOAT"),
-            ("last_error", "TEXT"),
-        ],
+    message = re.sub(r"\s+", " ", str(error or "")).strip()
+    message = re.sub(
+        r"(?i)(api[ _-]?key|authorization|password|token|passkey)\s*[=:]\s*[^\s,;]+",
+        r"\1=[redacted]",
+        message,
     )
-
-    # last date — used by db Updater for staggering requests
-    jobhistory_existing = {c["name"] for c in inspect(engine).get_columns("jobhistory")}
-    if "last_date" not in jobhistory_existing:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jobhistory ADD COLUMN last_date timestamp"))
-            comicarr.DB_BACKFILL = True
-        except (OperationalError, ProgrammingError):
-            comicarr.DB_BACKFILL = False
-    else:
-        comicarr.DB_BACKFILL = False
-
-    # -- DDL_info Table --
-    ddl_cols = [
-        ("remote_filesize", "TEXT"),
-        ("updated_date", "TEXT"),
-        ("mainlink", "TEXT"),
-        ("issues", "TEXT"),
-        ("site", "TEXT"),
-        ("submit_date", "TEXT"),
-        ("pack", "INTEGER"),
-        ("link_type", "TEXT"),
-        ("tmp_filename", "TEXT"),
-        ("oneoff", "INTEGER"),
-        ("resume", "INTEGER"),
-        ("comicinfo", "TEXT"),
-        ("packinfo", "TEXT"),
-    ]
-    _ensure_columns(engine, "ddl_info", ddl_cols)
-    # create_all does not add indexes to existing tables. Create this only
-    # after legacy schemas have the indexed updated_date column.
-    ddl_info_status_updated.create(engine, checkfirst=True)
-
-    # -- Provider_searches Table --
-    _ensure_columns(engine, "provider_searches", [("id", "INTEGER"), ("hits", "INTEGER DEFAULT 0")])
-
-    # -- mylar_info bootstrap --
-    with engine.begin() as conn:
-        try:
-            result = conn.execute(text("SELECT DatabaseVersion FROM mylar_info"))
-            row = result.fetchone()
-            if row is None:
-                conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES(0)"))
-        except (OperationalError, ProgrammingError):
-            try:
-                conn.execute(text("ALTER TABLE mylar_info ADD COLUMN DatabaseVersion INTEGER PRIMARY KEY"))
-                conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES(0)"))
-            except (OperationalError, ProgrammingError):
-                pass
-
-    # --- Data integrity cleanup ---
-    logger.info("Ensuring DB integrity - Removing all Erroneous Comics (ie. named None)")
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                "DELETE FROM comics WHERE ComicName='None' OR ComicName LIKE 'Comic ID%' "
-                "OR ComicName IS NULL OR ComicName LIKE '%Fetch%failed%'"
-            )
-        )
-        conn.execute(
-            text("DELETE FROM issues WHERE ComicName='None' OR ComicName LIKE 'Comic ID%' OR ComicName IS NULL")
-        )
-        conn.execute(text("DELETE FROM issues WHERE ComicID IS NULL"))
-        conn.execute(text("DELETE FROM annuals WHERE ComicName='None' OR ComicName IS NULL OR Issue_Number IS NULL"))
-        conn.execute(text("DELETE FROM upcoming WHERE ComicName='None' OR ComicName IS NULL OR IssueNumber IS NULL"))
-        conn.execute(text("DELETE FROM importresults WHERE ComicName='None' OR ComicName IS NULL"))
-        conn.execute(text("DELETE FROM storyarcs WHERE StoryArcID IS NULL OR StoryArc IS NULL"))
-        conn.execute(text("DELETE FROM failed WHERE ComicName='None' OR ComicName IS NULL OR ID IS NULL"))
-
-        logger.info("Correcting Null entries that make the main page break on startup.")
-        conn.execute(text("UPDATE comics SET LatestDate='Unknown' WHERE LatestDate='None' OR LatestDate IS NULL"))
-
-        try:
-            conn.execute(text("DELETE FROM weekly WHERE Publisher IS NULL AND COMIC IS NOT NULL"))
-        except Exception:
-            pass
-
-    # --- Config-version-based data migrations ---
-    logger.info(
-        "[%s]oldconfig_version: %s" % (type(comicarr.CONFIG.OLDCONFIG_VERSION), comicarr.CONFIG.OLDCONFIG_VERSION)
-    )
-    if comicarr.CONFIG.OLDCONFIG_VERSION is not None:
-        if int(comicarr.CONFIG.OLDCONFIG_VERSION) < 12:
-            logger.info("now updating table data to ensure DDL is properly populated with correct data.")
-            with engine.begin() as conn:
-                conn.execute(text("UPDATE snatched SET Provider = 'DDL(GetComics)' WHERE Provider = 'ddl'"))
-                conn.execute(text("UPDATE nzblog SET PROVIDER = 'DDL(GetComics)' WHERE PROVIDER = 'ddl'"))
-                conn.execute(text("UPDATE rssdb SET site = 'DDL(GetComics)' WHERE site = 'DDL'"))
-                conn.execute(text("UPDATE ddl_info SET site = 'DDL(GetComics)' WHERE site IS NULL"))
-
-    # --- Deduplicate and add UNIQUE constraints for upsert tables ---
-    _migrate_unique_constraints(engine)
-
-    # Acquisition schema changes have their own forward-only version ledger.
-    # A failed verification blocks acquisition startup but deliberately does
-    # not prevent the authenticated FastAPI diagnostics surface from starting.
-    from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
-
-    acquisition_schema = ensure_acquisition_schema(engine)
-    if not acquisition_schema.ready:
-        logger.error(
-            "[ACQUISITION] Schema verification failed; acquisition workers will remain blocked: %s",
-            acquisition_schema.error,
-        )
-
-    if dynamic_upgrade is True:
-        logger.info("Updating db to include some important changes.")
-        helpers.upgrade_dynamic()
+    message = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1[redacted]@", message)
+    message = re.sub(r"(?i)([?&](?:apikey|api_key|token|password|passkey)=)[^&\s]+", r"\1[redacted]", message)
+    return message[:1000]
 
 
 # Explicit allowlist of legacy tables that need migration-time UNIQUE enforcement.
@@ -1920,9 +1556,9 @@ def _index_has_partial_predicate(index):
     return any(index.get(name) is not None for name in ("filter_definition", "predicate", "where"))
 
 
-def _has_unique_enforcement(engine, table_name, key_cols):
+def _has_unique_enforcement(bind, table_name, key_cols):
     """Return whether a table has a unique constraint or index on ``key_cols``."""
-    inspector = inspect(engine)
+    inspector = inspect(bind)
     expected_columns = tuple(sorted(key_cols))
     constraints = inspector.get_unique_constraints(table_name)
     constraint_columns = {tuple(sorted(constraint.get("column_names") or [])) for constraint in constraints}
@@ -1933,7 +1569,7 @@ def _has_unique_enforcement(engine, table_name, key_cols):
         index_columns = tuple(sorted(index.get("column_names") or []))
         if not index.get("unique") or index_columns != expected_columns:
             continue
-        if engine.dialect.name != "sqlite":
+        if bind.dialect.name != "sqlite":
             if not _index_has_partial_predicate(index):
                 return True
             continue
@@ -1976,7 +1612,7 @@ def _sqlite_unique_index_sql(engine, table_name, key_cols, constraint_name):
     )
 
 
-def _sqlite_database_path(engine):
+def _sqlite_database_path(engine, connection=None):
     database = engine.url.database
     database_name = str(database).casefold() if database else ""
     if not database or database_name == ":memory:":
@@ -1999,10 +1635,15 @@ def _sqlite_database_path(engine):
         if database_name.startswith("file::memory:"):
             return None
 
-    with engine.connect() as conn:
-        for _sequence, schema_name, database_path in conn.exec_driver_sql("PRAGMA database_list"):
+    if connection is not None:
+        for _sequence, schema_name, database_path in connection.exec_driver_sql("PRAGMA database_list"):
             if schema_name == "main" and database_path:
                 return os.path.abspath(os.path.expanduser(database_path))
+    else:
+        with engine.connect() as conn:
+            for _sequence, schema_name, database_path in conn.exec_driver_sql("PRAGMA database_list"):
+                if schema_name == "main" and database_path:
+                    return os.path.abspath(os.path.expanduser(database_path))
     return os.path.abspath(os.path.expanduser(str(database)))
 
 
@@ -2142,7 +1783,7 @@ def _add_unique_constraint_sql(quoted_table, quoted_constraint, quoted_keys):
     return f"ALTER TABLE {quoted_table} ADD CONSTRAINT {quoted_constraint} UNIQUE ({', '.join(quoted_keys)})"
 
 
-def _backup_sqlite_unique_migration(engine, backup_func=None):
+def _backup_sqlite_unique_migration(engine, backup_func=None, connection=None):
     """Create the mandatory WAL-safe backup for a destructive SQLite migration.
 
     Backups are co-located with the live database file under
@@ -2150,7 +1791,7 @@ def _backup_sqlite_unique_migration(engine, backup_func=None):
     (``comicarr.db.pre-unique-migration.bak``) is written once and preserved
     across retention rotation of timestamped backups.
     """
-    source_path = _sqlite_database_path(engine)
+    source_path = _sqlite_database_path(engine, connection=connection)
     if source_path is None:
         return
 
@@ -2210,28 +1851,28 @@ def _backup_sqlite_unique_migration(engine, backup_func=None):
                 raise RuntimeError(message) from e
 
 
-def _pending_unique_constraints(engine):
+def _pending_unique_constraints(bind):
     pending = []
-    inspector = inspect(engine)
+    inspector = inspect(bind)
     for table_name, (key_cols, constraint_name) in _UPSERT_UNIQUE_CONSTRAINTS.items():
         try:
             if not inspector.has_table(table_name):
                 continue
-            if not _has_unique_enforcement(engine, table_name, key_cols):
+            if not _has_unique_enforcement(bind, table_name, key_cols):
                 pending.append((table_name, key_cols, constraint_name))
         except SQLAlchemyError as e:
             logger.warn("[UNIQUE-MIGRATION] Could not inspect UNIQUE enforcement for %s: %s", table_name, e)
     return pending
 
 
-def _remaining_unenforced_tables(engine, pending_constraints):
+def _remaining_unenforced_tables(bind, pending_constraints):
     """Return allowlisted table names from ``pending_constraints`` still lacking enforcement."""
     remaining = []
     for table_name, key_cols, _constraint_name in pending_constraints:
         try:
-            if not inspect(engine).has_table(table_name):
+            if not inspect(bind).has_table(table_name):
                 continue
-            if not _has_unique_enforcement(engine, table_name, key_cols):
+            if not _has_unique_enforcement(bind, table_name, key_cols):
                 remaining.append(table_name)
         except SQLAlchemyError as e:
             logger.warn(
@@ -2253,14 +1894,22 @@ def _bounded_alternate_index_name(engine, constraint_name, table_name, key_cols,
     return f"{constraint_name[: max_length - len(suffix)]}{suffix}"
 
 
-def _sqlite_available_index_name(engine, constraint_name, table_name, key_cols):
-    with engine.connect() as conn:
+def _sqlite_available_index_name(engine, constraint_name, table_name, key_cols, connection=None):
+    if connection is not None:
         existing_names = {
             str(name).casefold()
-            for name in conn.execute(
+            for name in connection.execute(
                 text("SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL")
             ).scalars()
         }
+    else:
+        with engine.connect() as conn:
+            existing_names = {
+                str(name).casefold()
+                for name in conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL")
+                ).scalars()
+            }
 
     max_length = max(int(getattr(engine.dialect, "max_identifier_length", 128) or 128), 1)
     if len(constraint_name) <= max_length and constraint_name.casefold() not in existing_names:
@@ -2273,7 +1922,7 @@ def _sqlite_available_index_name(engine, constraint_name, table_name, key_cols):
     raise RuntimeError(f"Could not allocate a unique index name for {table_name}")
 
 
-def _migrate_unique_constraints(engine, backup_func=None):
+def _migrate_unique_constraints(engine_or_connection, backup_func=None):
     """Install the unique enforcement required by atomic upserts.
 
     Legacy SQLite databases receive partial unique indexes so duplicate null or
@@ -2285,21 +1934,24 @@ def _migrate_unique_constraints(engine, backup_func=None):
     After the per-table loop, any still-pending tables cause a RuntimeError so
     startup fails closed rather than soft-succeeding without enforcement.
     """
-    dialect = engine.dialect.name
+    connection = engine_or_connection if hasattr(engine_or_connection, "exec_driver_sql") else None
+    engine = connection.engine if connection is not None else engine_or_connection
+    bind = connection or engine
+    dialect = bind.dialect.name
 
     # Tables that already have enforcement (comics, rssdb, ref32p, ddl_info,
     # exceptions_log, tmp_searches, notifs, provider_searches, mylar_info) are
     # intentionally outside _UPSERT_UNIQUE_CONSTRAINTS.
-    pending_constraints = _pending_unique_constraints(engine)
+    pending_constraints = _pending_unique_constraints(bind)
     if not pending_constraints:
         return
 
     if dialect == "sqlite":
-        _backup_sqlite_unique_migration(engine, backup_func)
+        _backup_sqlite_unique_migration(engine, backup_func, connection=connection)
 
     for table_name, key_cols, constraint_name in pending_constraints:
         try:
-            if _has_unique_enforcement(engine, table_name, key_cols):
+            if _has_unique_enforcement(bind, table_name, key_cols):
                 continue
         except SQLAlchemyError as e:
             # Recheck failure must not skip the table — only confirmed enforcement skips work.
@@ -2309,12 +1961,12 @@ def _migrate_unique_constraints(engine, backup_func=None):
                 e,
             )
 
-        quote = engine.dialect.identifier_preparer.quote_identifier
+        quote = bind.dialect.identifier_preparer.quote_identifier
         quoted_table = quote(table_name)
         quoted_keys = [quote(column) for column in key_cols]
         valid_key_predicate = _valid_key_predicate(quoted_keys)
         try:
-            column_names = [col["name"] for col in inspect(engine).get_columns(table_name)]
+            column_names = [col["name"] for col in inspect(bind).get_columns(table_name)]
         except SQLAlchemyError:
             column_names = []
         dedup_sql = _dedup_delete_sql(
@@ -2328,49 +1980,38 @@ def _migrate_unique_constraints(engine, backup_func=None):
         )
         constraint_sql = _add_unique_constraint_sql(quoted_table, quote(constraint_name), quoted_keys)
         index_name = constraint_name
+        index_sql = None
 
         if dialect == "sqlite":
-            index_name = _sqlite_available_index_name(engine, constraint_name, table_name, key_cols)
+            index_name = _sqlite_available_index_name(
+                engine,
+                constraint_name,
+                table_name,
+                key_cols,
+                connection=connection,
+            )
             index_sql = _sqlite_unique_index_sql(engine, table_name, key_cols, index_name)
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text(dedup_sql))
-                    conn.execute(text(index_sql))
-            except SQLAlchemyError as e:
-                logger.warn(
-                    "[UNIQUE-MIGRATION] Could not add SQLite UNIQUE index %s on %s; changes rolled back: %s",
-                    index_name,
-                    table_name,
-                    e,
-                )
-                continue
-        elif dialect == "postgresql":
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text(dedup_sql))
-                    conn.execute(text(constraint_sql))
-            except SQLAlchemyError as e:
-                logger.warn(
-                    "[UNIQUE-MIGRATION] Could not add PostgreSQL UNIQUE constraint %s on %s; changes rolled back: %s",
-                    constraint_name,
-                    table_name,
-                    e,
-                )
-                continue
-        elif dialect == "mysql":
-            try:
-                with engine.begin() as conn:
-                    _mysql_dedup_valid_keys(conn, table_name, key_cols)
-                    conn.execute(text(constraint_sql))
-            except SQLAlchemyError as e:
-                logger.warn(
-                    "[UNIQUE-MIGRATION] Could not add MySQL UNIQUE constraint %s on %s; changes rolled back: %s",
-                    constraint_name,
-                    table_name,
-                    e,
-                )
-                continue
-        else:
+
+        def install_unique_enforcement(
+            active_connection,
+            dialect=dialect,
+            dedup_sql=dedup_sql,
+            index_sql=index_sql,
+            constraint_sql=constraint_sql,
+            table_name=table_name,
+            key_cols=key_cols,
+        ):
+            if dialect == "sqlite":
+                active_connection.execute(text(dedup_sql))
+                active_connection.execute(text(index_sql))
+            elif dialect == "postgresql":
+                active_connection.execute(text(dedup_sql))
+                active_connection.execute(text(constraint_sql))
+            elif dialect == "mysql":
+                _mysql_dedup_valid_keys(active_connection, table_name, key_cols)
+                active_connection.execute(text(constraint_sql))
+
+        if dialect not in {"sqlite", "postgresql", "mysql"}:
             logger.warn(
                 "[UNIQUE-MIGRATION] Unsupported dialect %s for unique-constraint migration on %s",
                 dialect,
@@ -2378,8 +2019,32 @@ def _migrate_unique_constraints(engine, backup_func=None):
             )
             continue
 
+        if connection is not None:
+            try:
+                install_unique_enforcement(connection)
+            except SQLAlchemyError as e:
+                message = "Could not add UNIQUE enforcement %s on %s" % (constraint_name, table_name)
+                logger.error(
+                    "[UNIQUE-MIGRATION] %s using the active Alembic connection: %s",
+                    message,
+                    e,
+                )
+                raise RuntimeError(message) from e
+        else:
+            try:
+                with engine.begin() as active_connection:
+                    install_unique_enforcement(active_connection)
+            except SQLAlchemyError as e:
+                logger.warn(
+                    "[UNIQUE-MIGRATION] Could not add UNIQUE enforcement %s on %s; changes rolled back: %s",
+                    index_name,
+                    table_name,
+                    e,
+                )
+                continue
+
         try:
-            constraint_installed = _has_unique_enforcement(engine, table_name, key_cols)
+            constraint_installed = _has_unique_enforcement(bind, table_name, key_cols)
         except SQLAlchemyError as e:
             logger.warn("[UNIQUE-MIGRATION] Could not verify UNIQUE enforcement for %s: %s", table_name, e)
             continue
@@ -2398,7 +2063,7 @@ def _migrate_unique_constraints(engine, backup_func=None):
                 table_name,
             )
 
-    remaining = _remaining_unenforced_tables(engine, pending_constraints)
+    remaining = _remaining_unenforced_tables(bind, pending_constraints)
     if remaining:
         message = "Unique-constraint migration incomplete for: %s" % ", ".join(remaining)
         logger.error("[UNIQUE-MIGRATION] %s", message)

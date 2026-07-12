@@ -9,8 +9,9 @@
 
 from sqlalchemy import create_engine, text
 
+from comicarr.app.core.schema import current_revision, upgrade_database
 from comicarr.db_migrate import migrate
-from comicarr.tables import comics, metadata
+from comicarr.tables import comics
 
 
 def _sqlite_url(path):
@@ -78,6 +79,7 @@ def test_migrate_deduplicates_unique_keys_across_batches(tmp_path, capsys):
     target_engine = create_engine(_sqlite_url(target_path))
     with target_engine.connect() as conn:
         rows = conn.execute(text("SELECT ComicID, ComicName FROM comics ORDER BY rowid")).mappings().all()
+    assert current_revision(target_engine) == "0002_legacy_adoption"
     target_engine.dispose()
 
     assert rows == [
@@ -118,6 +120,7 @@ def test_migrate_deduplicates_composite_keys_with_empty_components(tmp_path, cap
             .mappings()
             .all()
         )
+    assert current_revision(target_engine) == "0002_legacy_adoption"
     target_engine.dispose()
 
     assert rows == [
@@ -161,7 +164,7 @@ def test_migrate_reports_target_integrity_conflicts(tmp_path, capsys):
     )
 
     target_engine = create_engine(_sqlite_url(target_path))
-    metadata.create_all(target_engine)
+    upgrade_database(target_engine)
     with target_engine.begin() as conn:
         conn.execute(comics.insert().values(ComicID="existing", ComicName="target row"))
     target_engine.dispose()

@@ -59,9 +59,9 @@ def test_delivery_paths_install_from_the_committed_uv_lock():
     workflow = (ROOT_DIR / ".github/workflows/test.yml").read_text()
     dockerfile = (ROOT_DIR / "Dockerfile").read_text()
 
-    assert workflow.count(SETUP_UV_ACTION) == 3
+    assert workflow.count(SETUP_UV_ACTION) == 4
     assert "uv sync --locked --extra dev" in workflow
-    assert workflow.count("uv sync --locked") >= 3
+    assert workflow.count("uv sync --locked") >= 4
     assert "COMICARR_E2E_PYTHON: ${{ github.workspace }}/.venv/bin/python" in workflow
     assert "uv lock &&" not in dockerfile
     assert "uv sync --locked --no-dev --compile-bytecode" in dockerfile

@@ -279,6 +279,14 @@ class Mylar3Migration:
             backup_dir = os.path.join(comicarr.DATA_DIR, "backups")
             maintenance.auto_backup_db(comicarr.DB_FILE, backup_dir)
 
+            # Bring the destination to the reviewed schema head before source
+            # rows are copied. Import must never depend on startup repair to
+            # recreate indexes or add columns afterward.
+            logger.info("[MIGRATION] Upgrading destination to Alembic head...")
+            from comicarr.app.core.schema import upgrade_database
+
+            upgrade_database()
+
             # Open source database read-only
             with _open_source_db(self.dbfile) as source_conn:
                 # Open destination with direct connection for bulk operations
@@ -290,13 +298,6 @@ class Mylar3Migration:
                     dest_conn.execute("PRAGMA cache_size = -128000")
                     dest_conn.execute("PRAGMA temp_store = MEMORY")
                     dest_conn.execute("PRAGMA foreign_keys = OFF")
-
-                    # Drop indexes for faster inserts (dbcheck() rebuilds them)
-                    for idx in dest_conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
-                    ).fetchall():
-                        if _SAFE_IDENTIFIER.match(idx[0]):
-                            dest_conn.execute('DROP INDEX IF EXISTS "%s"' % idx[0])
 
                     # Determine which tables exist in both source and destination
                     source_tables = {
@@ -369,11 +370,9 @@ class Mylar3Migration:
                 logger.error("[MIGRATION] Config migration failed (data migration succeeded): %s" % e)
                 # Don't fail the whole migration for config issues
 
-            # Run dbcheck() to rebuild indexes and apply schema updates
-            logger.info("[MIGRATION] Running dbcheck() to rebuild indexes...")
-            from comicarr import dbcheck
-
-            dbcheck()
+            # Verify that bulk import did not bypass or disturb schema state.
+            logger.info("[MIGRATION] Verifying destination Alembic revision...")
+            upgrade_database()
 
             # Post-migration verification
             _verify_migration(self.dbfile)
