@@ -1,6 +1,16 @@
+#  Copyright (C) 2026 Comicarr contributors
+#
+#  This file is part of Comicarr.
+#
+#  Comicarr is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+
 """Alembic environment backed by Comicarr's application-owned engine."""
 
 from alembic import context
+from comicarr import logger
 from comicarr.db import get_engine
 from comicarr.tables import metadata
 
@@ -13,6 +23,7 @@ def run_migrations_offline():
 
     url = config.get_main_option("sqlalchemy.url")
     if not url:
+        logger.error("[ALEMBIC-ENV] Offline migrations require an explicit sqlalchemy.url")
         raise RuntimeError("offline migrations require an explicit sqlalchemy.url")
     context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
     with context.begin_transaction():

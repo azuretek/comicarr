@@ -18,6 +18,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Column, insert, inspect, select, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from alembic import command
 from comicarr.db import get_engine
@@ -161,6 +162,43 @@ def _copy_column_for_add(column):
     )
 
 
+def _has_single_column_unique_enforcement(connection: Connection, table_name: str, column_name: str) -> bool:
+    """Return whether a legacy table enforces a declared ``unique=True`` column."""
+
+    inspector = inspect(connection)
+    expected_columns = [column_name]
+    for constraint in inspector.get_unique_constraints(table_name):
+        if constraint.get("column_names") == expected_columns:
+            return True
+    for index in inspector.get_indexes(table_name):
+        if index.get("unique") and index.get("column_names") == expected_columns:
+            dialect_options = index.get("dialect_options") or {}
+            if not any(name.endswith("_where") and value is not None for name, value in dialect_options.items()):
+                return True
+    return False
+
+
+def _add_missing_single_column_unique_constraints(connection: Connection) -> None:
+    """Restore unique enforcement that ``create_all(checkfirst=True)`` cannot add."""
+
+    quote = connection.dialect.identifier_preparer.quote_identifier
+    for table in metadata.sorted_tables:
+        for column in table.columns:
+            if not column.unique or _has_single_column_unique_enforcement(connection, table.name, column.name):
+                continue
+            index_name = "uq_%s_%s" % (table.name, column.name.lower())
+            try:
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX %s ON %s (%s)" % (quote(index_name), quote(table.name), quote(column.name))
+                    )
+                )
+            except SQLAlchemyError as error:
+                raise MigrationStateError(
+                    "legacy adoption could not restore unique enforcement for %s.%s" % (table.name, column.name)
+                ) from error
+
+
 def apply_legacy_schema_compatibility(connection: Connection) -> None:
     """Apply the reviewed, non-destructive structural legacy adoption step.
 
@@ -192,6 +230,8 @@ def apply_legacy_schema_compatibility(connection: Connection) -> None:
         for index in table.indexes:
             index.create(connection, checkfirst=True)
 
+    _add_missing_single_column_unique_constraints(connection)
+
     if migrate_readinglist:
         _migrate_readinglist_to_storyarcs(connection)
 
@@ -200,7 +240,7 @@ def apply_legacy_schema_compatibility(connection: Connection) -> None:
     # deterministic de-duplication and raises if enforcement cannot be proven.
     import comicarr
 
-    comicarr._migrate_unique_constraints(connection.engine)
+    comicarr._migrate_unique_constraints(connection)
 
     _seed_acquisition_schema_ledger(connection)
 

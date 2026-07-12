@@ -200,6 +200,22 @@ def test_sqlite_migration_recognizes_existing_table_unique_constraint(legacy_eng
     assert not any(index["name"] == "uq_issues_issueid" for index in inspector.get_indexes("issues"))
 
 
+def test_sqlite_migration_reuses_the_callers_active_connection(legacy_engine):
+    with legacy_engine.begin() as conn:
+        _create_legacy_table(conn, "issues", ["IssueID", "ComicName"])
+
+        def forbid_second_engine_connection(*_args, **_kwargs):
+            raise AssertionError("migration opened a second engine connection")
+
+        event.listen(legacy_engine, "engine_connect", forbid_second_engine_connection)
+        try:
+            comicarr._migrate_unique_constraints(conn, backup_func=_successful_backup)
+        finally:
+            event.remove(legacy_engine, "engine_connect", forbid_second_engine_connection)
+
+    assert tuple(["IssueID"]) in _unique_column_sets(legacy_engine, "issues")
+
+
 def test_sqlite_upsert_remains_compatible_with_new_full_unique_constraints(legacy_engine):
     metadata.create_all(legacy_engine)
 

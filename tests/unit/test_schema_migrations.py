@@ -12,8 +12,10 @@
 import pytest
 from sqlalchemy import Text, create_engine, inspect, text
 from sqlalchemy.dialects import mysql
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateTable
 
+import comicarr
 from comicarr.app.core.schema import (
     DatabaseState,
     MigrationStateError,
@@ -28,6 +30,15 @@ def test_classifier_identifies_a_fresh_database(tmp_path):
     engine = create_engine("sqlite:///%s" % (tmp_path / "fresh.db"))
 
     assert classify_database(engine) is DatabaseState.FRESH
+
+
+def test_schema_diagnostic_errors_redact_connection_credentials():
+    message = comicarr._redact_diagnostic_error(
+        "connection failed: postgresql://comicarr:secret@db.example/comicarr?password=another-secret"
+    )
+
+    assert "secret" not in message
+    assert "postgresql://[redacted]@db.example" in message
 
 
 def test_mysql_baseline_uses_varchar_for_defaulted_comic_classification_fields():
@@ -117,6 +128,29 @@ def test_legacy_adoption_restores_a_missing_safe_historical_column(tmp_path):
     upgrade_database(engine)
 
     assert "MetadataSource" in {column["name"] for column in inspect(engine).get_columns("comics")}
+
+
+def test_legacy_adoption_restores_missing_single_column_unique_enforcement(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "legacy-unique.db"))
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
+        conn.execute(text("CREATE TABLE comics_without_unique AS SELECT * FROM comics"))
+        conn.execute(text("DROP TABLE comics"))
+        conn.execute(text("ALTER TABLE comics_without_unique RENAME TO comics"))
+
+    upgrade_database(engine)
+
+    unique_indexes = [
+        index
+        for index in inspect(engine).get_indexes("comics")
+        if index.get("unique") and index.get("column_names") == ["ComicID"]
+    ]
+    assert unique_indexes
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO comics(ComicID) VALUES ('comic-1')"))
+        with pytest.raises(IntegrityError):
+            conn.execute(text("INSERT INTO comics(ComicID) VALUES ('comic-1')"))
 
 
 def test_legacy_adoption_moves_a_known_readinglist_shape_to_storyarcs(tmp_path):

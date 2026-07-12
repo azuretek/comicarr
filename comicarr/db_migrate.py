@@ -403,9 +403,10 @@ def migrate(source_url, target_url, batch_size=5000):
             verify_ok = False
         print(f"  {table_name:25s}  source={src_count:>8,d}  target={tgt_count:>8,d}  {match}")
 
-    if current_revision(target_engine) != target_head:
+    actual_revision = current_revision(target_engine)
+    if actual_revision != target_head:
         verify_ok = False
-        print("  schema revision  target is no longer at the expected Alembic head  FAILED")
+        print("  schema revision  expected=%s actual=%s  FAILED" % (target_head, actual_revision))
 
     print("\n=== Migration Summary ===")
     print(f"  Total rows migrated: {total_migrated:,d}")
