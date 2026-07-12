@@ -23,6 +23,7 @@ if comicarr.LOG_LEVEL is None:
 from comicarr.app.core.context import AppContext
 from comicarr.app.core.security import (
     create_session_token,
+    load_or_create_jwt_key,
     validate_jwt_token,
 )
 from comicarr.app.system import router as system_router
@@ -202,6 +203,101 @@ class TestJWTIntegration:
         assert validate_jwt_token(token, secret, 0) == "admin"
         # Token invalid after generation bump (simulating revocation)
         assert validate_jwt_token(token, secret, 1) is None
+
+    def test_logout_rotates_key_and_revocation_survives_restart(self, tmp_path):
+        """Logout revokes copied tokens in memory and from a fresh runtime key load."""
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        old_key = load_or_create_jwt_key(str(secure_dir))
+        old_token = create_session_token("admin", old_key, generation=0)
+        ctx = _make_test_ctx(
+            jwt_secure_dir=str(secure_dir),
+            jwt_secret_key=old_key,
+        )
+
+        response = system_router.logout(ctx=ctx, username="admin")
+
+        assert response.status_code == 200
+        assert any(
+            name.lower() == b"set-cookie" and b"comicarr_session=" in value and b"Max-Age=0" in value
+            for name, value in response.raw_headers
+        )
+        assert validate_jwt_token(old_token, ctx.jwt_secret_key, 0) is None
+        new_token = create_session_token("admin", ctx.jwt_secret_key, generation=0)
+        assert validate_jwt_token(new_token, ctx.jwt_secret_key, 0) == "admin"
+
+        restarted_key = load_or_create_jwt_key(str(secure_dir))
+        assert restarted_key == ctx.jwt_secret_key
+        assert validate_jwt_token(old_token, restarted_key, 0) is None
+        assert validate_jwt_token(new_token, restarted_key, 0) == "admin"
+
+    def test_logout_persistence_failure_keeps_session_and_cookie(self, tmp_path):
+        """A failed atomic replace must not claim logout or clear a valid cookie."""
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        old_key = load_or_create_jwt_key(str(secure_dir))
+        old_token = create_session_token("admin", old_key, generation=0)
+        ctx = _make_test_ctx(
+            jwt_secure_dir=str(secure_dir),
+            jwt_secret_key=old_key,
+        )
+
+        with patch("comicarr.app.core.security.os.replace", side_effect=OSError("/secret/path failed")):
+            response = system_router.logout(ctx=ctx, username="admin")
+
+        payload = json.loads(response.body)
+        assert response.status_code == 500
+        assert payload == {"success": False, "error": "Unable to revoke active sessions"}
+        assert b"/secret/path" not in response.body
+        assert all(name.lower() != b"set-cookie" for name, _value in response.raw_headers)
+        assert ctx.jwt_secret_key == old_key
+        assert (secure_dir / "jwt.key").read_bytes() == old_key
+        assert validate_jwt_token(old_token, ctx.jwt_secret_key, 0) == "admin"
+
+    def test_logout_without_persistent_key_authority_fails_closed(self):
+        """An ephemeral runtime cannot claim durable session revocation."""
+        ctx = _make_test_ctx(jwt_secure_dir=None)
+
+        response = system_router.logout(ctx=ctx, username="admin")
+
+        assert response.status_code == 500
+        assert all(name.lower() != b"set-cookie" for name, _value in response.raw_headers)
+
+    @pytest.mark.asyncio
+    async def test_login_signs_token_while_holding_rotation_lock(self):
+        """Login and logout share one key-authority serialization boundary."""
+
+        class RecordingLock:
+            def __init__(self):
+                self.held = False
+
+            def __enter__(self):
+                self.held = True
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                self.held = False
+
+        lock = RecordingLock()
+        ctx = _make_test_ctx(runtime_lock=lock)
+
+        def sign_while_locked(*_args, **_kwargs):
+            assert lock.held is True
+            return "signed-token"
+
+        request = _JsonRequest({"username": "admin", "password": "password123"})
+        request.client = None
+        with (
+            patch.object(
+                system_router.system_service,
+                "verify_login",
+                return_value={"success": True, "username": "admin"},
+            ),
+            patch.object(system_router, "create_session_token", side_effect=sign_while_locked),
+        ):
+            response = await system_router.login(request, ctx)
+
+        assert response.status_code == 200
+        assert any(b"signed-token" in value for name, value in response.raw_headers if name.lower() == b"set-cookie")
 
 
 # =============================================================================

@@ -133,6 +133,19 @@ def test_runtime_factory_is_single_shot_and_adopts_identity_sensitive_objects(_l
     assert runtime.get_runtime() is first
 
 
+def test_runtime_owns_jwt_secure_directory_authority(_legacy_runtime_objects, tmp_path):
+    """Logout rotation uses the same secure directory selected at runtime creation."""
+    comicarr.CONFIG.SECURE_DIR = str(tmp_path)
+    persisted_key = b"persisted-jwt-key-material-32byt"
+
+    with patch("comicarr.app.core.runtime.load_or_create_jwt_key", return_value=persisted_key) as load_key:
+        ctx = create_runtime()
+
+    load_key.assert_called_once_with(str(tmp_path))
+    assert ctx.jwt_secure_dir == str(tmp_path)
+    assert ctx.jwt_secret_key == persisted_key
+
+
 def test_runtime_factory_owns_and_projects_one_ai_client_bundle(_legacy_runtime_objects):
     """AI aliases are a compatibility view of the factory-created bundle."""
     config = comicarr.CONFIG

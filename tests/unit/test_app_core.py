@@ -6,8 +6,11 @@ Covers: AppContext, EventBus, security (JWT, CSRF), exceptions, middleware.
 
 import asyncio
 import errno
+import os
+import stat
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +28,9 @@ from comicarr.app.core.exceptions import (
 from comicarr.app.core.security import (
     create_session_token,
     generate_ephemeral_key,
+    load_or_create_jwt_key,
+    rotate_jwt_key,
+    rotate_runtime_jwt_key,
     validate_jwt_token,
 )
 
@@ -278,6 +284,83 @@ class TestJWTSecurity:
     def test_invalid_token_returns_none(self):
         username = validate_jwt_token("not.a.jwt", b"secret", current_generation=0)
         assert username is None
+
+    def test_persisted_key_round_trip_preserves_binary_bytes_and_mode(self, tmp_path, monkeypatch):
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        binary_key = b" \t" + (b"k" * 28) + b"\r\n"
+        monkeypatch.setattr(os, "urandom", lambda _size: binary_key)
+
+        created = load_or_create_jwt_key(str(secure_dir))
+        loaded = load_or_create_jwt_key(str(secure_dir))
+
+        assert created == binary_key
+        assert loaded == binary_key
+        assert stat.S_IMODE((secure_dir / "jwt.key").stat().st_mode) == 0o600
+
+    def test_rotation_invalidates_old_token_and_survives_restart(self, tmp_path):
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        old_key = load_or_create_jwt_key(str(secure_dir))
+        old_token = create_session_token("admin", old_key, generation=0)
+
+        new_key = rotate_jwt_key(str(secure_dir))
+
+        assert new_key != old_key
+        assert validate_jwt_token(old_token, new_key, 0) is None
+        assert load_or_create_jwt_key(str(secure_dir)) == new_key
+        assert stat.S_IMODE((secure_dir / "jwt.key").stat().st_mode) == 0o600
+
+    def test_rotation_replace_failure_preserves_current_key(self, tmp_path, monkeypatch):
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        old_key = load_or_create_jwt_key(str(secure_dir))
+
+        def fail_replace(_source, _destination):
+            raise OSError("replace failed")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+
+        with pytest.raises(OSError, match="replace failed"):
+            rotate_jwt_key(str(secure_dir))
+
+        assert (secure_dir / "jwt.key").read_bytes() == old_key
+        assert sorted(path.name for path in secure_dir.iterdir()) == ["jwt.key"]
+
+    def test_rotation_write_failure_preserves_current_key(self, tmp_path, monkeypatch):
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        old_key = load_or_create_jwt_key(str(secure_dir))
+
+        def fail_fsync(_file_descriptor):
+            raise OSError("sync failed")
+
+        monkeypatch.setattr(os, "fsync", fail_fsync)
+
+        with pytest.raises(OSError, match="sync failed"):
+            rotate_jwt_key(str(secure_dir))
+
+        assert (secure_dir / "jwt.key").read_bytes() == old_key
+        assert sorted(path.name for path in secure_dir.iterdir()) == ["jwt.key"]
+
+    def test_concurrent_runtime_rotations_keep_memory_and_disk_consistent(self, tmp_path):
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        initial_key = load_or_create_jwt_key(str(secure_dir))
+        ctx = create_test_context(
+            jwt_secure_dir=str(secure_dir),
+            jwt_secret_key=initial_key,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rotated_keys = list(executor.map(lambda _index: rotate_runtime_jwt_key(ctx), range(2)))
+
+        persisted_key = (secure_dir / "jwt.key").read_bytes()
+        assert len(set(rotated_keys)) == 2
+        assert ctx.jwt_secret_key == persisted_key
+        assert ctx.jwt_secret_key in rotated_keys
+        assert ctx.jwt_secret_key != initial_key
+        assert stat.S_IMODE((secure_dir / "jwt.key").stat().st_mode) == 0o600
 
     def test_ephemeral_key_generation(self):
         key1 = generate_ephemeral_key()

@@ -58,6 +58,7 @@ class AppContext:
     data_dir: str = ""
     db_file: str = ""
     config: object = None  # comicarr.config.Config instance
+    jwt_secure_dir: str = None
 
     # Scheduler
     scheduler: object = None  # BackgroundScheduler
@@ -145,7 +146,8 @@ class AppContext:
     sse_key: str = None
     setup_token: str = None
 
-    # JWT
+    # JWT signing authority. The secure directory is immutable after init;
+    # the active key is rotated under ``runtime_lock``.
     jwt_secret_key: bytes = None
     jwt_generation: int = 0
 
