@@ -18,10 +18,11 @@ If AI is not configured, existing behaviour (CV wins) is preserved.
 
 import time
 
-import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
 from comicarr.app.ai.enrichment import _write_comicinfo
+from comicarr.app.ai.runtime import get_ai_runtime
 from comicarr.app.ai.sanitize import spotlight_wrap
 from comicarr.app.ai.schemas import ReconciliationChoice
 from comicarr.app.ai.structured import request_structured
@@ -70,13 +71,14 @@ def reconcile_metadata(cbz_path, issue_id, pre_cmtag_info, post_cmtag_info):
     )
 
     # Check AI availability — if not available, CV wins by default
-    if comicarr.AI_CLIENT is None:
+    ctx = get_ai_runtime()
+    if ctx is None or ctx.ai_client is None or ctx.config is None:
         logger.fdebug("[AI-RECONCILE] AI not configured — CV values win by default")
         return 0
-    if not comicarr.AI_CIRCUIT_BREAKER.allow_request():
+    if ctx.ai_circuit_breaker is None or not ctx.ai_circuit_breaker.allow_request():
         logger.fdebug("[AI-RECONCILE] Circuit breaker open — CV values win by default")
         return 0
-    if not comicarr.AI_RATE_LIMITER.can_request():
+    if ctx.ai_rate_limiter is None or not ctx.ai_rate_limiter.can_request():
         logger.fdebug("[AI-RECONCILE] Rate limiter at cap — CV values win by default")
         return 0
 
@@ -98,16 +100,16 @@ def reconcile_metadata(cbz_path, issue_id, pre_cmtag_info, post_cmtag_info):
     start_time = time.time()
     try:
         result = request_structured(
-            client=comicarr.AI_CLIENT,
-            model=comicarr.CONFIG.AI_MODEL,
+            client=ctx.ai_client,
+            model=ctx.config.AI_MODEL,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             schema_class=ReconciliationChoice,
             temperature=0.1,
-            timeout=comicarr.CONFIG.AI_TIMEOUT or 30,
+            timeout=ctx.config.AI_TIMEOUT or 30,
         )
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_success()
+        ctx.ai_circuit_breaker.record_success()
 
         # Validate: each selected value MUST match one of the input values
         resolved = {}
@@ -136,7 +138,7 @@ def reconcile_metadata(cbz_path, issue_id, pre_cmtag_info, post_cmtag_info):
         ai_service.log_activity(
             feature_type="reconciliation",
             action="Reconciled %d fields for issue %s" % (len(resolved), issue_id),
-            model=comicarr.CONFIG.AI_MODEL,
+            model=ctx.config.AI_MODEL,
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -150,11 +152,11 @@ def reconcile_metadata(cbz_path, issue_id, pre_cmtag_info, post_cmtag_info):
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_failure()
+        ctx.ai_circuit_breaker.record_failure()
         ai_service.log_activity(
             feature_type="reconciliation",
             action="Reconciliation failed for issue %s" % issue_id,
-            model=comicarr.CONFIG.AI_MODEL or "",
+            model=ctx.config.AI_MODEL or "",
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -175,16 +177,28 @@ def _store_reconciliation_history(issue_id, conflicts, resolved):
         if ai_value is None:
             continue
         # Row for comicinfo provider value
-        db.DBConnection().action(
-            "INSERT INTO ai_metadata_history "
-            "(entity_type, entity_id, field_name, original_value, ai_value, source, provider, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ["issue", issue_id, field, sources["comicinfo"], ai_value, "reconciliation", "comicinfo", now],
+        ai_queries.insert_metadata_history(
+            {
+                "entity_type": "issue",
+                "entity_id": issue_id,
+                "field_name": field,
+                "original_value": sources["comicinfo"],
+                "ai_value": ai_value,
+                "source": "reconciliation",
+                "provider": "comicinfo",
+                "created_at": now,
+            }
         )
         # Row for cv provider value
-        db.DBConnection().action(
-            "INSERT INTO ai_metadata_history "
-            "(entity_type, entity_id, field_name, original_value, ai_value, source, provider, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ["issue", issue_id, field, sources["cv"], ai_value, "reconciliation", "cv", now],
+        ai_queries.insert_metadata_history(
+            {
+                "entity_type": "issue",
+                "entity_id": issue_id,
+                "field_name": field,
+                "original_value": sources["cv"],
+                "ai_value": ai_value,
+                "source": "reconciliation",
+                "provider": "cv",
+                "created_at": now,
+            }
         )

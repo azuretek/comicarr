@@ -790,7 +790,7 @@ async def test_ae5_inflight_write_completes_before_dispose_then_replay_finishes(
     cm = lifespan(app)
     pool = _SlowWorkerPool()
     with (
-        patch("comicarr.app.main._build_context_from_globals", return_value=ctx),
+        patch("comicarr.app.main.get_runtime", return_value=ctx),
         patch.object(comicarr, "SNPOOL", pool, create=True),
         patch.object(comicarr, "NZBPOOL", None, create=True),
         patch.object(comicarr, "SEARCHPOOL", None, create=True),

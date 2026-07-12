@@ -54,6 +54,36 @@ from comicarr import (
 from comicarr.tables import annuals, comics, issues
 
 
+def _mass_add_runtime_context():
+    """Return the active canonical runtime, if the process has one."""
+    from comicarr.app.core.runtime import get_runtime_if_initialized
+
+    ctx = get_runtime_if_initialized()
+    return ctx if ctx is not None and not ctx.disposed else None
+
+
+def _set_mass_add_pool(ctx, pool):
+    """Publish the same MASS_ADD worker reference to runtime and legacy code."""
+    if ctx is None:
+        comicarr.MASS_ADD = pool
+        return
+
+    from comicarr.app.core.runtime import set_runtime_field
+
+    set_runtime_field(ctx, "mass_add_pool", pool)
+
+
+def _set_mass_refresh_pool(ctx, pool):
+    """Publish the same MASS_REFRESH worker reference to runtime and legacy code."""
+    if ctx is None:
+        comicarr.MASS_REFRESH = pool
+        return
+
+    from comicarr.app.core.runtime import set_runtime_field
+
+    set_runtime_field(ctx, "mass_refresh_pool", pool)
+
+
 def is_exists(comicid):
 
     with db.get_engine().connect() as conn:
@@ -125,7 +155,7 @@ def addvialist(seriesQueue, issueWantQueue):
             issueItem = issueWantQueue.get(True)
             markIssueWantedById(issueItem)
         else:
-            comicarr.ADD_LIST.put("exit")
+            seriesQueue.put("exit")
     return False
 
 
@@ -2963,10 +2993,16 @@ def importer_thread(serieslist):
 
     threaded_call = True
 
-    list(map(comicarr.ADD_LIST.put, serieslist))
+    ctx = _mass_add_runtime_context()
+    add_list = ctx.add_list if ctx is not None else comicarr.ADD_LIST
+    issue_watch_list = ctx.issue_watch_list if ctx is not None else comicarr.ISSUE_WATCH_LIST
+
+    for series in serieslist:
+        add_list.put(series)
 
     try:
-        if comicarr.MASS_ADD.is_alive():
+        pool = ctx.mass_add_pool if ctx is not None else comicarr.MASS_ADD
+        if pool.is_alive():
             logger.info(
                 "[MASS-ADD] MASS_ADD thread already running. Adding an additional %s items to existing queue"
                 % len(serieslist)
@@ -2977,12 +3013,9 @@ def importer_thread(serieslist):
 
     if threaded_call is True:
         logger.info("[MASS-ADD] MASS_ADD thread not started. Started & submitting.")
-        comicarr.MASS_ADD = threading.Thread(
-            target=addvialist, args=(comicarr.ADD_LIST, comicarr.ISSUE_WATCH_LIST), name="mass-add"
-        )
-        comicarr.MASS_ADD.start()
-        if not comicarr.MASS_ADD:
-            comicarr.MASS_ADD.join(5)
+        pool = threading.Thread(target=addvialist, args=(add_list, issue_watch_list), name="mass-add")
+        _set_mass_add_pool(ctx, pool)
+        pool.start()
 
 
 def issue_watcher_thread(issuelist):
@@ -2990,7 +3023,10 @@ def issue_watcher_thread(issuelist):
     if type(issuelist) != list:
         issuelist = [issuelist]
 
-    list(map(comicarr.ISSUE_WATCH_LIST.put, issuelist))
+    ctx = _mass_add_runtime_context()
+    issue_watch_list = ctx.issue_watch_list if ctx is not None else comicarr.ISSUE_WATCH_LIST
+    for issue in issuelist:
+        issue_watch_list.put(issue)
 
 
 _REFRESH_WORKER_LOCK = threading.RLock()
@@ -2999,14 +3035,15 @@ _REFRESH_WORKER_LOCK = threading.RLock()
 def _start_refresh_worker():
     """Start the on-demand worker under the same lock used for retirement."""
     with _REFRESH_WORKER_LOCK:
-        worker = getattr(comicarr, "MASS_REFRESH", None)
+        ctx = _mass_add_runtime_context()
+        worker = ctx.mass_refresh_pool if ctx is not None else getattr(comicarr, "MASS_REFRESH", None)
         if worker is not None and getattr(worker, "is_alive", lambda: False)():
             return False
         logger.info("[MASS-REFRESH] MASS_REFRESH thread not started. Started & submitting.")
-        comicarr.MASS_REFRESH = threading.Thread(
-            target=updater.addvialist, args=(comicarr.REFRESH_QUEUE,), name="mass-refresh"
-        )
-        comicarr.MASS_REFRESH.start()
+        refresh_queue = ctx.refresh_queue if ctx is not None else comicarr.REFRESH_QUEUE
+        worker = threading.Thread(target=updater.addvialist, args=(refresh_queue,), name="mass-refresh")
+        _set_mass_refresh_pool(ctx, worker)
+        worker.start()
         return True
 
 
@@ -3019,8 +3056,10 @@ def refresh_worker_should_retire(refresh_queue):
     with _REFRESH_WORKER_LOCK:
         if not refresh_queue.empty():
             return False
-        if getattr(comicarr, "MASS_REFRESH", None) is threading.current_thread():
-            comicarr.MASS_REFRESH = None
+        ctx = _mass_add_runtime_context()
+        worker = ctx.mass_refresh_pool if ctx is not None else getattr(comicarr, "MASS_REFRESH", None)
+        if worker is threading.current_thread():
+            _set_mass_refresh_pool(ctx, None)
         return True
 
 
@@ -3038,8 +3077,10 @@ def _handoff_refresh_items(queue_items, *, start_worker, maintenance=None):
     ) as lease:
         controller.assert_lease_current(lease)
         with _REFRESH_WORKER_LOCK:
+            ctx = _mass_add_runtime_context()
+            refresh_queue = ctx.refresh_queue if ctx is not None else comicarr.REFRESH_QUEUE
             for queue_item in queue_items:
-                comicarr.REFRESH_QUEUE.put(queue_item)
+                refresh_queue.put(queue_item)
             if start_worker:
                 _start_refresh_worker()
 

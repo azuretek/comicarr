@@ -720,6 +720,7 @@ class TestConfigService:
         job = MagicMock()
         job.next_run_time = datetime.datetime(2026, 7, 12, 0, 0, 0)
         ctx.scheduler.get_job.return_value = job
+        ctx.weekly_status = "Waiting"
         monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
         monkeypatch.setattr(comicarr, "WEEKLY_MANUAL_NEXT_RUN", None)
 
@@ -730,6 +731,8 @@ class TestConfigService:
         assert result["state"] == "queued"
         job.modify.assert_called_once()
         upsert.assert_called_once_with("jobhistory", {"status": "Queued"}, {"JobName": "Weekly Pullist"})
+        assert ctx.weekly_manual_next_run == job.next_run_time
+        assert ctx.weekly_status == "Queued"
         assert comicarr.WEEKLY_MANUAL_NEXT_RUN == job.next_run_time
 
     def test_weekly_refresh_coalesces_an_already_queued_request(self, monkeypatch):
@@ -738,6 +741,7 @@ class TestConfigService:
         job = MagicMock()
         job.next_run_time = "2026-07-12T00:00:00Z"
         ctx.scheduler.get_job.return_value = job
+        ctx.weekly_status = "Queued"
         monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Queued")
 
         result = system_service.request_weekly_refresh(ctx)
@@ -755,6 +759,7 @@ class TestConfigService:
         job = MagicMock()
         job.next_run_time = "2026-07-12T00:00:00Z"
         ctx.scheduler.get_job.return_value = job
+        ctx.weekly_status = "Running"
         monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Running")
 
         result = system_service.request_weekly_refresh(ctx)

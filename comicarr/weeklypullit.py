@@ -24,10 +24,37 @@ import comicarr
 from comicarr import helpers, logger, weeklypull
 
 
+def _weekly_runtime_context():
+    """Return the canonical context when lifecycle startup has completed."""
+    from comicarr.app.core.runtime import get_runtime_if_initialized
+
+    ctx = get_runtime_if_initialized()
+    return ctx if ctx is not None and not ctx.disposed else None
+
+
+def _get_weekly_runtime_value(context_field, legacy_name):
+    """Read canonical weekly state, with a pre-factory legacy fallback."""
+    ctx = _weekly_runtime_context()
+    if ctx is not None:
+        return getattr(ctx, context_field)
+    return getattr(comicarr, legacy_name)
+
+
+def _set_weekly_runtime_value(context_field, legacy_name, value):
+    """Write weekly state once and project the same value to legacy callers."""
+    ctx = _weekly_runtime_context()
+    if ctx is not None:
+        from comicarr.app.core.runtime import set_runtime_field
+
+        return set_runtime_field(ctx, context_field, value)
+    setattr(comicarr, legacy_name, value)
+    return value
+
+
 def _restore_manual_next_run():
     """Restore the recurring schedule displaced by an immediate manual run."""
-    scheduled_run = getattr(comicarr, "WEEKLY_MANUAL_NEXT_RUN", None)
-    comicarr.WEEKLY_MANUAL_NEXT_RUN = None
+    scheduled_run = _get_weekly_runtime_value("weekly_manual_next_run", "WEEKLY_MANUAL_NEXT_RUN")
+    _set_weekly_runtime_value("weekly_manual_next_run", "WEEKLY_MANUAL_NEXT_RUN", None)
     if not isinstance(scheduled_run, datetime.datetime):
         return
 
@@ -36,7 +63,8 @@ def _restore_manual_next_run():
         return
 
     try:
-        job = comicarr.SCHED.get_job("weekly")
+        scheduler = _get_weekly_runtime_value("scheduler", "SCHED")
+        job = scheduler.get_job("weekly") if scheduler is not None else None
         if job is not None:
             job.modify(next_run_time=scheduled_run)
     except Exception as e:
@@ -55,7 +83,7 @@ class Weekly:
             helpers.job_management(
                 write=True, job="Weekly Pullist", current_run=helpers.utctimestamp(), status="Running"
             )
-            comicarr.WEEKLY_STATUS = "Running"
+            _set_weekly_runtime_value("weekly_status", "WEEKLY_STATUS", "Running")
             try:
                 pull_result = weeklypull.pullit()
                 if isinstance(pull_result, dict) and pull_result.get("status") == "failure":
@@ -72,11 +100,11 @@ class Weekly:
                     failure=True,
                     failure_message=e,
                 )
-                comicarr.WEEKLY_STATUS = "Error"
+                _set_weekly_runtime_value("weekly_status", "WEEKLY_STATUS", "Error")
                 raise
 
             _restore_manual_next_run()
             helpers.job_management(
                 write=True, job="Weekly Pullist", last_run_completed=helpers.utctimestamp(), status="Waiting"
             )
-            comicarr.WEEKLY_STATUS = "Waiting"
+            _set_weekly_runtime_value("weekly_status", "WEEKLY_STATUS", "Waiting")

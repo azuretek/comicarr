@@ -22,9 +22,10 @@ import time
 import xml.etree.ElementTree as ET
 import zipfile
 
-import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
+from comicarr.app.ai.runtime import get_ai_runtime
 from comicarr.app.ai.sanitize import sanitize_input, spotlight_wrap
 from comicarr.app.ai.schemas import MetadataEnrichment
 from comicarr.app.ai.structured import request_structured
@@ -45,11 +46,12 @@ def enrich_metadata(cbz_path, issue_id):
 
     Returns number of fields enriched, or 0 on skip/failure.
     """
-    if comicarr.AI_CLIENT is None:
+    ctx = get_ai_runtime()
+    if ctx is None or ctx.ai_client is None or ctx.config is None:
         return 0
-    if not comicarr.AI_CIRCUIT_BREAKER.allow_request():
+    if ctx.ai_circuit_breaker is None or not ctx.ai_circuit_breaker.allow_request():
         return 0
-    if not comicarr.AI_RATE_LIMITER.can_request():
+    if ctx.ai_rate_limiter is None or not ctx.ai_rate_limiter.can_request():
         return 0
 
     # Read ComicInfo.xml from CBZ
@@ -92,16 +94,16 @@ def enrich_metadata(cbz_path, issue_id):
     start_time = time.time()
     try:
         result = request_structured(
-            client=comicarr.AI_CLIENT,
-            model=comicarr.CONFIG.AI_MODEL,
+            client=ctx.ai_client,
+            model=ctx.config.AI_MODEL,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             schema_class=MetadataEnrichment,
             temperature=0.1,
-            timeout=comicarr.CONFIG.AI_TIMEOUT or 30,
+            timeout=ctx.config.AI_TIMEOUT or 30,
         )
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_success()
+        ctx.ai_circuit_breaker.record_success()
 
         # Filter: only accept values for fields that were actually blank
         enriched = {}
@@ -121,7 +123,7 @@ def enrich_metadata(cbz_path, issue_id):
         ai_service.log_activity(
             feature_type="enrichment",
             action="Enriched %d fields for issue %s" % (len(enriched), issue_id),
-            model=comicarr.CONFIG.AI_MODEL,
+            model=ctx.config.AI_MODEL,
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -135,11 +137,11 @@ def enrich_metadata(cbz_path, issue_id):
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_failure()
+        ctx.ai_circuit_breaker.record_failure()
         ai_service.log_activity(
             feature_type="enrichment",
             action="Enrichment failed for issue %s" % issue_id,
-            model=comicarr.CONFIG.AI_MODEL or "",
+            model=ctx.config.AI_MODEL or "",
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -222,28 +224,29 @@ def _store_history(issue_id, enriched_fields):
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     for field_name, ai_value in enriched_fields.items():
-        db.DBConnection().action(
-            "INSERT INTO ai_metadata_history "
-            "(entity_type, entity_id, field_name, original_value, ai_value, source, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ["issue", issue_id, field_name, None, ai_value, "enrichment", now],
+        ai_queries.insert_metadata_history(
+            {
+                "entity_type": "issue",
+                "entity_id": issue_id,
+                "field_name": field_name,
+                "original_value": None,
+                "ai_value": ai_value,
+                "source": "enrichment",
+                "created_at": now,
+            }
         )
 
 
 def revert_field(issue_id, field_name, cbz_path):
     """Revert an AI-enriched field back to blank."""
     # Validate issue exists
-    issue = db.DBConnection().select("SELECT IssueID FROM issues WHERE IssueID = ?", [issue_id])
-    if not issue:
+    if not ai_queries.issue_exists(issue_id):
         raise ValueError("Issue %s not found" % issue_id)
 
     # Remove enriched value from CBZ (set field to empty)
     _write_comicinfo(cbz_path, {field_name: ""})
 
     # Delete history entry
-    db.DBConnection().action(
-        "DELETE FROM ai_metadata_history WHERE entity_type = ? AND entity_id = ? AND field_name = ? AND source = ?",
-        ["issue", issue_id, field_name, "enrichment"],
-    )
+    ai_queries.delete_metadata_history("issue", issue_id, field_name, "enrichment")
 
     logger.fdebug("[AI-ENRICH] Reverted %s for issue %s" % (field_name, issue_id))

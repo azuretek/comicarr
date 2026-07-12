@@ -14,8 +14,9 @@ AI service — business logic for activity logging, status, and connection testi
 import datetime
 import time
 
-import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
+from comicarr.app.ai.runtime import get_ai_runtime
 
 
 def log_activity(
@@ -35,34 +36,28 @@ def log_activity(
     success_str = "true" if success else "false"
 
     try:
-        db.DBConnection().action(
-            "INSERT INTO ai_activity_log "
-            "(timestamp, feature_type, action_description, model, prompt_tokens, "
-            "completion_tokens, latency_ms, success, error_message, entity_type, entity_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                timestamp,
-                feature_type,
-                action,
-                model,
-                prompt_tokens,
-                completion_tokens,
-                latency_ms,
-                success_str,
-                error_message,
-                entity_type,
-                entity_id,
-            ],
+        ai_queries.insert_activity(
+            {
+                "timestamp": timestamp,
+                "feature_type": feature_type,
+                "action_description": action,
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "latency_ms": latency_ms,
+                "success": success_str,
+                "error_message": error_message,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+            }
         )
     except Exception as e:
         logger.error("[AI-SERVICE] Failed to log activity: %s" % e)
 
     # Publish SSE event for real-time frontend updates
     try:
-        event_bus = getattr(comicarr, "EVENT_BUS", None)
-        if event_bus is None:
-            # Try AppContext path (FastAPI lifespan stores it on app.state.ctx)
-            pass
+        ctx = get_ai_runtime()
+        event_bus = ctx.event_bus if ctx is not None else None
         if event_bus:
             event_bus.publish_sync(
                 "ai_activity",
@@ -80,10 +75,7 @@ def log_activity(
 def get_activity(limit=50, offset=0):
     """Read recent activity log entries."""
     try:
-        rows = db.DBConnection().select(
-            "SELECT * FROM ai_activity_log ORDER BY id DESC LIMIT ? OFFSET ?",
-            [limit, offset],
-        )
+        rows = ai_queries.get_activity(limit, offset)
         return rows if rows else []
     except Exception as e:
         logger.error("[AI-SERVICE] Failed to read activity log: %s" % e)
@@ -92,7 +84,8 @@ def get_activity(limit=50, offset=0):
 
 def get_ai_status():
     """Return a dict describing current AI configuration and usage state."""
-    config = comicarr.CONFIG
+    ctx = get_ai_runtime()
+    config = ctx.config if ctx is not None else None
 
     configured = (
         bool(
@@ -105,13 +98,13 @@ def get_ai_status():
     )
 
     circuit_state = "closed"
-    cb = comicarr.AI_CIRCUIT_BREAKER
+    cb = ctx.ai_circuit_breaker if ctx is not None else None
     if cb:
         circuit_state = cb.state
 
     today_tokens = 0
     today_requests = 0
-    rl = comicarr.AI_RATE_LIMITER
+    rl = ctx.ai_rate_limiter if ctx is not None else None
     if rl:
         today_tokens = rl.today_tokens
         today_requests = rl.today_requests

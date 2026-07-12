@@ -20,9 +20,10 @@ import json
 import time
 from datetime import datetime
 
-import comicarr
-from comicarr import db, logger
+from comicarr import logger
+from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
+from comicarr.app.ai.runtime import get_ai_runtime
 from comicarr.app.ai.sanitize import sanitize_input
 from comicarr.app.ai.schemas import SearchExpansion
 from comicarr.app.ai.structured import request_structured
@@ -33,12 +34,13 @@ def expand_search_queries(comic_id, series_name, publisher=None, year=None):
 
     Returns list of alternate query strings, or empty list on failure.
     """
-    if comicarr.AI_CLIENT is None:
+    ctx = get_ai_runtime()
+    if ctx is None or ctx.ai_client is None or ctx.config is None:
         return []
-    if not comicarr.AI_CIRCUIT_BREAKER.allow_request():
+    if ctx.ai_circuit_breaker is None or not ctx.ai_circuit_breaker.allow_request():
         logger.fdebug("[AI-SEARCH] Circuit breaker open, skipping expansion for %s" % comic_id)
         return []
-    if not comicarr.AI_RATE_LIMITER.can_request():
+    if ctx.ai_rate_limiter is None or not ctx.ai_rate_limiter.can_request():
         logger.fdebug("[AI-SEARCH] Rate limit reached, skipping expansion for %s" % comic_id)
         return []
 
@@ -70,16 +72,16 @@ def expand_search_queries(comic_id, series_name, publisher=None, year=None):
     start_time = time.time()
     try:
         result = request_structured(
-            client=comicarr.AI_CLIENT,
-            model=comicarr.CONFIG.AI_MODEL,
+            client=ctx.ai_client,
+            model=ctx.config.AI_MODEL,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             schema_class=SearchExpansion,
             temperature=0.3,
-            timeout=comicarr.CONFIG.AI_TIMEOUT or 30,
+            timeout=ctx.config.AI_TIMEOUT or 30,
         )
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_success()
+        ctx.ai_circuit_breaker.record_success()
 
         # Deduplicate against existing alternates
         new_alternates = []
@@ -95,7 +97,7 @@ def expand_search_queries(comic_id, series_name, publisher=None, year=None):
         ai_service.log_activity(
             feature_type="search",
             action="Generated %d alternates for '%s'" % (len(new_alternates), series_name),
-            model=comicarr.CONFIG.AI_MODEL,
+            model=ctx.config.AI_MODEL,
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -109,11 +111,11 @@ def expand_search_queries(comic_id, series_name, publisher=None, year=None):
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_failure()
+        ctx.ai_circuit_breaker.record_failure()
         ai_service.log_activity(
             feature_type="search",
             action="Search expansion failed for '%s'" % series_name,
-            model=comicarr.CONFIG.AI_MODEL or "",
+            model=ctx.config.AI_MODEL or "",
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -130,16 +132,19 @@ def persist_successful_expansion(comic_id, successful_alternate):
     current = _get_alternate_search(comic_id)
     if successful_alternate.lower() not in {a.lower() for a in current}:
         new_value = "##".join(current + [successful_alternate]) if current else successful_alternate
-        db.DBConnection().action("UPDATE comics SET AlternateSearch = ? WHERE ComicID = ?", [new_value, comic_id])
+        ai_queries.update_alternate_search(comic_id, new_value)
 
     # Track in ai_cache for counting AI expansions
     existing = _get_ai_expansions(comic_id)
     existing.append(successful_alternate)
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-    db.DBConnection().action(
-        "INSERT OR REPLACE INTO ai_cache (cache_key, cache_type, data, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
-        ["expansion_%s" % comic_id, "expansion", json.dumps(existing), now, "9999-12-31"],
+    ai_queries.upsert_cache_entry(
+        "expansion_%s" % comic_id,
+        "expansion",
+        json.dumps(existing),
+        now,
+        "9999-12-31",
     )
 
     logger.fdebug('[AI-SEARCH] Persisted expansion "%s" for comic %s' % (successful_alternate, comic_id))
@@ -147,20 +152,18 @@ def persist_successful_expansion(comic_id, successful_alternate):
 
 def _get_alternate_search(comic_id):
     """Get current AlternateSearch values for a comic."""
-    result = db.DBConnection().select("SELECT AlternateSearch FROM comics WHERE ComicID = ?", [comic_id])
-    if result and result[0].get("AlternateSearch"):
-        return [a.strip() for a in result[0]["AlternateSearch"].split("##") if a.strip()]
+    result = ai_queries.get_alternate_search(comic_id)
+    if result and result.get("AlternateSearch"):
+        return [a.strip() for a in result["AlternateSearch"].split("##") if a.strip()]
     return []
 
 
 def _get_ai_expansions(comic_id):
     """Get AI-generated expansions from cache."""
-    result = db.DBConnection().select(
-        "SELECT data FROM ai_cache WHERE cache_key = ? AND cache_type = ?", ["expansion_%s" % comic_id, "expansion"]
-    )
-    if result and result[0].get("data"):
+    result = ai_queries.get_cache_entry("expansion_%s" % comic_id, "expansion")
+    if result and result.get("data"):
         try:
-            return json.loads(result[0]["data"])
+            return json.loads(result["data"])
         except (json.JSONDecodeError, TypeError):
             pass
     return []
