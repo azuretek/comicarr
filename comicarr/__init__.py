@@ -884,13 +884,19 @@ def resume_acquisition_runtime(config=None):
     ctx = get_runtime_if_initialized()
     config = config or (ctx.config if ctx is not None else CONFIG)
 
+    def schedule(queue_name):
+        if ctx is not None:
+            queue_schedule(queue_name, "start", ctx=ctx)
+        else:
+            queue_schedule(queue_name, "start")
+
     with ACQUISITION_RESUME_LOCK:
         gate = refresh_runtime_state(config)
         if gate.blocked:
             raise RuntimeError("acquisition remains blocked: %s" % (gate.reason or "unknown gate"))
 
         try:
-            replayed = replay_acquisition_obligations(ctx=ctx)
+            replayed = replay_acquisition_obligations(ctx=ctx) if ctx is not None else replay_acquisition_obligations()
         except Exception as e:
             set_runtime_acquisition_status(
                 workers_blocked=True,
@@ -899,7 +905,7 @@ def resume_acquisition_runtime(config=None):
             raise RuntimeError("durable acquisition replay failed") from e
 
         queues_started = ["search_queue"]
-        queue_schedule("search_queue", "start", ctx=ctx)
+        schedule("search_queue")
         if all(
             [
                 bool(getattr(config, "ENABLE_TORRENTS", False)),
@@ -907,7 +913,7 @@ def resume_acquisition_runtime(config=None):
                 OS_DETECT != "Windows",
             ]
         ) and getattr(config, "TORRENT_DOWNLOADER", None) in {2, 4}:
-            queue_schedule("snatched_queue", "start", ctx=ctx)
+            schedule("snatched_queue")
             queues_started.append("snatched_queue")
         if bool(getattr(config, "POST_PROCESSING", False)) and (
             (
@@ -919,13 +925,13 @@ def resume_acquisition_runtime(config=None):
                 and bool(getattr(config, "NZBGET_CLIENT_POST_PROCESSING", False))
             )
         ):
-            queue_schedule("nzb_queue", "start", ctx=ctx)
+            schedule("nzb_queue")
             queues_started.append("nzb_queue")
         if bool(getattr(config, "POST_PROCESSING", False)):
-            queue_schedule("pp_queue", "start", ctx=ctx)
+            schedule("pp_queue")
             queues_started.append("pp_queue")
         if bool(getattr(config, "ENABLE_DDL", False)):
-            queue_schedule("ddl_queue", "start", ctx=ctx)
+            schedule("ddl_queue")
             queues_started.append("ddl_queue")
 
         # The broad scheduler-status writer is still a documented legacy
