@@ -58,6 +58,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["comicarr*"]
 
+[tool.setuptools.package-data]
+"comicarr._vendor" = ["**/LICENSE", "**/COPYING", "**/NOTICE"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
@@ -86,7 +89,7 @@ source = ["comicarr"]
 omit = [
     "comicarr/rtorrent_test_client.py",
     "comicarr/dependency_check.py",
-    "lib/*",
+    "comicarr/_vendor/*",
 ]
 
 [tool.coverage.report]
@@ -105,6 +108,7 @@ directory = "coverage_html"
 [tool.ruff]
 target-version = "py310"
 line-length = 120
+exclude = ["comicarr/_vendor/**"]
 
 [tool.ruff.lint]
 select = [

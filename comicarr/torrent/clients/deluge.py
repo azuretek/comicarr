@@ -1,10 +1,10 @@
 import base64
 import os
 
-from deluge_client import DelugeRPCClient
-
 import comicarr
 from comicarr import logger
+from comicarr._vendor.deluge_client import DelugeRPCClient
+from comicarr.torrent.contracts import connection_failure
 
 
 class TorrentClient(object):
@@ -13,7 +13,7 @@ class TorrentClient(object):
 
     def connect(self, host, username, password, test=False):
         if self.conn is not None:
-            return self.connect
+            return self.conn
 
         if not host:
             return {"status": False, "error": "No host specified"}
@@ -24,22 +24,31 @@ class TorrentClient(object):
         if not password:
             return {"status": False, "error": "No password specified"}
 
-        # Get port from the config
-        host, portnr = host.split(":")
+        # Get port from the config and fail closed on malformed input.
+        try:
+            host, portnr = host.rsplit(":", 1)
+            if not host or not portnr or not portnr.isdigit():
+                raise ValueError
+            portnr = int(portnr)
+            if not 1 <= portnr <= 65535:
+                raise ValueError
+        except (AttributeError, ValueError):
+            return connection_failure("invalid host; expected host:port")
 
         # logger.info('Connecting to ' + host + ':' + portnr + ' Username: ' + username + ' Password: ' + password )
         try:
             self.client = DelugeRPCClient(host, int(portnr), username, password)
         except Exception as e:
             logger.error("Could not create DelugeRPCClient Object %s" % e)
-            return {"status": False, "error": e}
+            return connection_failure(e)
         else:
             try:
                 self.client.connect()
             except Exception as e:
                 logger.error("Could not connect to Deluge: %s" % host)
-                return {"status": False, "error": e}
+                return connection_failure(e)
             else:
+                self.conn = self.client
                 if test is True:
                     daemon_version = self.client.call("daemon.info")
                     libtorrent_version = self.client.call("core.get_libtorrent_version")
@@ -59,8 +68,8 @@ class TorrentClient(object):
         logger.debug("Getting Torrent info from hash: " + hash)
         try:
             torrent_info = self.client.call("core.get_torrent_status", hash, "")
-        except Exception:
-            logger.error("Could not get torrent info for " + hash)
+        except Exception as e:
+            logger.error("Could not get torrent info for %s: %s", hash, e)
             return False
         else:
             if torrent_info is None:
@@ -76,14 +85,14 @@ class TorrentClient(object):
             try:
                 self.client.call("core.resume_torrent", hash)
             except Exception as e:
-                logger.error("Torrent failed to start " + e)
+                logger.error("Torrent failed to start: %s", e)
             else:
                 logger.info("Torrent " + hash + " was started")
                 return True
 
     def stop_torrent(self, hash):
         try:
-            self.client.find_torrent(hash)
+            self.find_torrent(hash)
         except Exception:
             logger.error("Torrent Not Found")
             return False
@@ -91,7 +100,7 @@ class TorrentClient(object):
             try:
                 self.client.call("core.pause_torrent", hash)
             except Exception as e:
-                logger.error("Torrent failed to be stopped: " + e)
+                logger.error("Torrent failed to be stopped: %s", e)
                 return False
             else:
                 logger.info("Torrent " + hash + " was stopped")
@@ -153,13 +162,13 @@ class TorrentClient(object):
                 logger.info("Setting label to " + comicarr.CONFIG.DELUGE_LABEL)
                 try:
                     self.client.call("label.set_torrent", torrent_id, comicarr.CONFIG.DELUGE_LABEL)
-                except:
+                except Exception:
                     # if label isn't set, let's try and create one.
                     try:
                         self.client.call("label.add", comicarr.CONFIG.DELUGE_LABEL)
                         self.client.call("label.set_torrent", torrent_id, comicarr.CONFIG.DELUGE_LABEL)
-                    except:
-                        logger.warn(
+                    except Exception:
+                        logger.warning(
                             "Unable to set label - Either try to create it manually within Deluge, and/or ensure there are no spaces, capitalization or special characters in label"
                         )
                     else:
@@ -188,13 +197,13 @@ class TorrentClient(object):
 
     def delete_torrent(self, hash, removeData=False):
         try:
-            self.client.find_torrent(hash)
+            self.find_torrent(hash)
         except Exception:
             logger.error("Torrent " + hash + " does not exist")
             return False
         else:
             try:
-                self.client.call("core.remote_torrent", hash, removeData)
+                self.client.call("core.remove_torrent", hash, removeData)
             except Exception:
                 logger.error("Unable to delete torrent " + hash)
                 return False
@@ -205,7 +214,7 @@ class TorrentClient(object):
     def get_the_hash(self, filepath):
         import hashlib
 
-        import bencode
+        from comicarr._vendor import bencode
 
         # Open torrent file
         torrent_file = open(filepath, "rb")

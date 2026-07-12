@@ -1,9 +1,9 @@
 import os
 
-from transmissionrpc import Client
-
 import comicarr
 from comicarr import logger
+from comicarr._vendor.transmissionrpc import Client
+from comicarr.torrent.contracts import connection_failure
 
 
 class TorrentClient(object):
@@ -15,23 +15,23 @@ class TorrentClient(object):
             return self.conn
 
         if not host:
-            return False
+            return connection_failure("No host specified")
         try:
             if username and password:
                 self.conn = Client(host, user=username, password=password)
             else:
                 self.conn = Client(host)
-        except:
-            logger.error("Could not connect to %h" % host)
-            return False
+        except Exception as e:
+            logger.error("Could not connect to %s: %s", host, e)
+            return connection_failure(e)
 
         return self.conn
 
     def find_torrent(self, hash):
         try:
             return self.conn.get_torrent(hash)
-        except KeyError:
-            logger.error("torrent %s does not exist")
+        except (KeyError, AttributeError) as e:
+            logger.error("torrent %s does not exist: %s", hash, e)
             return False
 
     def get_torrent(self, torrent):

@@ -1976,7 +1976,7 @@ class Config(object):
             config.set("OPDS", "opds_endpoint", self.OPDS_ENDPOINT.strip())
 
         # comictagger - force to use included version if option is enabled.
-        import comictaggerlib.ctversion as ctversion
+        from comicarr._vendor.comictaggerlib import ctversion
 
         logger.info("[COMICTAGGER] Version detected: %s" % ctversion.version)
         # if any([self.ENABLE_META, self.CBR2CBZ_ONLY]):

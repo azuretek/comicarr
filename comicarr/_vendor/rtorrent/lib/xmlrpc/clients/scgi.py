@@ -90,7 +90,7 @@ def is_py3():
 import xmlrpc.client
 
 
-from lib.rtorrent.lib.xmlrpc.transports.scgi import SCGITransport
+from comicarr._vendor.rtorrent.lib.xmlrpc.transports.scgi import SCGITransport
 
 
 class SCGIServerProxy(xmlrpc.client.ServerProxy):

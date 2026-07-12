@@ -1,11 +1,8 @@
 #code copied from http://www.doughellmann.com/PyMOTW/urllib2/
 
 import itertools
-import mimetools
 import mimetypes
-from cStringIO import StringIO
-import urllib
-import urllib2
+import uuid
 
 class MultiPartForm(object):
     """Accumulate the data to be used when posting a form."""
@@ -13,7 +10,7 @@ class MultiPartForm(object):
     def __init__(self):
         self.form_fields = []
         self.files = []
-        self.boundary = mimetools.choose_boundary()
+        self.boundary = uuid.uuid4().hex
         return
     
     def get_content_type(self):
@@ -27,8 +24,10 @@ class MultiPartForm(object):
     def add_file(self, fieldname, filename, fileHandle, mimetype=None):
         """Add a file to be uploaded."""
         body = fileHandle.read()
+        if isinstance(body, bytes):
+            body = body.decode("latin1")
         if mimetype is None:
-            mimetype = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            mimetype = mimetypes.guess_type(str(filename))[0] or "application/octet-stream"
         self.files.append((fieldname, filename, mimetype, body))
         return
     

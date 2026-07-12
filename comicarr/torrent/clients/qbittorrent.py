@@ -3,10 +3,10 @@ import re
 import time
 from base64 import b16encode, b32decode
 
-from qbittorrent import Client
-
 import comicarr
 from comicarr import logger
+from comicarr._vendor.qbittorrent import Client
+from comicarr.torrent.contracts import connection_failure
 
 
 class TorrentClient(object):
@@ -15,7 +15,7 @@ class TorrentClient(object):
 
     def connect(self, host, username, password, test=False):
         if self.conn is not None:
-            return self.connect
+            return self.conn
 
         if not host:
             return {"status": False, "error": "host not specified"}
@@ -24,14 +24,15 @@ class TorrentClient(object):
             self.client = Client(host)
         except Exception as e:
             logger.error("Could not create qBittorrent Object %s" % e)
-            return {"status": False, "error": e}
+            return connection_failure(e)
         else:
             try:
                 self.client.login(username, password)
             except Exception as e:
                 logger.error("Could not connect to qBittorrent: %s" % host)
-                return {"status": False, "error": e}
+                return connection_failure(e)
             else:
+                self.conn = self.client
                 if test is True:
                     version = self.client.qbittorrent_version
                     return {"status": True, "version": version}
@@ -50,8 +51,8 @@ class TorrentClient(object):
         logger.debug("Getting Torrent info hash: %s" % hash)
         try:
             torrent_info = self.client.get_torrent(hash)
-        except Exception:
-            logger.error("Could not get torrent info for %s" % hash)
+        except Exception as e:
+            logger.error("Could not get torrent info for %s: %s", hash, e)
             return False
         else:
             logger.info("Successfully located information for torrent")
@@ -133,8 +134,8 @@ class TorrentClient(object):
                 try:
                     startit = self.client.force_start(hash)
                     logger.info("startit returned: %s" % startit)
-                except:
-                    logger.warn("Unable to force start torrent - please check your client.")
+                except Exception as e:
+                    logger.warning("Unable to force start torrent: %s", e)
             else:
                 logger.info("Client default add action selected. Doing nothing.")
 
@@ -170,7 +171,7 @@ class TorrentClient(object):
     def get_the_hash(self, filepath):
         import hashlib
 
-        import bencode
+        from comicarr._vendor import bencode
 
         # Open torrent file
         torrent_file = open(filepath, "rb")

@@ -26,8 +26,6 @@ import signal
 import sys
 import threading
 
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), "lib"))
-
 URLLIB3_1X_DEFAULT_CIPHERS = ":".join(
     [
         "ECDHE+AESGCM",

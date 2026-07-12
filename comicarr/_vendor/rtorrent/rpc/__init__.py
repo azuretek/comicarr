@@ -22,9 +22,9 @@
 import inspect
 import re
 import xmlrpc.client
-from lib.rtorrent.common import bool_to_int, convert_version_tuple_to_str,\
+from comicarr._vendor.rtorrent.common import bool_to_int, convert_version_tuple_to_str,\
     safe_repr
-from lib.rtorrent.err import MethodError
+from comicarr._vendor.rtorrent.err import MethodError
 from comicarr import logger
 
 

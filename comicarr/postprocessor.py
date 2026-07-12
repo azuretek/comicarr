@@ -3053,7 +3053,7 @@ class PostProcessor(object):
                                     )
                                 except ImportError:
                                     logger.warn(
-                                        "%s comictaggerlib not found on system. Ensure the ENTIRE lib directory is located within comicarr/lib/comictaggerlib/"
+                                        "%s comictaggerlib not found on system. Ensure the bundled vendor package is available at comicarr/_vendor/comictaggerlib/"
                                         % module
                                     )
                                     metaresponse = "fail"
@@ -3950,7 +3950,7 @@ class PostProcessor(object):
                             )
                         except ImportError:
                             logger.warn(
-                                "%s comictaggerlib not found on system. Ensure the ENTIRE lib directory is located within comicarr/lib/comictaggerlib/"
+                                "%s comictaggerlib not found on system. Ensure the bundled vendor package is available at comicarr/_vendor/comictaggerlib/"
                                 % module
                             )
                             metaresponse = "fail"
@@ -4992,7 +4992,7 @@ class PostProcessor(object):
 
             except ImportError:
                 logger.fdebug(
-                    "%s comictaggerlib not found on system. Ensure the ENTIRE lib directory is located within comicarr/lib/comictaggerlib/"
+                    "%s comictaggerlib not found on system. Ensure the bundled vendor package is available at comicarr/_vendor/comictaggerlib/"
                     % module
                 )
                 logger.fdebug("%s continuing with PostProcessing, but I am not using metadata." % module)

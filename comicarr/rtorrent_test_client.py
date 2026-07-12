@@ -23,12 +23,11 @@ import sys
 import time
 from base64 import b16encode, b32decode
 
-import bencode
-
 import comicarr
 from comicarr import helpers, logger
+from comicarr._vendor import bencode
 
-# from lib.unrar2 import RarFile
+# from comicarr._vendor.unrar2 import RarFile
 from .torrent.clients import rtorrent as TorClient
 
 

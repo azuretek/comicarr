@@ -134,7 +134,7 @@ If you are migrating from Mylar3, the first-run onboarding wizard can import an 
 │   │   ├── pages/       # Page components
 │   │   └── lib/         # API client and utilities
 │   └── package.json
-├── lib/                 # Bundled third-party libraries
+├── comicarr/_vendor/    # Namespaced bundled third-party integrations
 ├── docker/              # Docker entrypoint
 ├── docs/                # Additional documentation
 ├── tests/               # Backend unit and integration tests

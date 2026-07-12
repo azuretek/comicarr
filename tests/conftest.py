@@ -20,17 +20,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Mock Missing Optional Dependencies
 # =============================================================================
 # Comicarr has many optional dependencies that may not be installed during testing.
-# We mock these at the module level before any comicarr imports happen.
+# Keep this list limited to integrations that are still genuinely optional. Bundled
+# vendor clients live under ``comicarr._vendor`` and must be imported for real so
+# adapter tests exercise Comicarr's normalization boundary.
 
 # Create mock modules for optional dependencies
 MOCK_MODULES = [
-    "transmissionrpc",
-    "deluge_client",
-    "qbittorrent",
-    "rtorrent",
-    "bencode",
-    "mega",
-    "mega.Mega",
     "mediafire",
     "megaup",
     "openai",
@@ -39,9 +34,6 @@ MOCK_MODULES = [
 for mod_name in MOCK_MODULES:
     if mod_name not in sys.modules:
         mock = MagicMock()
-        # For 'mega' module, we need Mega class
-        if mod_name == "mega":
-            mock.Mega = MagicMock()
         sys.modules[mod_name] = mock
 
 

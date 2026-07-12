@@ -29,7 +29,7 @@ You should receive a response within 72 hours. We will work with you to understa
 
 The following items may be flagged by automated security scanners but are **not security vulnerabilities**:
 
-### ComicVine API Key in `lib/comictaggerlib/comicvinetalker.py`
+### ComicVine API Key in `comicarr/_vendor/comictaggerlib/comicvinetalker.py`
 
 This is the ComicTagger project's publicly distributed default API key, inherited from the upstream Mylar3 codebase. It is not a private credential — the same key is visible in the public ComicTagger repository.
 

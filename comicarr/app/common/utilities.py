@@ -78,7 +78,7 @@ def get_the_hash(filepath):
     """Return SHA-1 hash from a torrent file as uppercase hex string."""
     import logging
 
-    import bencode
+    from comicarr._vendor import bencode
 
     log = logging.getLogger("comicarr")
 
