@@ -124,7 +124,9 @@ describe("DashboardPage", () => {
         .getByRole("button", { name: "Scanning…" })
         .hasAttribute("disabled"),
     ).toBe(true);
-    expect(screen.getByTestId("location").textContent).toBe("/import");
+    await waitFor(() => {
+      expect(screen.getByTestId("location").textContent).toBe("/import");
+    });
   });
 
   it("reports a partial library scan startup failure", async () => {
