@@ -855,12 +855,13 @@ def launch_browser(host, port, root):
         logger.error("Could not launch browser: %s" % e)
 
 
-def replay_acquisition_obligations():
+def replay_acquisition_obligations(ctx=None):
     """Restore durable search and refresh commands before workers start."""
     from comicarr import importer as importer_module
     from comicarr.app.search.commands import replay_search_obligations
 
-    search_count = replay_search_obligations(work_queue=SEARCH_QUEUE)
+    search_queue = ctx.search_queue if ctx is not None else SEARCH_QUEUE
+    search_count = replay_search_obligations(work_queue=search_queue)
     refresh_count = importer_module.replay_refresh_obligations(start_worker=True)
     if search_count or refresh_count:
         logger.info("[ACQUISITION] Replayed %s search and %s refresh obligations" % (search_count, refresh_count))
@@ -878,22 +879,33 @@ def resume_acquisition_runtime(config=None):
     """
 
     from comicarr.app.acquisition.maintenance import refresh_runtime_state
+    from comicarr.app.core.runtime import get_runtime_if_initialized, set_runtime_acquisition_status
 
-    config = config or CONFIG
+    ctx = get_runtime_if_initialized()
+    config = config or (ctx.config if ctx is not None else CONFIG)
+
+    def schedule(queue_name):
+        if ctx is not None:
+            queue_schedule(queue_name, "start", ctx=ctx)
+        else:
+            queue_schedule(queue_name, "start")
+
     with ACQUISITION_RESUME_LOCK:
         gate = refresh_runtime_state(config)
         if gate.blocked:
             raise RuntimeError("acquisition remains blocked: %s" % (gate.reason or "unknown gate"))
 
         try:
-            replayed = replay_acquisition_obligations()
+            replayed = replay_acquisition_obligations(ctx=ctx) if ctx is not None else replay_acquisition_obligations()
         except Exception as e:
-            comicarr.ACQUISITION_WORKERS_BLOCKED = True
-            comicarr.ACQUISITION_BLOCK_REASON = "obligation_replay_failed"
+            set_runtime_acquisition_status(
+                workers_blocked=True,
+                block_reason="obligation_replay_failed",
+            )
             raise RuntimeError("durable acquisition replay failed") from e
 
         queues_started = ["search_queue"]
-        queue_schedule("search_queue", "start")
+        schedule("search_queue")
         if all(
             [
                 bool(getattr(config, "ENABLE_TORRENTS", False)),
@@ -901,7 +913,7 @@ def resume_acquisition_runtime(config=None):
                 OS_DETECT != "Windows",
             ]
         ) and getattr(config, "TORRENT_DOWNLOADER", None) in {2, 4}:
-            queue_schedule("snatched_queue", "start")
+            schedule("snatched_queue")
             queues_started.append("snatched_queue")
         if bool(getattr(config, "POST_PROCESSING", False)) and (
             (
@@ -913,15 +925,19 @@ def resume_acquisition_runtime(config=None):
                 and bool(getattr(config, "NZBGET_CLIENT_POST_PROCESSING", False))
             )
         ):
-            queue_schedule("nzb_queue", "start")
+            schedule("nzb_queue")
             queues_started.append("nzb_queue")
         if bool(getattr(config, "POST_PROCESSING", False)):
-            queue_schedule("pp_queue", "start")
+            schedule("pp_queue")
             queues_started.append("pp_queue")
         if bool(getattr(config, "ENABLE_DDL", False)):
-            queue_schedule("ddl_queue", "start")
+            schedule("ddl_queue")
             queues_started.append("ddl_queue")
 
+        # The broad scheduler-status writer is still a documented legacy
+        # compatibility consumer. Keep its live scalar decisions here until
+        # that coherent system-service wave migrates; queues/pools/scheduler
+        # themselves already use the shared canonical identities above.
         scheduler_statuses = {
             "dbupdater": UPDATER_STATUS,
             "search": SEARCH_STATUS,
@@ -930,11 +946,12 @@ def resume_acquisition_runtime(config=None):
             "monitor": MONITOR_STATUS,
             "importinbox": IMPORTINBOX_STATUS,
         }
+        scheduler = ctx.scheduler if ctx is not None else SCHED
         resumed_jobs = []
         for job_id, status in scheduler_statuses.items():
             if status == "Paused":
                 continue
-            job = SCHED.get_job(job_id)
+            job = scheduler.get_job(job_id)
             if job is None:
                 continue
             job.resume()
@@ -956,7 +973,27 @@ def resume_acquisition_runtime(config=None):
         }
 
 
-def start():
+def start(ctx):
+    """Start scheduler/workers against the pre-created canonical runtime.
+
+    ``Comicarr.py`` creates ``ctx`` only after configuration, schema, and
+    secrets are ready. Rejecting a missing or divergent context prevents a
+    worker from starting against a copied queue/lock/scheduler view.
+    """
+    from comicarr.app.core.runtime import RuntimeNotInitializedError, set_runtime_acquisition_status, set_runtime_field
+
+    if ctx is None or ctx.disposed:
+        raise RuntimeNotInitializedError("Workers cannot start before an active runtime context exists")
+    if (
+        ctx.scheduler is not SCHED
+        or ctx.search_queue is not SEARCH_QUEUE
+        or ctx.ddl_queue is not DDL_QUEUE
+        or ctx.ddl_lock is not DDL_LOCK
+        or ctx.ddl_queued is not DDL_QUEUED
+    ):
+        raise RuntimeNotInitializedError(
+            "Workers must start with the canonical runtime's shared scheduler, queues, locks, and DDL state"
+        )
 
     global _INITIALIZED, started
 
@@ -1043,35 +1080,39 @@ def start():
                 acquisition_gate = refresh_runtime_state(comicarr.CONFIG)
             except Exception as e:
                 acquisition_gate = None
-                comicarr.ACQUISITION_WORKERS_BLOCKED = True
-                comicarr.ACQUISITION_BLOCK_REASON = "maintenance_gate_unavailable"
+                set_runtime_acquisition_status(
+                    workers_blocked=True,
+                    block_reason="maintenance_gate_unavailable",
+                )
                 logger.error("[ACQUISITION] Refusing worker startup because gate refresh failed: %s" % e)
 
-            if comicarr.ACQUISITION_WORKERS_BLOCKED:
+            if ctx.acquisition_workers_blocked:
                 if VERSION_STATUS != "Paused":
                     VERSION_SCHEDULER.resume()
                 logger.warn(
                     "[ACQUISITION] Background acquisition is blocked (%s); diagnostics remain available"
-                    % (acquisition_gate.reason if acquisition_gate else comicarr.ACQUISITION_BLOCK_REASON)
+                    % (acquisition_gate.reason if acquisition_gate else ctx.acquisition_block_reason)
                 )
                 try:
                     SCHED.start()
                 except Exception as e:
                     logger.error("[ACQUISITION] Unable to start diagnostics scheduler: %s" % e)
-                started = True
+                set_runtime_field(ctx, "started", True)
                 return
 
             try:
-                replay_acquisition_obligations()
+                replay_acquisition_obligations(ctx=ctx)
             except Exception as e:
-                comicarr.ACQUISITION_WORKERS_BLOCKED = True
-                comicarr.ACQUISITION_BLOCK_REASON = "obligation_replay_failed"
+                set_runtime_acquisition_status(
+                    workers_blocked=True,
+                    block_reason="obligation_replay_failed",
+                )
                 logger.error("[ACQUISITION] Durable obligation replay failed; workers remain blocked: %s" % e)
                 try:
                     SCHED.start()
                 except Exception as scheduler_error:
                     logger.error("[ACQUISITION] Unable to start diagnostics scheduler: %s" % scheduler_error)
-                started = True
+                set_runtime_field(ctx, "started", True)
                 return
 
             # load up the previous runs from the job sql table so we know stuff...
@@ -1147,24 +1188,24 @@ def start():
                         SEARCH_SCHEDULER.modify(next_run_time=search_diff)
 
             # thread queue control..
-            queue_schedule("search_queue", "start")
+            queue_schedule("search_queue", "start", ctx=ctx)
 
             if all([CONFIG.ENABLE_TORRENTS, CONFIG.AUTO_SNATCH, OS_DETECT != "Windows"]) and any(
                 [CONFIG.TORRENT_DOWNLOADER == 2, CONFIG.TORRENT_DOWNLOADER == 4]
             ):
-                queue_schedule("snatched_queue", "start")
+                queue_schedule("snatched_queue", "start", ctx=ctx)
 
             if CONFIG.POST_PROCESSING is True and (
                 all([CONFIG.NZB_DOWNLOADER == 0, CONFIG.SAB_CLIENT_POST_PROCESSING is True])
                 or all([CONFIG.NZB_DOWNLOADER == 1, CONFIG.NZBGET_CLIENT_POST_PROCESSING is True])
             ):
-                queue_schedule("nzb_queue", "start")
+                queue_schedule("nzb_queue", "start", ctx=ctx)
 
             if CONFIG.POST_PROCESSING is True:
-                queue_schedule("pp_queue", "start")
+                queue_schedule("pp_queue", "start", ctx=ctx)
 
             if CONFIG.ENABLE_DDL is True:
-                queue_schedule("ddl_queue", "start")
+                queue_schedule("ddl_queue", "start", ctx=ctx)
                 if CONFIG.DDL_STUCK_NOTIFY is True:
                     _add_recurring_job(
                         func=helpers.ddl_health_check,
@@ -1300,12 +1341,35 @@ def start():
                 logger.info(e)
                 SCHED.print_jobs()
 
-        started = True
+        set_runtime_field(ctx, "started", True)
 
 
-def queue_schedule(queuetype, mode):
+def queue_schedule(queuetype, mode, ctx=None):
+    """Start/stop legacy workers while preserving canonical pool identity."""
+    from comicarr.app.core.runtime import get_runtime_if_initialized, set_runtime_field
+
+    ctx = ctx or get_runtime_if_initialized()
+    pool_fields = {
+        "SNPOOL": "sn_pool",
+        "NZBPOOL": "nzb_pool",
+        "SEARCHPOOL": "search_pool",
+        "PPPOOL": "pp_pool",
+        "DDLPOOL": "ddl_pool",
+    }
+
+    def get_pool(pool_attr):
+        if ctx is not None:
+            return getattr(ctx, pool_fields[pool_attr])
+        return getattr(comicarr, pool_attr)
+
+    def set_pool(pool_attr, pool):
+        if ctx is not None:
+            set_runtime_field(ctx, pool_fields[pool_attr], pool)
+        else:
+            setattr(comicarr, pool_attr, pool)
+
     def start(pool_attr, target, q_arg, name, before_msg, after_msg):
-        pool = getattr(comicarr, pool_attr)
+        pool = get_pool(pool_attr)
         try:
             if pool.is_alive() is True:
                 return
@@ -1314,7 +1378,7 @@ def queue_schedule(queuetype, mode):
 
         logger.info("[%s] %s" % (name, before_msg))
         thread = threading.Thread(target=target, args=(q_arg,), name=name)
-        setattr(comicarr, pool_attr, thread)
+        set_pool(pool_attr, thread)
         thread.start()
         logger.info("[%s] %s" % (name, after_msg))
 
@@ -1354,7 +1418,7 @@ def queue_schedule(queuetype, mode):
             )
         elif queuetype == "nzb_queue":
             try:
-                if comicarr.NZBPOOL.is_alive() is True:
+                if get_pool("NZBPOOL").is_alive() is True:
                     return
             except Exception:
                 pass
@@ -1367,8 +1431,9 @@ def queue_schedule(queuetype, mode):
                 logger.info(
                     "[NZBGET-MONITOR] Completed post-processing handling enabled for NZBGet. Attempting to background load...."
                 )
-            comicarr.NZBPOOL = threading.Thread(target=helpers.nzb_monitor, args=(NZB_QUEUE,), name="AUTO-COMPLETE-NZB")
-            comicarr.NZBPOOL.start()
+            pool = threading.Thread(target=helpers.nzb_monitor, args=(NZB_QUEUE,), name="AUTO-COMPLETE-NZB")
+            set_pool("NZBPOOL", pool)
+            pool.start()
             if CONFIG.NZB_DOWNLOADER == 0:
                 logger.info(
                     "[AUTO-COMPLETE-NZB] Succesfully started Completed post-processing handling for SABnzbd - will now monitor for completed nzbs within sabnzbd and post-process automatically..."
@@ -1398,7 +1463,7 @@ def queue_schedule(queuetype, mode):
             )
         elif queuetype == "ddl_queue":
             try:
-                if DDLPOOL.is_alive() is True:
+                if get_pool("DDLPOOL").is_alive() is True:
                     return
             except Exception:
                 pass
@@ -1418,7 +1483,7 @@ def queue_schedule(queuetype, mode):
                 or all([comicarr.CONFIG.NZB_DOWNLOADER == 1, comicarr.CONFIG.NZBGET_CLIENT_POST_PROCESSING is True])
             ):
                 return
-            shutdown(comicarr.NZBPOOL, comicarr.NZB_QUEUE, "NZB auto-complete queue")
+            shutdown(get_pool("NZBPOOL"), comicarr.NZB_QUEUE, "NZB auto-complete queue")
 
         if (queuetype == "snatched_queue") or mode == "shutdown":
             if all(
@@ -1430,20 +1495,20 @@ def queue_schedule(queuetype, mode):
                 ]
             ) and any([comicarr.CONFIG.TORRENT_DOWNLOADER == 2, comicarr.CONFIG.TORRENT_DOWNLOADER == 4]):
                 return
-            shutdown(comicarr.SNPOOL, comicarr.SNATCHED_QUEUE, "auto-snatch")
+            shutdown(get_pool("SNPOOL"), comicarr.SNATCHED_QUEUE, "auto-snatch")
 
         if (queuetype == "search_queue") or mode == "shutdown":
-            shutdown(comicarr.SEARCHPOOL, comicarr.SEARCH_QUEUE, "search queue")
+            shutdown(get_pool("SEARCHPOOL"), comicarr.SEARCH_QUEUE, "search queue")
 
         if (queuetype == "pp_queue") or mode == "shutdown":
             if all([comicarr.CONFIG.POST_PROCESSING is True, mode != "shutdown"]):
                 return
-            shutdown(comicarr.PPPOOL, comicarr.PP_QUEUE, "post-processing queue")
+            shutdown(get_pool("PPPOOL"), comicarr.PP_QUEUE, "post-processing queue")
 
         if (queuetype == "ddl_queue") or mode == "shutdown":
             if all([comicarr.CONFIG.ENABLE_DDL is True, mode != "shutdown"]):
                 return
-            shutdown(comicarr.DDLPOOL, comicarr.DDL_QUEUE, "DDL download queue")
+            shutdown(get_pool("DDLPOOL"), comicarr.DDL_QUEUE, "DDL download queue")
 
 
 def sql_db():

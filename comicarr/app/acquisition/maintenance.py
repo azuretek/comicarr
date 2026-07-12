@@ -184,9 +184,14 @@ class MaintenanceConflict(RuntimeError):
 
 
 def _set_schema_globals(status):
-    comicarr.ACQUISITION_SCHEMA_READY = status.ready
-    comicarr.ACQUISITION_SCHEMA_VERSION = status.version
-    comicarr.ACQUISITION_SCHEMA_ERROR = status.error
+    """Project schema readiness through the canonical runtime when available."""
+    from comicarr.app.core.runtime import set_runtime_acquisition_status
+
+    set_runtime_acquisition_status(
+        schema_ready=status.ready,
+        schema_version=status.version,
+        schema_error=status.error,
+    )
 
 
 def _current_version(engine):
@@ -1082,6 +1087,10 @@ def refresh_runtime_state(config=None, engine=None):
             heartbeat_at=fence.heartbeat_at,
             reconciliation_state=reconciliation_state,
         )
-    comicarr.ACQUISITION_WORKERS_BLOCKED = status.blocked
-    comicarr.ACQUISITION_BLOCK_REASON = status.reason
+    from comicarr.app.core.runtime import set_runtime_acquisition_status
+
+    set_runtime_acquisition_status(
+        workers_blocked=status.blocked,
+        block_reason=status.reason,
+    )
     return status

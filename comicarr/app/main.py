@@ -12,7 +12,6 @@ FastAPI application — lifespan, router composition, static file serving.
 """
 
 import asyncio
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -23,7 +22,6 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 from starlette.staticfiles import StaticFiles
 
-from comicarr.app.core.context import AppContext
 from comicarr.app.core.events import EventBus
 from comicarr.app.core.exceptions import register_exception_handlers
 from comicarr.app.core.middleware import (
@@ -31,7 +29,7 @@ from comicarr.app.core.middleware import (
     SecurityHeadersMiddleware,
     SetupGateMiddleware,
 )
-from comicarr.app.core.security import generate_ephemeral_key, load_or_create_jwt_key
+from comicarr.app.core.runtime import get_runtime, set_runtime_acquisition_status, set_runtime_field
 
 # Bounded worker-drain timeout for the authoritative lifespan shutdown drain.
 # The legacy ad-hoc value was pool.join(5) which is almost certainly too short
@@ -43,12 +41,21 @@ SHUTDOWN_DRAIN_TIMEOUT = 30.0
 
 # All pipeline worker pools. The bounded join below is RELOCATED here from
 # queue_schedule()'s shutdown branch so the FastAPI lifespan is the single
-# authoritative drain. MASS_REFRESH is on-demand but still owns database work
-# and must not outlive engine disposal.
-_WORKER_POOLS = ("SNPOOL", "NZBPOOL", "SEARCHPOOL", "PPPOOL", "DDLPOOL", "MASS_REFRESH")
+# authoritative drain. MASS_ADD and MASS_REFRESH are on-demand but still own
+# database work and must not outlive engine disposal.
+_WORKER_POOLS = ("SNPOOL", "NZBPOOL", "SEARCHPOOL", "PPPOOL", "DDLPOOL", "MASS_ADD", "MASS_REFRESH")
+_CONTEXT_POOL_FIELDS = {
+    "SNPOOL": "sn_pool",
+    "NZBPOOL": "nzb_pool",
+    "SEARCHPOOL": "search_pool",
+    "PPPOOL": "pp_pool",
+    "DDLPOOL": "ddl_pool",
+    "MASS_ADD": "mass_add_pool",
+    "MASS_REFRESH": "mass_refresh_pool",
+}
 
 
-def _drain_worker_pools(timeout):
+def _drain_worker_pools(timeout, ctx=None):
     """Bounded join of every live worker pool — runs OFF the event loop.
 
     Relocated from queue_schedule()'s shutdown branch. Each pool gets a
@@ -68,7 +75,11 @@ def _drain_worker_pools(timeout):
     deadline = time.monotonic() + timeout
 
     for pool_attr in _WORKER_POOLS:
-        pool = getattr(comicarr, pool_attr, None)
+        pool = getattr(ctx, _CONTEXT_POOL_FIELDS[pool_attr], None) if ctx is not None else None
+        if pool is None:
+            # Pre-factory legacy tests and the remaining bootstrap bridge use
+            # the same pool objects through these aliases.
+            pool = getattr(comicarr, pool_attr, None)
         if pool is None:
             continue
         try:
@@ -92,88 +103,6 @@ def _drain_worker_pools(timeout):
             logger.error("[SHUTDOWN] Error joining %s: %s" % (pool_attr, e))
 
 
-def _build_context_from_globals():
-    """Bridge: populate AppContext from existing comicarr.__init__ globals.
-
-    This is the transition layer. As domains migrate, they'll read from
-    AppContext instead of comicarr.VARIABLE. Eventually the globals go away.
-    """
-    import comicarr
-
-    ctx = AppContext(
-        prog_dir=comicarr.PROG_DIR or "",
-        data_dir=comicarr.DATA_DIR or "",
-        db_file=comicarr.DB_FILE or "",
-        config=comicarr.CONFIG,
-        scheduler=comicarr.SCHED,
-        init_lock=comicarr.INIT_LOCK,
-        search_lock=comicarr.SEARCHLOCK,
-        api_lock=comicarr.APILOCK,
-        ddl_lock=comicarr.DDL_LOCK,
-        snatched_queue=comicarr.SNATCHED_QUEUE,
-        nzb_queue=comicarr.NZB_QUEUE,
-        pp_queue=comicarr.PP_QUEUE,
-        search_queue=comicarr.SEARCH_QUEUE,
-        ddl_queue=comicarr.DDL_QUEUE,
-        return_nzb_queue=comicarr.RETURN_THE_NZBQUEUE,
-        add_list=comicarr.ADD_LIST,
-        issue_watch_list=comicarr.ISSUE_WATCH_LIST,
-        refresh_queue=comicarr.REFRESH_QUEUE,
-        cv_session=comicarr.CV_SESSION,
-        cv_rate_limiter=comicarr.CV_RATE_LIMITER,
-        cv_cache=comicarr.CV_CACHE,
-        metron_api=comicarr.METRON_API,
-        comic_sort=comicarr.COMICSORT,
-        publisher_imprints=comicarr.PUBLISHER_IMPRINTS or {},
-        provider_blocklist=comicarr.PROVIDER_BLOCKLIST or [],
-        ddl_queued=set(comicarr.DDL_QUEUED) if comicarr.DDL_QUEUED else set(),
-        ddl_stuck_notified=comicarr.DDL_STUCK_NOTIFIED or set(),
-        pack_issueids_dont_queue=comicarr.PACK_ISSUEIDS_DONT_QUEUE or {},
-        folder_cache=comicarr.FOLDER_CACHE,
-        check_folder_cache=comicarr.CHECK_FOLDER_CACHE,
-        monitor_status=comicarr.MONITOR_STATUS or "Waiting",
-        search_status=comicarr.SEARCH_STATUS or "Waiting",
-        rss_status=comicarr.RSS_STATUS or "Waiting",
-        weekly_status=comicarr.WEEKLY_STATUS or "Waiting",
-        version_status=comicarr.VERSION_STATUS or "Waiting",
-        updater_status=comicarr.UPDATER_STATUS or "Waiting",
-        force_status=comicarr.FORCE_STATUS or {},
-        import_status=comicarr.IMPORT_STATUS,
-        import_files=comicarr.IMPORT_FILES or 0,
-        import_totalfiles=comicarr.IMPORT_TOTALFILES or 0,
-        import_cid_count=comicarr.IMPORT_CID_COUNT or 0,
-        import_parsed_count=comicarr.IMPORT_PARSED_COUNT or 0,
-        import_failure_count=comicarr.IMPORT_FAILURE_COUNT or 0,
-        import_lock=comicarr.IMPORTLOCK or False,
-        import_button=comicarr.IMPORTBUTTON or False,
-        download_apikey=comicarr.DOWNLOAD_APIKEY,
-        sse_key=comicarr.SSE_KEY or generate_ephemeral_key(),
-        setup_token=comicarr.SETUP_TOKEN,
-        backend_status_ws=comicarr.BACKENDSTATUS_WS or "up",
-        backend_status_cv=comicarr.BACKENDSTATUS_CV or "up",
-        provider_status=comicarr.PROVIDER_STATUS or {},
-        current_version=comicarr.CURRENT_VERSION,
-        current_version_name=comicarr.CURRENT_VERSION_NAME,
-        current_release_name=comicarr.CURRENT_RELEASE_NAME,
-        latest_version=comicarr.LATEST_VERSION,
-        commits_behind=comicarr.COMMITS_BEHIND,
-        install_type=comicarr.INSTALL_TYPE,
-        current_branch=comicarr.CURRENT_BRANCH,
-        signal=comicarr.SIGNAL,
-        started=comicarr.started,
-        start_up=comicarr.START_UP,
-        update_value=comicarr.UPDATE_VALUE or {},
-    )
-
-    secure_dir = getattr(comicarr.CONFIG, "SECURE_DIR", None) if comicarr.CONFIG else None
-    if secure_dir:
-        ctx.jwt_secret_key = load_or_create_jwt_key(secure_dir)
-    else:
-        ctx.jwt_secret_key = os.urandom(32)
-
-    return ctx
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan — startup and shutdown."""
@@ -181,9 +110,11 @@ async def lifespan(app: FastAPI):
     executor = ThreadPoolExecutor(max_workers=20)
     loop.set_default_executor(executor)
 
-    ctx = _build_context_from_globals()
+    # Worker bootstrap creates the only process runtime. Lifespan attaches it
+    # to FastAPI; rebuilding a context here would fork queue/lock/set state.
+    ctx = get_runtime()
 
-    event_bus = EventBus()
+    event_bus = ctx.event_bus or EventBus()
     event_bus.set_loop(loop)
     ctx.event_bus = event_bus
 
@@ -199,44 +130,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         import comicarr
 
-        comicarr.ACQUISITION_WORKERS_BLOCKED = True
-        comicarr.ACQUISITION_BLOCK_REASON = "maintenance_gate_unavailable"
+        set_runtime_acquisition_status(
+            workers_blocked=True,
+            block_reason="maintenance_gate_unavailable",
+        )
         app.state.acquisition_maintenance = {
             "blocked": True,
             "reason": "maintenance_gate_unavailable",
             "schema_ready": bool(getattr(comicarr, "ACQUISITION_SCHEMA_READY", False)),
         }
 
-    # Initialize AI client if configured
     from comicarr import logger
-    from comicarr.app.ai.circuit_breaker import CircuitBreaker
-    from comicarr.app.ai.client import create_ai_clients
-    from comicarr.app.ai.rate_limiter import AIRateLimiter
-
-    ai_config = ctx.config
-    if ai_config and getattr(ai_config, "AI_BASE_URL", None) and getattr(ai_config, "AI_API_KEY", None):
-        sync_client, async_client = create_ai_clients(ai_config)
-        if sync_client:
-            cb = CircuitBreaker(
-                threshold=getattr(ai_config, "AI_CIRCUIT_THRESHOLD", 5),
-                cooldown=getattr(ai_config, "AI_CIRCUIT_COOLDOWN", 300),
-            )
-            rl = AIRateLimiter(
-                rpm_limit=getattr(ai_config, "AI_RPM_LIMIT", 20),
-                daily_token_limit=getattr(ai_config, "AI_DAILY_TOKEN_LIMIT", 100000),
-            )
-            ctx.ai_client = sync_client
-            ctx.ai_async_client = async_client
-            ctx.ai_circuit_breaker = cb
-            ctx.ai_rate_limiter = rl
-            # Set module-level for background pipeline access
-            import comicarr as _comicarr
-
-            _comicarr.AI_CLIENT = sync_client
-            _comicarr.AI_ASYNC_CLIENT = async_client
-            _comicarr.AI_CIRCUIT_BREAKER = cb
-            _comicarr.AI_RATE_LIMITER = rl
-            logger.info("[AI] Client initialized: %s" % getattr(ai_config, "AI_BASE_URL", ""))
 
     yield
 
@@ -276,6 +180,10 @@ async def lifespan(app: FastAPI):
         ctx.pp_queue,
         ctx.search_queue,
         ctx.ddl_queue,
+        # MASS_ADD reads ADD_LIST as its shutdown sentinel. ISSUE_WATCH_LIST
+        # carries real issue IDs, so it is drained rather than poisoned with a
+        # value that could be treated as an issue during an in-flight loop.
+        ctx.add_list,
         ctx.refresh_queue,
     ]:
         try:
@@ -292,7 +200,7 @@ async def lifespan(app: FastAPI):
     #    worker journal write never hits a disposed engine (R7/R8/AE5).
     drain_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shutdown-drain")
     try:
-        await loop.run_in_executor(drain_executor, _drain_worker_pools, SHUTDOWN_DRAIN_TIMEOUT)
+        await loop.run_in_executor(drain_executor, _drain_worker_pools, SHUTDOWN_DRAIN_TIMEOUT, ctx)
         logger.info("[SHUTDOWN] Worker drain complete")
     except Exception as e:
         logger.error("[SHUTDOWN] Error during worker drain: %s" % e)
@@ -304,6 +212,13 @@ async def lifespan(app: FastAPI):
             logger.info("[SHUTDOWN] AI async client closed")
         except Exception as e:
             logger.error("[SHUTDOWN] Error closing AI client: %s" % e)
+
+    if ctx.ai_client:
+        try:
+            ctx.ai_client.close()
+            logger.info("[SHUTDOWN] AI sync client closed")
+        except Exception as e:
+            logger.error("[SHUTDOWN] Error closing AI sync client: %s" % e)
 
     if ctx.cv_session:
         try:
@@ -341,8 +256,9 @@ async def lifespan(app: FastAPI):
     #    `if not comicarr.SIGNAL:` preserves restart/update/maintenance
     #    intent (documented prior regression: an unconditional write here
     #    made restart indistinguishable from shutdown).
-    if not comicarr.SIGNAL:
-        comicarr.SIGNAL = "shutdown"
+    signal = comicarr.SIGNAL or ctx.signal or "shutdown"
+    set_runtime_field(ctx, "signal", signal)
+    set_runtime_field(ctx, "disposed", True, project_legacy=False)
 
     logger.info("[SHUTDOWN] FastAPI lifespan shutdown complete")
 

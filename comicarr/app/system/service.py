@@ -158,8 +158,8 @@ def announce_setup_token(setup_token):
 
 def initial_setup(ctx, username, password, setup_token):
     """Handle first-run credential setup."""
-    import comicarr
     from comicarr import encrypted
+    from comicarr.app.core.runtime import set_runtime_field
 
     if getattr(ctx.config, "HTTP_USERNAME", None) and getattr(ctx.config, "HTTP_PASSWORD", None):
         return {"success": False, "error": "Credentials already configured"}
@@ -192,12 +192,10 @@ def initial_setup(ctx, username, password, setup_token):
 
     logger.info("[AUTH-SETUP] Initial credentials configured for user: %s" % username)
 
-    ctx.setup_token = None
-    comicarr.SETUP_TOKEN = None
+    set_runtime_field(ctx, "setup_token", None)
 
     # Signal restart for session config to take effect
-    ctx.signal = "restart"
-    comicarr.SIGNAL = "restart"
+    set_runtime_field(ctx, "signal", "restart")
 
     return {"success": True, "username": username, "needs_restart": True}
 
@@ -749,6 +747,8 @@ def _get_job_history(job_name):
 
 def request_weekly_refresh(ctx):
     """Queue the existing weekly APScheduler job for an immediate, coalesced run."""
+    from comicarr.app.core.runtime import set_runtime_field
+
     with get_weekly_refresh_lock():
         scheduler = getattr(ctx, "scheduler", None)
         if scheduler is None:
@@ -758,7 +758,7 @@ def request_weekly_refresh(ctx):
         if job is None:
             return {"accepted": False, "state": "unavailable", "error": "Weekly scheduler job is unavailable"}
 
-        state = _weekly_state(getattr(comicarr, "WEEKLY_STATUS", "Waiting"))
+        state = _weekly_state(ctx.weekly_status)
         if state == "running":
             return {
                 "accepted": False,
@@ -775,10 +775,9 @@ def request_weekly_refresh(ctx):
             }
 
         next_run_time = datetime.datetime.utcnow()
-        comicarr.WEEKLY_MANUAL_NEXT_RUN = job.next_run_time
+        set_runtime_field(ctx, "weekly_manual_next_run", job.next_run_time)
         job.modify(next_run_time=next_run_time)
-        comicarr.WEEKLY_STATUS = "Queued"
-        ctx.weekly_status = "Queued"
+        set_runtime_field(ctx, "weekly_status", "Queued")
         try:
             db.upsert("jobhistory", {"status": "Queued"}, {"JobName": WEEKLY_JOB_NAME})
         except Exception as e:
@@ -888,7 +887,7 @@ def get_startup_diagnostics(ctx, include_acquisition=True):
             db_empty = count == 0
     except Exception as e:
         logger.warn("[DIAGNOSTICS] Live db_empty check failed, falling back to startup flag: %s" % e)
-        db_empty = comicarr.DB_EMPTY
+        db_empty = ctx.db_empty
 
     result = {
         "db_empty": db_empty,
@@ -901,7 +900,7 @@ def get_startup_diagnostics(ctx, include_acquisition=True):
 
             result["acquisition"] = get_search_health(
                 ctx.config,
-                provider_blocklist=getattr(ctx, "provider_blocklist", None) or comicarr.PROVIDER_BLOCKLIST,
+                provider_blocklist=ctx.provider_blocklist,
             )
         except Exception as e:
             result["acquisition"] = {"blocked": True, "reason": "health_unavailable", "error": sanitize_job_error(e)}

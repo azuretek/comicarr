@@ -1,7 +1,7 @@
 """Weekly scheduler lifecycle regression tests."""
 
 import datetime
-from types import SimpleNamespace
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +10,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import comicarr
 from comicarr import weeklypullit
+from comicarr.app.core import runtime
+from comicarr.app.core.context import AppContext
 from comicarr.app.system import service as system_service
 
 
@@ -69,6 +71,36 @@ def test_weekly_run_records_returned_pull_failure(monkeypatch):
     assert job_management.call_args_list[-1].kwargs["failure"] is True
 
 
+def test_weekly_run_projects_running_state_before_refresh_cannot_enqueue_again(monkeypatch):
+    """A manual refresh must observe the canonical Running state, not stale Queued state."""
+    scheduler = MagicMock()
+    scheduler.get_job.return_value = MagicMock(next_run_time=datetime.datetime.utcnow())
+    ctx = AppContext(scheduler=scheduler, weekly_status="Queued")
+    monkeypatch.setattr(runtime, "_runtime", ctx)
+    monkeypatch.setattr(system_service, "_fallback_weekly_refresh_lock", threading.RLock())
+    monkeypatch.setattr(weeklypullit.helpers, "job_management", MagicMock())
+    monkeypatch.setattr(weeklypullit.helpers, "utctimestamp", lambda: 123.0)
+    monkeypatch.setattr(weeklypullit.weeklypull, "future_check", MagicMock())
+
+    observed = []
+
+    def pullit_while_running():
+        observed.append(system_service.request_weekly_refresh(ctx))
+        return None
+
+    monkeypatch.setattr(weeklypullit.weeklypull, "pullit", pullit_while_running)
+
+    weeklypullit.Weekly().run()
+
+    assert observed == [
+        {
+            "accepted": False,
+            "state": "running",
+            "next_run_time": str(scheduler.get_job.return_value.next_run_time),
+        }
+    ]
+
+
 def test_manual_run_restores_the_original_future_schedule(monkeypatch):
     scheduled_run = datetime.datetime.utcnow() + datetime.timedelta(hours=4)
     job = MagicMock()
@@ -93,7 +125,7 @@ def test_manual_refresh_restores_a_real_interval_trigger_schedule(monkeypatch):
         id="weekly",
         next_run_time=original_next_run,
     )
-    ctx = SimpleNamespace(scheduler=scheduler, weekly_status="Waiting")
+    ctx = AppContext(scheduler=scheduler, weekly_status="Waiting")
     monkeypatch.setattr(comicarr, "WEEKLY_STATUS", "Waiting")
     monkeypatch.setattr(comicarr, "WEEKLY_MANUAL_NEXT_RUN", None)
     monkeypatch.setattr(system_service.db, "upsert", MagicMock())

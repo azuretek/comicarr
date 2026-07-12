@@ -54,6 +54,25 @@ from comicarr import (
 from comicarr.tables import annuals, comics, issues
 
 
+def _mass_add_runtime_context():
+    """Return the active canonical runtime, if the process has one."""
+    from comicarr.app.core.runtime import get_runtime_if_initialized
+
+    ctx = get_runtime_if_initialized()
+    return ctx if ctx is not None and not ctx.disposed else None
+
+
+def _set_mass_add_pool(ctx, pool):
+    """Publish the same MASS_ADD worker reference to runtime and legacy code."""
+    if ctx is None:
+        comicarr.MASS_ADD = pool
+        return
+
+    from comicarr.app.core.runtime import set_runtime_field
+
+    set_runtime_field(ctx, "mass_add_pool", pool)
+
+
 def is_exists(comicid):
 
     with db.get_engine().connect() as conn:
@@ -125,7 +144,7 @@ def addvialist(seriesQueue, issueWantQueue):
             issueItem = issueWantQueue.get(True)
             markIssueWantedById(issueItem)
         else:
-            comicarr.ADD_LIST.put("exit")
+            seriesQueue.put("exit")
     return False
 
 
@@ -2963,10 +2982,15 @@ def importer_thread(serieslist):
 
     threaded_call = True
 
-    list(map(comicarr.ADD_LIST.put, serieslist))
+    ctx = _mass_add_runtime_context()
+    add_list = ctx.add_list if ctx is not None else comicarr.ADD_LIST
+    issue_watch_list = ctx.issue_watch_list if ctx is not None else comicarr.ISSUE_WATCH_LIST
+
+    list(map(add_list.put, serieslist))
 
     try:
-        if comicarr.MASS_ADD.is_alive():
+        pool = ctx.mass_add_pool if ctx is not None else comicarr.MASS_ADD
+        if pool.is_alive():
             logger.info(
                 "[MASS-ADD] MASS_ADD thread already running. Adding an additional %s items to existing queue"
                 % len(serieslist)
@@ -2977,12 +3001,11 @@ def importer_thread(serieslist):
 
     if threaded_call is True:
         logger.info("[MASS-ADD] MASS_ADD thread not started. Started & submitting.")
-        comicarr.MASS_ADD = threading.Thread(
-            target=addvialist, args=(comicarr.ADD_LIST, comicarr.ISSUE_WATCH_LIST), name="mass-add"
-        )
-        comicarr.MASS_ADD.start()
-        if not comicarr.MASS_ADD:
-            comicarr.MASS_ADD.join(5)
+        pool = threading.Thread(target=addvialist, args=(add_list, issue_watch_list), name="mass-add")
+        _set_mass_add_pool(ctx, pool)
+        pool.start()
+        if not pool:
+            pool.join(5)
 
 
 def issue_watcher_thread(issuelist):
@@ -2990,7 +3013,9 @@ def issue_watcher_thread(issuelist):
     if type(issuelist) != list:
         issuelist = [issuelist]
 
-    list(map(comicarr.ISSUE_WATCH_LIST.put, issuelist))
+    ctx = _mass_add_runtime_context()
+    issue_watch_list = ctx.issue_watch_list if ctx is not None else comicarr.ISSUE_WATCH_LIST
+    list(map(issue_watch_list.put, issuelist))
 
 
 _REFRESH_WORKER_LOCK = threading.RLock()

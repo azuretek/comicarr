@@ -12,9 +12,12 @@ Tests for comicarr.importer.addvialist — mass-add queue handling.
 """
 
 import queue
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import comicarr
+from comicarr import importer
+from comicarr.app.core import runtime
+from comicarr.app.core.context import AppContext
 from comicarr.importer import addvialist
 
 
@@ -87,3 +90,19 @@ class TestAddComicPayloads:
 
         assert result["success"] is True
         mock_thread.assert_called_once_with([{"comicid": "12345", "comicname": None, "seriesyear": None}])
+
+
+def test_importer_thread_projects_mass_add_pool_to_canonical_runtime(monkeypatch):
+    """The DB-writing MASS_ADD thread must share the lifecycle-owned pool reference."""
+    ctx = AppContext()
+    pool = MagicMock(name="mass_add_pool")
+    monkeypatch.setattr(runtime, "_runtime", ctx)
+    monkeypatch.setattr(comicarr, "MASS_ADD", None)
+    monkeypatch.setattr(importer.threading, "Thread", MagicMock(return_value=pool))
+
+    importer.importer_thread([{"comicid": "12345", "comicname": None}])
+
+    assert ctx.mass_add_pool is pool
+    assert comicarr.MASS_ADD is pool
+    assert ctx.add_list.get_nowait() == {"comicid": "12345", "comicname": None}
+    pool.start.assert_called_once()

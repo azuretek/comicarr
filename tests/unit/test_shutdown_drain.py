@@ -58,7 +58,7 @@ import asyncio
 import inspect
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -162,9 +162,9 @@ async def _run_shutdown(ctx, scheduler=None):
         # from globals). Replace app.state.ctx after entering.
         return None
 
-    # Enter the lifespan; its startup builds a context from globals which is
-    # heavy. Patch _build_context_from_globals to return our ctx.
-    with patch("comicarr.app.main._build_context_from_globals", return_value=ctx):
+    # Enter the lifespan with the canonical runtime that workers already use;
+    # lifespan must attach it rather than rebuilding a globals snapshot.
+    with patch("comicarr.app.main.get_runtime", return_value=ctx):
         await cm.__aenter__()
     await cm.__aexit__(None, None, None)
 
@@ -268,6 +268,49 @@ class TestHappyPath:
         assert ctx.refresh_queue.get_nowait() == "exit"
         # Idle-queue happy path leaves SIGNAL defaulting to shutdown.
         assert comicarr.SIGNAL == "shutdown"
+
+    @pytest.mark.asyncio
+    async def test_shutdown_closes_both_ai_client_variants_after_worker_drain(self, _isolated_db):
+        ctx = _make_ctx(scheduler=MagicMock())
+        ctx.ai_async_client = MagicMock()
+        ctx.ai_async_client.close = AsyncMock()
+        ctx.ai_client = MagicMock()
+
+        await _run_shutdown(ctx)
+
+        ctx.ai_async_client.close.assert_awaited_once()
+        ctx.ai_client.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_signals_and_drains_mass_add_before_dispose(self, _isolated_db):
+        ctx = _make_ctx(scheduler=MagicMock())
+        order = []
+        real_dispose = get_engine().dispose
+
+        class _MassAddPool(_FakePool):
+            def join(self, timeout=None):
+                order.append("mass-add-join")
+                super().join(timeout)
+
+        ctx.mass_add_pool = _MassAddPool()
+
+        def _track_dispose():
+            order.append("dispose")
+            return real_dispose()
+
+        with (
+            patch.object(comicarr, "SNPOOL", None, create=True),
+            patch.object(comicarr, "NZBPOOL", None, create=True),
+            patch.object(comicarr, "SEARCHPOOL", None, create=True),
+            patch.object(comicarr, "PPPOOL", None, create=True),
+            patch.object(comicarr, "DDLPOOL", None, create=True),
+            patch.object(comicarr, "MASS_REFRESH", None, create=True),
+            patch.object(get_engine(), "dispose", side_effect=_track_dispose),
+        ):
+            await _run_shutdown(ctx)
+
+        assert ctx.add_list.get_nowait() == "exit"
+        assert order.index("mass-add-join") < order.index("dispose")
 
 
 # ---------------------------------------------------------------------------
