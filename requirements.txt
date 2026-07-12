@@ -107,7 +107,7 @@ pytz==2025.2
     # via comicarr
 pyyaml==6.0.3
     # via uvicorn
-rarfile==4.2
+rarfile==4.3
     # via comicarr
 requests==2.34.2
     # via
