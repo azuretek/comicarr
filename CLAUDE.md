@@ -16,6 +16,8 @@ Comicarr is built on the foundation of Mylar3 with a completely rebuilt React 19
 |--------|---------|
 | Install (backend) | `uv sync` |
 | Install (dev) | `uv sync --extra dev` |
+| Validate dependency lock | `uv lock --check` |
+| Refresh pip compatibility export | `uv export --locked --no-dev --no-hashes --no-emit-project --output-file requirements.txt` |
 | Install (frontend) | `cd frontend && npm ci` |
 | Run app | `python3 Comicarr.py --nolaunch` |
 | Dev frontend | `cd frontend && npm run dev` |

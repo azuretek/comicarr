@@ -18,7 +18,6 @@
 #  along with Comicarr.  If not, see <http://www.gnu.org/licenses/>.
 
 import argparse
-import importlib
 import locale
 import os
 import re
@@ -26,218 +25,24 @@ import signal
 import sys
 import threading
 
-URLLIB3_1X_DEFAULT_CIPHERS = ":".join(
-    [
-        "ECDHE+AESGCM",
-        "ECDHE+CHACHA20",
-        "DHE+AESGCM",
-        "DHE+CHACHA20",
-        "ECDH+AESGCM",
-        "DH+AESGCM",
-        "ECDH+AES",
-        "DH+AES",
-        "RSA+AESGCM",
-        "RSA+AES",
-        "!aNULL",
-        "!eNULL",
-        "!MD5",
-        "!DSS",
-    ]
-)
-
-
-class test_the_requires(object):
-    def __init__(self):
-        if hasattr(sys, "frozen"):
-            full_path = os.path.abspath(sys.executable)
-        else:
-            full_path = os.path.abspath(__file__)
-
-        prog_dir = os.path.dirname(full_path)
-        data_dir = prog_dir
-        for index, arg in enumerate(sys.argv[1:], start=1):
-            if arg == "--datadir" and index + 1 < len(sys.argv):
-                data_dir = sys.argv[index + 1].strip()
-                break
-            if arg.startswith("--datadir="):
-                data_dir = arg.split("=", 1)[1].strip()
-                break
-
-        docker = False
-        d_path = "/proc/self/cgroup"
-        if (
-            os.path.exists("/.dockerenv")
-            or "KUBERNETES_SERVICE_HOST" in os.environ
-            or os.path.isfile(d_path)
-            and any("docker" in line for line in open(d_path))
-        ):
-            print("[DOCKER-AWARE] Docker installation detected.")
-            docker = True
-
-        self.req_file_present = True
-        self.reqfile = os.path.join(data_dir, "requirements.txt")
-
-        if any([docker, data_dir != prog_dir]) and not os.path.isfile(self.reqfile):
-            self.reqfile = os.path.join(prog_dir, "requirements.txt")
-
-        if not os.path.isfile(self.reqfile):
-            self.req_file_present = False
-
-        self.nfo_file = os.path.join(data_dir, "ascii_logo.nfo")
-        if not os.path.isfile(self.nfo_file):
-            self.nfo_file = os.path.join(prog_dir, "ascii_logo.nfo")
-
-        if not os.path.isfile(self.nfo_file):
-            print("[WARNING] Unable to load ascii_logo. You're missing something cool...")
-        else:
-            with open(self.nfo_file, "r") as f:
-                for line in f:
-                    print(line.rstrip())
-            print(f"{'-':-<60}")
-
-        self.mod_list = {}
-        self.mappings = {
-            "apscheduler": "apscheduler",
-            "beautifulsoup4": "bs4",
-            "pillow": "PIL",
-            "pyjwt": "jwt",
-            "python-multipart": "multipart",
-            "sqlalchemy": "sqlalchemy",
-            "sse-starlette": "sse_starlette",
-            "pycryptodome": "Crypto",
-            "pystun": "stun",
-            "pysocks": "socks",
-        }
-
-    def requirement_entry(self, requirement):
-        operator = ""
-        version = ""
-
-        for specifier in requirement.specifier:
-            operator = specifier.operator
-            version = specifier.version
-            break
-
-        return {"version": version, "operator": operator}
-
-    def add_requirement_parts(self, module_name, module_entry, extras=None):
-        self.mod_list[module_name] = module_entry
-
-        if module_name.lower() == "requests" and extras and "socks" in extras:
-            self.mod_list["PySocks"] = module_entry
-
-    def add_requirement(self, requirement):
-        self.add_requirement_parts(requirement.name, self.requirement_entry(requirement), requirement.extras)
-
-    def parse_requirement_line(self, line):
-        requirement = line.split(";", 1)[0].strip()
-        match = re.match(r"^([A-Za-z0-9_.-]+)(?:\[([A-Za-z0-9_,.-]+)\])?\s*([<>=!~]{1,2})?\s*([^,;\s]+)?", requirement)
-        if not match:
-            return None
-
-        extras = []
-        if match.group(2):
-            extras = [extra.strip().lower() for extra in match.group(2).split(",") if extra.strip()]
-
-        return (
-            match.group(1),
-            {"operator": match.group(3) or "", "version": match.group(4) or ""},
-            extras,
-        )
-
-    def load_requirements(self):
-        try:
-            from packaging.requirements import InvalidRequirement, Requirement
-        except ModuleNotFoundError:
-            Requirement = None
-            InvalidRequirement = ValueError
-
-        with open(self.reqfile, "r") as file:
-            for line in file.readlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if Requirement is not None:
-                    try:
-                        requirement = Requirement(line)
-                    except InvalidRequirement:
-                        continue
-                    self.add_requirement(requirement)
-                else:
-                    parsed = self.parse_requirement_line(line)
-                    if parsed is not None:
-                        self.add_requirement_parts(*parsed)
-
-    def resolve_module_name(self, requirement_name):
-        return self.mappings.get(requirement_name.lower(), requirement_name)
-
-    def apply_import_compat(self, module):
-        if module.lower() != "cfscrape":
-            return
-
-        try:
-            from urllib3.util import ssl_ as urllib3_ssl
-
-            if not hasattr(urllib3_ssl, "DEFAULT_CIPHERS"):
-                urllib3_ssl.DEFAULT_CIPHERS = URLLIB3_1X_DEFAULT_CIPHERS
-        except Exception:
-            pass
-
-    def check_it(self):
-        if not self.req_file_present:
-            print(
-                "[REQUIREMENTS MISSING] Unable to locate requirements.txt in %s. Make sure it exists, or use --data-dir to specify location"
-                % self.reqfile
-            )
-            sys.exit()
-
-        self.load_requirements()
-
-        failures = {}
-        for key, value in self.mod_list.items():
-            try:
-                module = self.resolve_module_name(key)
-                self.apply_import_compat(module)
-                try:
-                    importlib.import_module(module, package=None)
-                except ModuleNotFoundError:
-                    self.apply_import_compat(module.lower())
-                    importlib.import_module(module.lower(), package=None)
-            except Exception:
-                failures[key] = value
-
-        if failures:
-            if "PySocks" in failures:
-                print(
-                    "[MODULES UNAVAILABLE] Some modules are missing and may need to be installed via pip before proceeding. PySocks is required only if using proxies."
-                )
-            else:
-                print(
-                    "[MODULES UNAVAILABLE] Required modules are missing and need to be installed via pip before proceeding."
-                )
-            print(
-                "[MODULES UNAVAILABLE] Reinstall each of the listed module(s) below or reinstall the included requirements.txt file"
-            )
-            print("[MODULES UNAVAILABLE] The following modules are missing:")
-            for modname, modreq in failures.items():
-                print("[MODULES UNAVAILABLE]  %s %s%s" % (modname, modreq["operator"], modreq["version"]))
-            if all(["PySocks" in failures, len(failures) > 1]) or "PySocks" not in failures:
-                sys.exit()
-
-
-t = test_the_requires()
-t.check_it()
-
-import comicarr  # noqa: E402
-from comicarr import (  # noqa: E402
-    carepackage,
-    dependency_check,
-    filechecker,
-    logger,
-    maintenance,
-    versioncheck,
-)
-from comicarr.app.core.pidfile import check_stale_pidfile  # noqa: E402
+try:
+    import comicarr  # noqa: E402
+    from comicarr import (  # noqa: E402
+        carepackage,
+        filechecker,
+        logger,
+        maintenance,
+        versioncheck,
+    )
+    from comicarr.app.core.pidfile import check_stale_pidfile  # noqa: E402
+except ModuleNotFoundError as e:
+    missing_dependency = e.name or "an application dependency"
+    print(
+        f"Comicarr could not import {missing_dependency}. Run 'uv sync' "
+        "to install the locked application dependencies, then try again.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from e
 
 if sys.platform == "win32" and sys.executable.split("\\")[-1] == "pythonw.exe":
     sys.stdout = open(os.devnull, "w")
@@ -725,9 +530,9 @@ def main():
     # for version info if it's already running
     versioncheck.versionload()
 
-    # pip requirements check here
-    r = dependency_check.Req()
-    r.loaders()
+    from comicarr.dependency_check import RuntimeCapabilityDiagnostics
+
+    RuntimeCapabilityDiagnostics().loaders()
 
     if comicarr.CONFIG.LAUNCH_BROWSER and not args_nolaunch:
         comicarr.launch_browser(comicarr.CONFIG.HTTP_HOST, http_port, comicarr.CONFIG.HTTP_ROOT)
