@@ -14,10 +14,10 @@ for structured metadata extraction when regex-based parsing fails.
 
 import time
 
-import comicarr
 from comicarr import logger
 from comicarr.app.ai import queries as ai_queries
 from comicarr.app.ai import service as ai_service
+from comicarr.app.ai.runtime import get_ai_runtime
 from comicarr.app.ai.sanitize import sanitize_input
 from comicarr.app.ai.schemas import FilenameParse
 from comicarr.app.ai.structured import request_structured
@@ -29,12 +29,13 @@ def ai_parse_filename(filename, watchcomic=None, publisher=None):
     Returns a parseit()-compatible dict on success, or None on failure.
     """
     # Check AI is configured and available
-    if comicarr.AI_CLIENT is None:
+    ctx = get_ai_runtime()
+    if ctx is None or ctx.ai_client is None or ctx.config is None:
         return None
-    if not comicarr.AI_CIRCUIT_BREAKER.allow_request():
+    if ctx.ai_circuit_breaker is None or not ctx.ai_circuit_breaker.allow_request():
         logger.fdebug("[AI-PARSE] Circuit breaker open — skipping AI parse")
         return None
-    if not comicarr.AI_RATE_LIMITER.can_request():
+    if ctx.ai_rate_limiter is None or not ctx.ai_rate_limiter.can_request():
         logger.fdebug("[AI-PARSE] Rate limit reached — skipping AI parse")
         return None
 
@@ -56,23 +57,23 @@ def ai_parse_filename(filename, watchcomic=None, publisher=None):
     start_time = time.time()
     try:
         result = request_structured(
-            client=comicarr.AI_CLIENT,
-            model=comicarr.CONFIG.AI_MODEL,
+            client=ctx.ai_client,
+            model=ctx.config.AI_MODEL,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             schema_class=FilenameParse,
             temperature=0.1,
-            timeout=comicarr.CONFIG.AI_TIMEOUT or 30,
+            timeout=ctx.config.AI_TIMEOUT or 30,
         )
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_success()
+        ctx.ai_circuit_breaker.record_success()
 
         # Validate against monitored series
         if not _validate_against_library(result.series_name):
             ai_service.log_activity(
                 feature_type="parsing",
                 action="AI parsed '%s' but no library match for '%s'" % (filename, result.series_name),
-                model=comicarr.CONFIG.AI_MODEL,
+                model=ctx.config.AI_MODEL,
                 prompt_tokens=0,
                 completion_tokens=0,
                 latency_ms=latency_ms,
@@ -88,7 +89,7 @@ def ai_parse_filename(filename, watchcomic=None, publisher=None):
         ai_service.log_activity(
             feature_type="parsing",
             action="AI parsed '%s' → %s #%s" % (filename, result.series_name, result.issue_number),
-            model=comicarr.CONFIG.AI_MODEL,
+            model=ctx.config.AI_MODEL,
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,
@@ -102,11 +103,11 @@ def ai_parse_filename(filename, watchcomic=None, publisher=None):
 
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
-        comicarr.AI_CIRCUIT_BREAKER.record_failure()
+        ctx.ai_circuit_breaker.record_failure()
         ai_service.log_activity(
             feature_type="parsing",
             action="AI parse failed for '%s'" % filename,
-            model=comicarr.CONFIG.AI_MODEL or "",
+            model=ctx.config.AI_MODEL or "",
             prompt_tokens=0,
             completion_tokens=0,
             latency_ms=latency_ms,

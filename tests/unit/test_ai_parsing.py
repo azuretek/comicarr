@@ -144,12 +144,13 @@ class TestAiParseFilename:
     @patch("comicarr.app.ai.parsing.ai_service")
     @patch("comicarr.app.ai.parsing.request_structured")
     @patch("comicarr.app.ai.parsing._validate_against_library")
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_happy_path(self, mock_cm, mock_validate, mock_req, mock_svc):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_happy_path(self, mock_get_runtime, mock_validate, mock_req, mock_svc):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         ai_result = _make_ai_result(series="Spider-Man", issue="300", year="1988")
         mock_req.return_value = ai_result
@@ -164,30 +165,33 @@ class TestAiParseFilename:
         assert result["issue_year"] == "1988"
         assert result["ai_parsed"] is True
 
-        mock_cm.AI_CIRCUIT_BREAKER.record_success.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_success.assert_called_once()
         mock_svc.log_activity.assert_called_once()
         assert mock_svc.log_activity.call_args[1]["success"] is True
 
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_ai_not_configured(self, mock_cm):
-        mock_cm.AI_CLIENT = None
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_ai_not_configured(self, mock_get_runtime):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = None
 
         result = ai_parse_filename("anything.cbz")
         assert result is None
 
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_circuit_breaker_open(self, mock_cm):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=False)
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_circuit_breaker_open(self, mock_get_runtime):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=False)
 
         result = ai_parse_filename("anything.cbz")
         assert result is None
 
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_rate_limiter_at_cap(self, mock_cm):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=False)
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_rate_limiter_at_cap(self, mock_get_runtime):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=False)
 
         result = ai_parse_filename("anything.cbz")
         assert result is None
@@ -195,12 +199,13 @@ class TestAiParseFilename:
     @patch("comicarr.app.ai.parsing.ai_service")
     @patch("comicarr.app.ai.parsing.request_structured")
     @patch("comicarr.app.ai.parsing._validate_against_library")
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_no_library_match(self, mock_cm, mock_validate, mock_req, mock_svc):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_no_library_match(self, mock_get_runtime, mock_validate, mock_req, mock_svc):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         mock_req.return_value = _make_ai_result(series="UnknownComic", issue="1")
         mock_validate.return_value = False
@@ -214,37 +219,39 @@ class TestAiParseFilename:
 
     @patch("comicarr.app.ai.parsing.ai_service")
     @patch("comicarr.app.ai.parsing.request_structured")
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_llm_timeout(self, mock_cm, mock_req, mock_svc):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_llm_timeout(self, mock_get_runtime, mock_req, mock_svc):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         mock_req.side_effect = TimeoutError("Request timed out")
 
         result = ai_parse_filename("timeout-file.cbz")
         assert result is None
 
-        mock_cm.AI_CIRCUIT_BREAKER.record_failure.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_failure.assert_called_once()
         mock_svc.log_activity.assert_called_once()
         assert mock_svc.log_activity.call_args[1]["success"] is False
 
     @patch("comicarr.app.ai.parsing.ai_service")
     @patch("comicarr.app.ai.parsing.request_structured")
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_llm_invalid_json(self, mock_cm, mock_req, mock_svc):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_llm_invalid_json(self, mock_get_runtime, mock_req, mock_svc):
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         mock_req.side_effect = ValueError("Failed to parse structured response from LLM")
 
         result = ai_parse_filename("bad-response.cbz")
         assert result is None
 
-        mock_cm.AI_CIRCUIT_BREAKER.record_failure.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_failure.assert_called_once()
         mock_svc.log_activity.assert_called_once()
         assert mock_svc.log_activity.call_args[1]["success"] is False
         assert "Failed to parse" in (mock_svc.log_activity.call_args[1]["error_message"] or "")
@@ -252,13 +259,14 @@ class TestAiParseFilename:
     @patch("comicarr.app.ai.parsing.ai_service")
     @patch("comicarr.app.ai.parsing.request_structured")
     @patch("comicarr.app.ai.parsing._validate_against_library")
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_watchcomic_and_publisher_passed(self, mock_cm, mock_validate, mock_req, mock_svc):
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_watchcomic_and_publisher_passed(self, mock_get_runtime, mock_validate, mock_req, mock_svc):
         """Verify that watchcomic and publisher context is forwarded to the LLM."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         mock_req.return_value = _make_ai_result()
         mock_validate.return_value = True
@@ -273,13 +281,14 @@ class TestAiParseFilename:
     @patch("comicarr.app.ai.parsing.ai_service")
     @patch("comicarr.app.ai.parsing.request_structured")
     @patch("comicarr.app.ai.parsing._validate_against_library")
-    @patch("comicarr.app.ai.parsing.comicarr")
-    def test_result_has_all_parseit_keys(self, mock_cm, mock_validate, mock_req, mock_svc):
+    @patch("comicarr.app.ai.parsing.get_ai_runtime")
+    def test_result_has_all_parseit_keys(self, mock_get_runtime, mock_validate, mock_req, mock_svc):
         """The returned dict must include every key listFiles() accesses."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        mock_ctx = mock_get_runtime.return_value
+        mock_ctx.ai_client = MagicMock()
+        mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=True)
+        mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=True)
+        mock_ctx.config = _make_mock_config()
 
         mock_req.return_value = _make_ai_result()
         mock_validate.return_value = True

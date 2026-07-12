@@ -534,11 +534,18 @@ def main():
 
     RuntimeCapabilityDiagnostics().loaders()
 
+    # Configuration, schema readiness, encrypted secrets, setup token, and
+    # version metadata are now available. Create the one canonical runtime
+    # before any scheduler or worker can observe mutable queue/lock state.
+    from comicarr.app.core.runtime import create_runtime
+
+    runtime = create_runtime()
+
     if comicarr.CONFIG.LAUNCH_BROWSER and not args_nolaunch:
         comicarr.launch_browser(comicarr.CONFIG.HTTP_HOST, http_port, comicarr.CONFIG.HTTP_ROOT)
 
     # Start the background threads
-    comicarr.start()
+    comicarr.start(runtime)
 
     # Register the SIGTERM handler before startup replay: replay_pipeline()
     # below can spend real time probing downloaders and inline-redriving PP,

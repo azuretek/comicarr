@@ -1,0 +1,85 @@
+# Runtime context ownership
+
+`AppContext` is the one runtime owner for a Comicarr process. It is created
+once by `comicarr.app.core.runtime.create_runtime()` after `comicarr.initialize`
+has loaded configuration, applied schema readiness checks, and decrypted or
+generated startup secrets. `Comicarr.py` creates it before `comicarr.start()`
+can start a scheduler or worker. FastAPI lifespan attaches that existing
+instance to `app.state.ctx`; it does not construct a second view.
+
+## Ownership contract
+
+| State category | Examples | Creation/writer | Reader/shutdown owner | Identity rule |
+| --- | --- | --- | --- | --- |
+| Immutable configuration | paths, `config`, build metadata | startup configuration | routes/services; no disposal | fixed after factory creation |
+| Long-lived services | scheduler, CV session/cache, Metron, AI bundle, event bus | runtime factory; event loop is attached in lifespan | workers/routes; lifespan quiesces jobs, closes the event bus, then closes clients after drain | one instance per process |
+| Queues and locks | `ddl_queued`, all work queues, search/API/DDL locks, acquisition resume lock | existing bootstrap objects adopted by factory | workers, scheduler, routes; lifespan signals queues then drains pools | must be the exact same object, never a copy |
+| Request-visible state | scheduler status, setup/JWT state, import progress, version state | migrated services write with `set_runtime_field()` | system/API readers; discarded with process | bridge serializes migrated writes with `runtime_lock` |
+| Durable-acquisition projection | schema readiness, maintenance block reason, migration reconciliation | `MaintenanceController` database transactions/fences, then runtime projection | startup diagnostics and acquisition workers | durable DB fence is authoritative; context is its live projection |
+| Legacy compatibility | module aliases and worker-pool references | `runtime.py` projection while legacy engines remain | unmigrated legacy code only | aliases share object identities; mutable data is never cloned |
+
+### Complete field classification
+
+- Immutable configuration: `prog_dir`, `data_dir`, `db_file`, `config`.
+- Long-lived services: `scheduler`, `event_bus`, `cv_session`,
+  `cv_rate_limiter`, `cv_cache`, `metron_api`, `fernet`, `ai_client`,
+  `ai_async_client`, `ai_circuit_breaker`, `ai_rate_limiter`.
+- Locks: `runtime_lock`, `init_lock`, `search_lock`, `api_lock`, `ddl_lock`,
+  `acquisition_resume_lock`.
+- Queues: `snatched_queue`, `nzb_queue`, `pp_queue`, `search_queue`,
+  `ddl_queue`, `return_nzb_queue`, `add_list`, `issue_watch_list`,
+  `refresh_queue`.
+- Compatibility worker references: `sn_pool`, `nzb_pool`, `search_pool`,
+  `pp_pool`, `ddl_pool`, `mass_add_pool`, `mass_refresh_pool`.
+- Mutable process state: `comic_sort`, `publisher_imprints`,
+  `provider_blocklist`, `ddl_queued`, `ddl_stuck_notified`,
+  `pack_issueids_dont_queue`, `folder_cache`, `check_folder_cache`,
+  `force_status`, `update_value`, `provider_status`.
+- Scheduler/request status: `monitor_status`, `search_status`, `rss_status`,
+  `weekly_status`, `version_status`, `updater_status`, `importinbox_status`,
+  `weekly_manual_next_run`, `import_status`, `import_files`,
+  `import_totalfiles`, `import_cid_count`, `import_parsed_count`,
+  `import_failure_count`, `import_lock`, `import_button`.
+- Auth/session state: `download_apikey`, `sse_key`, `setup_token`,
+  `jwt_secret_key`, `jwt_generation`.
+- Provider/version state: `backend_status_ws`, `backend_status_cv`,
+  `current_version`, `current_version_name`, `current_release_name`,
+  `latest_version`, `commits_behind`, `install_type`, `current_branch`.
+- Lifecycle state: `signal`, `started`, `start_up`, `disposed`.
+- Durable-acquisition projection: `db_empty`, `acquisition_schema_ready`,
+  `acquisition_schema_version`, `acquisition_schema_error`,
+  `acquisition_workers_blocked`, `acquisition_block_reason`,
+  `migration_in_progress`, `migration_status`, `migration_current_table`,
+  `migration_tables_complete`, `migration_tables_total`, `migration_error`,
+  `migration_reconciliation`.
+
+## Lifecycle
+
+1. `comicarr.initialize()` establishes config, schema/migration state, and
+   secrets. A schema or maintenance failure closes the acquisition gate but
+   still permits authenticated diagnostics.
+2. `create_runtime()` adopts the initialized objects exactly once and projects
+   the same identities to temporary legacy aliases. It also builds the AI
+   client bundle at this lifecycle boundary.
+3. `comicarr.start(runtime)` rejects a missing or divergent context before
+   starting scheduler/worker activity. Worker pool references are written
+   through the compatibility bridge so the shutdown owner sees the same pools.
+4. FastAPI lifespan stores that instance on `app.state.ctx`, sets the event-bus
+   loop, and re-reads the durable acquisition gate.
+5. Lifespan shutdown quiesces running scheduler jobs off the event loop,
+   closes the event bus to reject late publications, signals queues, joins
+   worker pools off the event loop, closes external clients, disposes the
+   database, then marks the context disposed. If scheduler quiescence times
+   out, it leaves the resources intact for Comicarr.py's terminal exit rather
+   than dispose them underneath the live job. `get_context()` fails closed
+   after normal teardown.
+
+## Transitional boundary
+
+The system router, acquisition maintenance gate, `weeklypullit` state writer,
+and the bounded AI runtime consumers are the first migrated ownership boundary.
+`tests/unit/test_runtime_context.py` keeps an explicit allowlist for direct
+`comicarr.<UPPERCASE>` accesses in those files; it is empty. The larger
+`app/system/service.py` scheduler surface and non-selected domains remain
+documented compatibility consumers until their coherent ownership waves,
+rather than being silently rewritten in this change.

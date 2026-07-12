@@ -223,10 +223,9 @@ def shutdown_system(ctx: AppContext = Depends(get_context)):
     import os
     import signal
 
-    import comicarr
+    from comicarr.app.core.runtime import set_runtime_field
 
-    ctx.signal = "shutdown"
-    comicarr.SIGNAL = "shutdown"
+    set_runtime_field(ctx, "signal", "shutdown")
     if ctx.event_bus:
         ctx.event_bus.publish_sync("shutdown", {"message": "Now shutting down system."})
     os.kill(os.getpid(), signal.SIGTERM)
@@ -239,10 +238,9 @@ def restart_system(ctx: AppContext = Depends(get_context)):
     import os
     import signal
 
-    import comicarr
+    from comicarr.app.core.runtime import set_runtime_field
 
-    ctx.signal = "restart"
-    comicarr.SIGNAL = "restart"
+    set_runtime_field(ctx, "signal", "restart")
     if ctx.event_bus:
         ctx.event_bus.publish_sync("restart", {"message": "Now restarting system."})
     os.kill(os.getpid(), signal.SIGTERM)

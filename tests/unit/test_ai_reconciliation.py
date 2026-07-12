@@ -95,6 +95,15 @@ def _make_mock_rate_limiter(can=True):
     return rl
 
 
+def _configure_available_ai(mock_get_ai_runtime, *, allow=True, can=True):
+    mock_ctx = mock_get_ai_runtime.return_value
+    mock_ctx.ai_client = MagicMock()
+    mock_ctx.ai_circuit_breaker = _make_mock_circuit_breaker(allow=allow)
+    mock_ctx.ai_rate_limiter = _make_mock_rate_limiter(can=can)
+    mock_ctx.config = _make_mock_config()
+    return mock_ctx
+
+
 # ---------------------------------------------------------------------------
 # No conflicts
 # ---------------------------------------------------------------------------
@@ -141,29 +150,27 @@ class TestNoConflicts:
 
 
 class TestAINotConfigured:
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_returns_zero_when_ai_client_none(self, mock_cm, tmp_path):
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_returns_zero_when_ai_client_none(self, mock_get_ai_runtime, tmp_path):
         """CV wins by default when AI is not configured."""
-        mock_cm.AI_CLIENT = None
+        mock_ctx = mock_get_ai_runtime.return_value
+        mock_ctx.ai_client = None
         pre = {"Title": "Dark Knight", "Publisher": "DC"}
         post = {"Title": "Batman #1", "Publisher": "DC Comics"}
         cbz_path = _make_cbz(tmp_path)
         assert reconcile_metadata(cbz_path, "12345", pre, post) == 0
 
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_returns_zero_when_circuit_breaker_open(self, mock_cm, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=False)
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_returns_zero_when_circuit_breaker_open(self, mock_get_ai_runtime, tmp_path):
+        _configure_available_ai(mock_get_ai_runtime, allow=False)
         pre = {"Title": "Dark Knight", "Publisher": "DC"}
         post = {"Title": "Batman #1", "Publisher": "DC Comics"}
         cbz_path = _make_cbz(tmp_path)
         assert reconcile_metadata(cbz_path, "12345", pre, post) == 0
 
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_returns_zero_when_rate_limiter_at_cap(self, mock_cm, tmp_path):
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=False)
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_returns_zero_when_rate_limiter_at_cap(self, mock_get_ai_runtime, tmp_path):
+        _configure_available_ai(mock_get_ai_runtime, can=False)
         pre = {"Title": "Dark Knight", "Publisher": "DC"}
         post = {"Title": "Batman #1", "Publisher": "DC Comics"}
         cbz_path = _make_cbz(tmp_path)
@@ -179,13 +186,10 @@ class TestConflictsResolved:
     @patch("comicarr.app.ai.reconciliation._store_reconciliation_history")
     @patch("comicarr.app.ai.reconciliation.ai_service")
     @patch("comicarr.app.ai.reconciliation.request_structured")
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_happy_path_single_conflict(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_happy_path_single_conflict(self, mock_get_ai_runtime, mock_req, mock_svc, mock_store, tmp_path):
         """One conflicting field is resolved and written back."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        mock_ctx = _configure_available_ai(mock_get_ai_runtime)
 
         cbz_path = _make_cbz(tmp_path, publisher="DC Comics")
         pre = {"Publisher": "DC"}
@@ -205,7 +209,7 @@ class TestConflictsResolved:
         mock_store.assert_called_once()
 
         # Verify circuit breaker success recorded
-        mock_cm.AI_CIRCUIT_BREAKER.record_success.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_success.assert_called_once()
 
         # Verify activity logged
         mock_svc.log_activity.assert_called_once()
@@ -215,13 +219,10 @@ class TestConflictsResolved:
     @patch("comicarr.app.ai.reconciliation._store_reconciliation_history")
     @patch("comicarr.app.ai.reconciliation.ai_service")
     @patch("comicarr.app.ai.reconciliation.request_structured")
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_happy_path_multiple_conflicts(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_happy_path_multiple_conflicts(self, mock_get_ai_runtime, mock_req, mock_svc, mock_store, tmp_path):
         """Multiple conflicting fields are resolved."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        _configure_available_ai(mock_get_ai_runtime)
 
         cbz_path = _make_cbz(tmp_path, publisher="DC Comics", writer="Tom King")
         pre = {"Publisher": "DC", "Writer": "Tom King", "Genre": "Action"}
@@ -248,13 +249,10 @@ class TestConflictsResolved:
     @patch("comicarr.app.ai.reconciliation._store_reconciliation_history")
     @patch("comicarr.app.ai.reconciliation.ai_service")
     @patch("comicarr.app.ai.reconciliation.request_structured")
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_ai_picks_comicinfo_value(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_ai_picks_comicinfo_value(self, mock_get_ai_runtime, mock_req, mock_svc, mock_store, tmp_path):
         """AI selects the ComicInfo.xml value over CV."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        _configure_available_ai(mock_get_ai_runtime)
 
         cbz_path = _make_cbz(tmp_path, writer="Scott Snyder")
         pre = {"Writer": "Scott Snyder"}
@@ -278,13 +276,10 @@ class TestSynthesisRejection:
     @patch("comicarr.app.ai.reconciliation._store_reconciliation_history")
     @patch("comicarr.app.ai.reconciliation.ai_service")
     @patch("comicarr.app.ai.reconciliation.request_structured")
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_synthesised_value_falls_back_to_cv(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_synthesised_value_falls_back_to_cv(self, mock_get_ai_runtime, mock_req, mock_svc, mock_store, tmp_path):
         """When AI returns a value not matching either source, CV wins."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        _configure_available_ai(mock_get_ai_runtime)
 
         cbz_path = _make_cbz(tmp_path, publisher="DC Comics")
         pre = {"Publisher": "DC"}
@@ -309,13 +304,10 @@ class TestSynthesisRejection:
 class TestLLMTimeout:
     @patch("comicarr.app.ai.reconciliation.ai_service")
     @patch("comicarr.app.ai.reconciliation.request_structured")
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_timeout_returns_zero(self, mock_cm, mock_req, mock_svc, tmp_path):
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_timeout_returns_zero(self, mock_get_ai_runtime, mock_req, mock_svc, tmp_path):
         """LLM timeout means CV wins — returns 0."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        mock_ctx = _configure_available_ai(mock_get_ai_runtime)
 
         cbz_path = _make_cbz(tmp_path)
         pre = {"Publisher": "DC"}
@@ -327,7 +319,7 @@ class TestLLMTimeout:
         assert result == 0
 
         # Circuit breaker failure recorded
-        mock_cm.AI_CIRCUIT_BREAKER.record_failure.assert_called_once()
+        mock_ctx.ai_circuit_breaker.record_failure.assert_called_once()
 
         # Activity logged as failure
         mock_svc.log_activity.assert_called_once()
@@ -343,13 +335,12 @@ class TestSingleFieldConflict:
     @patch("comicarr.app.ai.reconciliation._store_reconciliation_history")
     @patch("comicarr.app.ai.reconciliation.ai_service")
     @patch("comicarr.app.ai.reconciliation.request_structured")
-    @patch("comicarr.app.ai.reconciliation.comicarr")
-    def test_one_field_conflict_triggers_reconciliation(self, mock_cm, mock_req, mock_svc, mock_store, tmp_path):
+    @patch("comicarr.app.ai.reconciliation.get_ai_runtime")
+    def test_one_field_conflict_triggers_reconciliation(
+        self, mock_get_ai_runtime, mock_req, mock_svc, mock_store, tmp_path
+    ):
         """Even a single conflicting field should trigger AI reconciliation."""
-        mock_cm.AI_CLIENT = MagicMock()
-        mock_cm.AI_CIRCUIT_BREAKER = _make_mock_circuit_breaker(allow=True)
-        mock_cm.AI_RATE_LIMITER = _make_mock_rate_limiter(can=True)
-        mock_cm.CONFIG = _make_mock_config()
+        _configure_available_ai(mock_get_ai_runtime)
 
         cbz_path = _make_cbz(tmp_path, genre="Superhero")
         pre = {"Genre": "Action"}

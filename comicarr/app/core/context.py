@@ -7,11 +7,38 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-"""
-AppContext — typed dataclass replacing 130+ module-level globals.
+"""The process-wide runtime state contract.
 
-Created once at startup via FastAPI's lifespan, stored on app.state,
-and injected into routes via Depends(get_context).
+``AppContext`` has one owner per process lifecycle.  It is created by
+``comicarr.app.core.runtime.create_runtime`` *after* configuration, schema
+readiness, and secret setup have completed, and *before* the legacy workers
+start.  FastAPI's lifespan only attaches that instance to ``app.state``; it
+never rebuilds a snapshot.
+
+Ownership categories and boundaries:
+
+* immutable configuration: paths and ``config`` are fixed after factory
+  creation; configuration writes use the existing Config transaction boundary.
+* long-lived services: scheduler, provider sessions, crypto, AI clients, and
+  the event bus are created once. Lifespan first quiesces scheduler jobs, then
+  closes the event bus before draining workers and closing other clients.
+* queues and locks: all worker/request-visible queues and locks are adopted by
+  identity from the legacy runtime.  The compatibility bridge may expose the
+  same object to an unmigrated caller, but it must never clone one.
+* request-visible state: statuses, progress, migration/acquisition gate, and
+  lifecycle values are updated through the runtime bridge's lock.  Durable
+  acquisition decisions remain serialized by ``MaintenanceController``'s
+  database transaction/fence before their in-memory projection is updated.
+* legacy compatibility state: worker-pool references and scalar aliases stay
+  projected into ``comicarr`` temporarily for legacy engines.  Context is the
+  canonical writer for migrated code; the projection is not a second owner.
+
+Shutdown owner/order is the FastAPI lifespan: quiesce scheduled jobs off the
+event loop, close the event bus, signal queues, join workers off the event
+loop, close clients, dispose database resources, then mark the context
+disposed so no later request can use it. If scheduler quiescence times out,
+lifespan leaves runtime resources intact for Comicarr.py's terminal process
+exit instead of disposing them underneath a still-running job.
 
 Type annotations are an explicit exception to the project's "no type hints"
 rule — structured shared-state objects where types genuinely pay for themselves.
@@ -35,11 +62,15 @@ class AppContext:
     # Scheduler
     scheduler: object = None  # BackgroundScheduler
 
-    # Thread-safe locks
+    # Thread-safe locks. ``runtime_lock`` serializes context/legacy projection
+    # writes; the acquired queue and domain locks retain their legacy locking
+    # semantics and identities.
+    runtime_lock: object = field(default_factory=threading.RLock)
     init_lock: threading.Lock = field(default_factory=threading.Lock)
     search_lock: object = None  # ThreadSafeLock
     api_lock: object = None  # ThreadSafeLock
     ddl_lock: object = None  # ThreadSafeLock
+    acquisition_resume_lock: object = None  # threading.Lock
 
     # Work queues (inter-thread communication)
     snatched_queue: queue.Queue = field(default_factory=queue.Queue)
@@ -51,6 +82,16 @@ class AppContext:
     add_list: queue.Queue = field(default_factory=queue.Queue)
     issue_watch_list: queue.Queue = field(default_factory=queue.Queue)
     refresh_queue: queue.Queue = field(default_factory=queue.Queue)
+
+    # Worker references. These stay compatibility-projected while the legacy
+    # worker bootstrap is being strangled; the objects themselves are shared.
+    sn_pool: object = None
+    nzb_pool: object = None
+    search_pool: object = None
+    pp_pool: object = None
+    ddl_pool: object = None
+    mass_add_pool: object = None
+    mass_refresh_pool: object = None
 
     # SSE
     event_bus: object = None  # EventBus instance
@@ -86,6 +127,8 @@ class AppContext:
     version_status: str = "Waiting"
     updater_status: str = "Waiting"
     force_status: dict = field(default_factory=dict)
+    importinbox_status: str = "Waiting"
+    weekly_manual_next_run: object = None
 
     # Import progress tracking
     import_status: str = None
@@ -126,7 +169,39 @@ class AppContext:
     start_up: bool = True
     update_value: dict = field(default_factory=dict)
 
+    # Database/acquisition runtime projection. Durable maintenance state is
+    # owned by the database fence; these fields expose its latest safe view.
+    db_empty: bool = False
+    acquisition_schema_ready: bool = False
+    acquisition_schema_version: int = 0
+    acquisition_schema_error: str = None
+    acquisition_workers_blocked: bool = True
+    acquisition_block_reason: str = "schema_unavailable"
+
+    # Migration status is request-visible and projected for legacy callers.
+    migration_in_progress: bool = False
+    migration_status: str = "idle"
+    migration_current_table: str = ""
+    migration_tables_complete: int = 0
+    migration_tables_total: int = 0
+    migration_error: str = None
+    migration_reconciliation: object = None
+
+    # Lifecycle terminal state. Accessors reject a disposed context rather
+    # than allowing a request/background callback to touch closed resources.
+    disposed: bool = False
+
 
 def get_context(request: Request) -> AppContext:
     """FastAPI dependency — injects the application context."""
-    return request.app.state.ctx
+    try:
+        ctx = request.app.state.ctx
+    except AttributeError as e:
+        from comicarr.app.core.runtime import RuntimeNotInitializedError
+
+        raise RuntimeNotInitializedError("Runtime context is not initialized") from e
+    if ctx is None or getattr(ctx, "disposed", False):
+        from comicarr.app.core.runtime import RuntimeNotInitializedError
+
+        raise RuntimeNotInitializedError("Runtime context is not initialized or has been disposed")
+    return ctx
