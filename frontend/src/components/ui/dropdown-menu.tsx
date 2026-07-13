@@ -35,29 +35,51 @@ const DropdownMenuSubTrigger = React.forwardRef<
     <ChevronRight className="ml-auto" />
   </DropdownMenuPrimitive.SubmenuTrigger>
 ));
-DropdownMenuSubTrigger.displayName =
-  "DropdownMenuSubTrigger";
+DropdownMenuSubTrigger.displayName = "DropdownMenuSubTrigger";
 
 const DropdownMenuSubContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<typeof DropdownMenuContent>
->((props, ref) => <DropdownMenuContent ref={ref} align="start" alignOffset={-3} side="right" sideOffset={0} {...props} />);
+>((props, ref) => (
+  <DropdownMenuContent
+    ref={ref}
+    align="start"
+    alignOffset={-3}
+    side="right"
+    sideOffset={0}
+    {...props}
+  />
+));
 DropdownMenuSubContent.displayName = "DropdownMenuSubContent";
 
 const DropdownMenuContent = React.forwardRef<
   HTMLDivElement,
-  Omit<DropdownMenuPrimitive.Popup.Props, "side" | "sideOffset" | "align" | "alignOffset"> & Pick<DropdownMenuPrimitive.Positioner.Props, "side" | "sideOffset" | "align" | "alignOffset">
+  Omit<
+    DropdownMenuPrimitive.Popup.Props,
+    "side" | "sideOffset" | "align" | "alignOffset"
+  > &
+    Pick<
+      DropdownMenuPrimitive.Positioner.Props,
+      "side" | "sideOffset" | "align" | "alignOffset"
+    >
 >(({ className, sideOffset = 4, side, align, alignOffset, ...props }, ref) => (
   <DropdownMenuPrimitive.Portal>
-    <DropdownMenuPrimitive.Positioner className="isolate z-50 outline-none" side={side} sideOffset={sideOffset} align={align} alignOffset={alignOffset}>
-    <DropdownMenuPrimitive.Popup
-      ref={ref}
-      className={cn(
-        "z-50 max-h-[--available-height] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md transition-[opacity,transform] data-starting-style:scale-95 data-starting-style:opacity-0 data-ending-style:scale-95 data-ending-style:opacity-0 origin-[--transform-origin]",
-        className,
-      )}
-      {...props}
-    /></DropdownMenuPrimitive.Positioner>
+    <DropdownMenuPrimitive.Positioner
+      className="isolate z-50 outline-none"
+      side={side}
+      sideOffset={sideOffset}
+      align={align}
+      alignOffset={alignOffset}
+    >
+      <DropdownMenuPrimitive.Popup
+        ref={ref}
+        className={cn(
+          "z-50 max-h-[--available-height] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md transition-[opacity,transform] data-starting-style:scale-95 data-starting-style:opacity-0 data-ending-style:scale-95 data-ending-style:opacity-0 origin-[--transform-origin]",
+          className,
+        )}
+        {...props}
+      />
+    </DropdownMenuPrimitive.Positioner>
   </DropdownMenuPrimitive.Portal>
 ));
 DropdownMenuContent.displayName = "DropdownMenuContent";
@@ -101,8 +123,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
     {children}
   </DropdownMenuPrimitive.CheckboxItem>
 ));
-DropdownMenuCheckboxItem.displayName =
-  "DropdownMenuCheckboxItem";
+DropdownMenuCheckboxItem.displayName = "DropdownMenuCheckboxItem";
 
 const DropdownMenuRadioItem = React.forwardRef<
   HTMLDivElement,

@@ -147,9 +147,7 @@ export default function OnboardingDialog({
   return (
     <DialogPrimitive.Root open={open} modal disablePointerDismissal>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Backdrop
-          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0"
-        />
+        <DialogPrimitive.Backdrop className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in-0" />
         <DialogPrimitive.Popup
           className="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-[min(560px,calc(100vw-32px))] max-h-[min(640px,calc(100vh-32px))] overflow-hidden rounded-[10px] border bg-card shadow-[0_30px_80px_rgba(0,0,0,0.5)] transition-[opacity,transform] data-starting-style:opacity-0 data-starting-style:scale-95"
           style={{ borderColor: "var(--border)" }}

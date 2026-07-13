@@ -5,14 +5,8 @@ import { Separator as SeparatorPrimitive } from "@base-ui/react/separator";
 
 import { cn } from "@/lib/utils";
 
-const Separator = React.forwardRef<
-  HTMLDivElement,
-  SeparatorPrimitive.Props
->(
-  (
-    { className, orientation = "horizontal", ...props },
-    ref,
-  ) => (
+const Separator = React.forwardRef<HTMLDivElement, SeparatorPrimitive.Props>(
+  ({ className, orientation = "horizontal", ...props }, ref) => (
     <SeparatorPrimitive
       ref={ref}
       orientation={orientation}

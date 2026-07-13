@@ -14,10 +14,7 @@ const SheetClose = SheetPrimitive.Close;
 
 const SheetPortal = SheetPrimitive.Portal;
 
-function SheetOverlay({
-  className,
-  ...props
-}: SheetPrimitive.Backdrop.Props) {
+function SheetOverlay({ className, ...props }: SheetPrimitive.Backdrop.Props) {
   return (
     <SheetPrimitive.Backdrop
       data-slot="sheet-overlay"
@@ -50,9 +47,7 @@ const sheetVariants = cva(
 );
 
 interface SheetContentProps
-  extends
-    SheetPrimitive.Popup.Props,
-    VariantProps<typeof sheetVariants> {
+  extends SheetPrimitive.Popup.Props, VariantProps<typeof sheetVariants> {
   hideClose?: boolean;
 }
 

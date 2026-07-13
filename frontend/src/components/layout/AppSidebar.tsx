@@ -210,7 +210,6 @@ export default function AppSidebar() {
         <SidebarMenu>{renderNav(managementNav)}</SidebarMenu>
       </SidebarContent>
 
-
       {/* Footer account menu keeps secondary actions out of the main navigation. */}
       <SidebarFooter className="px-2 pb-2 gap-0 border-t-[0.5px]">
         <SidebarMenu>
