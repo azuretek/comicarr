@@ -28,6 +28,7 @@ from comicarr.app.acquisition.evidence import has_verified_library_file
 from comicarr.app.acquisition.models import AcquisitionIntent, Fulfillment
 from comicarr.app.acquisition.policy import EligibilityInput, evaluate_eligibility, project_legacy_state
 from comicarr.app.common.filesystem import is_path_within_allowed_dirs
+from comicarr.app.core.workers import start_background_thread
 from comicarr.app.series import queries as series_queries
 from comicarr.tables import annuals, comics, issues, oneoffhistory, storyarcs, weekly
 
@@ -218,7 +219,7 @@ def project_issue_collection(rows, *, series_status, today=None, annual=False, s
     return projected, _issue_summary(projected)
 
 
-def _start_library_scan(scanner, status_attr, worker, start_lock, scan_label, scan_dir, thread_name):
+def _start_library_scan(scanner, status_attr, worker, start_lock, scan_label, scan_dir, thread_name, registry):
     """Reserve and launch a scanner without allowing a second hand-off worker."""
     with start_lock:
         if getattr(scanner, status_attr) == "scanning" or scanner._SCAN_LOCK.locked():
@@ -228,7 +229,7 @@ def _start_library_scan(scanner, status_attr, worker, start_lock, scan_label, sc
         setattr(scanner, status_attr, "scanning")
         try:
             logger.info("[%s-SCAN] Starting %s library scan for: %s" % (scan_label.upper(), scan_label, scan_dir))
-            threading.Thread(target=worker, name=thread_name).start()
+            start_background_thread(worker, name=thread_name, registry=registry)
             return {"success": True, "message": "%s scan started for: %s" % (scan_label.capitalize(), scan_dir)}
         except Exception as e:
             setattr(scanner, status_attr, previous_status)
@@ -1250,7 +1251,11 @@ def refresh_import(ctx):
 
     try:
         logger.info("[IMPORT-INBOX] Starting import inbox scan for: %s" % import_dir)
-        threading.Thread(target=importinbox.inboxScan, name="API-InboxScan").start()
+        start_background_thread(
+            importinbox.inboxScan,
+            name="API-InboxScan",
+            registry=ctx.background_workers,
+        )
         return {"success": True, "message": "Import inbox scan started for: %s" % import_dir}
     except Exception as e:
         logger.error("[IMPORT-INBOX] Error: %s" % e)
@@ -1275,6 +1280,7 @@ def manga_library_scan(ctx):
         "manga",
         manga_dir,
         "API-MangaScan",
+        ctx.background_workers,
     )
 
 
@@ -1309,6 +1315,7 @@ def comic_library_scan(ctx):
         "comic",
         comic_dir,
         "API-ComicScan",
+        ctx.background_workers,
     )
 
 

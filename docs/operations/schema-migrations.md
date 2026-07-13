@@ -9,7 +9,11 @@ database.
 Startup classifies the configured database before it changes anything:
 
 - An empty database upgrades from base to the current Alembic head.
-- A database with `alembic_version` upgrades normally.
+- A database with `alembic_version` upgrades only when the table contains one
+  exact revision from Comicarr's reviewed, single-head migration graph and the
+  database contains the complete Comicarr schema required by that revision.
+  Empty, multiple, partial, unknown, or structurally spoofed revision states
+  fail before schema mutation.
 - A pre-Alembic Comicarr database is adopted only after it matches the
   conservative table, column, and `mylar_info` control-row fingerprint.
 - Any other nonempty database is left untouched and worker startup is blocked.
@@ -43,6 +47,10 @@ coordinate concurrent migration leaders across separate processes.
 4. If adoption refuses a nonempty database, do not run `stamp` manually.
    Collect its table/column inventory and use an explicit repair or migration
    path. Automatic adoption intentionally fails closed.
+   The same rule applies to an empty, multiple, partial, or unknown
+   `alembic_version` state: preserve the database, inspect why its revision does
+   not match Comicarr's graph, and use an explicit repair rather than forcing
+   startup past the check.
 5. If an upgrade is interrupted, leave workers blocked, restore the backup if
    needed, and rerun `upgrade head` only after confirming the database state.
 

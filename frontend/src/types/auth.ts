@@ -2,6 +2,8 @@
  * Authentication-related type definitions
  */
 
+import type { LogoutResponse } from "./api";
+
 /** User object */
 export interface User {
   username: string;
@@ -20,7 +22,7 @@ export interface AuthContextValue {
     username: string,
     password: string,
   ) => Promise<{ success: boolean; error?: string }>;
-  logout: () => Promise<void>;
+  logout: () => Promise<LogoutResponse>;
 }
 
 /** Login credentials */
