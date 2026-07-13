@@ -38,13 +38,12 @@ python3 Comicarr.py --nolaunch
 ### Dependency updates
 
 `pyproject.toml` is the editable dependency declaration and `uv.lock` is the
-committed resolution. Keep `requirements.txt` as the generated pip-compatible
-export, never as a second source of dependency versions.
+committed resolution. Dependabot tracks the uv project directly; do not add a
+second generated Python dependency manifest.
 
 ```bash
-# Change pyproject.toml (or use uv add), then refresh the committed contract
+# Change pyproject.toml (or use uv add), then refresh the committed lock
 uv lock
-uv export --locked --no-dev --no-hashes --no-emit-project --output-file requirements.txt
 uv run pytest tests/unit/test_dependency_manifests.py -q
 ```
 

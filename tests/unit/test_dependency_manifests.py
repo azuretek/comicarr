@@ -7,8 +7,9 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-import subprocess
 from pathlib import Path
+
+import yaml
 
 try:
     import tomllib
@@ -16,34 +17,30 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-EXPORT_COMMAND = ["uv", "export", "--locked", "--no-dev", "--no-hashes", "--no-emit-project"]
 SETUP_UV_ACTION = "astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990"
+ALTERNATE_PYTHON_MANIFESTS = (
+    "requirements*.txt",
+    "requirements*.in",
+    "Pipfile",
+    "Pipfile.lock",
+    "poetry.lock",
+    "pdm.lock",
+)
 
 
-def _canonical_requirements(contents):
-    return [
-        line
-        for line in contents.splitlines()
-        if line and not line.startswith("#") and not line.startswith("    #")
-    ]
+def test_python_dependencies_have_one_authoritative_lock():
+    dependabot = yaml.safe_load((ROOT_DIR / ".github/dependabot.yml").read_text())
+    root_ecosystems = {
+        update["package-ecosystem"] for update in dependabot["updates"] if update["directory"] == "/"
+    }
 
-
-def _locked_runtime_export():
-    result = subprocess.run(
-        EXPORT_COMMAND,
-        cwd=ROOT_DIR,
-        check=True,
-        capture_output=True,
-        text=True,
+    alternate_manifests = sorted(
+        path.name for pattern in ALTERNATE_PYTHON_MANIFESTS for path in ROOT_DIR.glob(pattern)
     )
-    return _canonical_requirements(result.stdout)
 
-
-def test_requirements_txt_matches_the_locked_runtime_export():
-    generated_export = _locked_runtime_export()
-    requirements_txt = _canonical_requirements((ROOT_DIR / "requirements.txt").read_text())
-
-    assert requirements_txt == generated_export
+    assert alternate_manifests == []
+    assert "uv" in root_ecosystems
+    assert "pip" not in root_ecosystems
 
 
 def test_project_declares_a_setuptools_build_backend():
