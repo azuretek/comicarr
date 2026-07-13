@@ -294,6 +294,35 @@ describe("API Client", () => {
       const result = await logout();
       expect(result.success).toBe(false);
     });
+
+    it("should report a server-side revocation failure", async () => {
+      server.use(
+        http.post("/api/auth/logout", () => {
+          return HttpResponse.json(
+            { success: false, error: "Unable to revoke active sessions" },
+            { status: 500 },
+          );
+        }),
+      );
+
+      const result = await logout();
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("500");
+    });
+
+    it("should treat an already-invalid session as logged out", async () => {
+      server.use(
+        http.post("/api/auth/logout", () => {
+          return HttpResponse.json(
+            { detail: "Session expired or invalid" },
+            { status: 401 },
+          );
+        }),
+      );
+
+      const result = await logout();
+      expect(result.success).toBe(true);
+    });
   });
 
   // ===========================================================================

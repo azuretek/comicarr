@@ -58,6 +58,7 @@ def _legacy_runtime_objects(monkeypatch):
     """Install distinct legacy objects that the factory must adopt by identity."""
     config = SimpleNamespace(SECURE_DIR=None, AI_BASE_URL=None, AI_API_KEY=None)
     scheduler = MagicMock(name="scheduler")
+    scheduler.running = False
     ddl_queued = set()
     search_queue = MagicMock(name="search_queue")
     ddl_queue = MagicMock(name="ddl_queue")
@@ -65,6 +66,7 @@ def _legacy_runtime_objects(monkeypatch):
     ddl_lock = MagicMock(name="ddl_lock")
     acquisition_resume_lock = MagicMock(name="acquisition_resume_lock")
     mass_add_pool = MagicMock(name="mass_add_pool")
+    mass_add_pool.is_alive.return_value = False
 
     values = {
         "CONFIG": config,
@@ -131,6 +133,19 @@ def test_runtime_factory_is_single_shot_and_adopts_identity_sensitive_objects(_l
     first.ddl_queued.add("issue-42")
     assert "issue-42" in comicarr.DDL_QUEUED
     assert runtime.get_runtime() is first
+
+
+def test_runtime_owns_jwt_secure_directory_authority(_legacy_runtime_objects, tmp_path):
+    """Logout rotation uses the same secure directory selected at runtime creation."""
+    comicarr.CONFIG.SECURE_DIR = str(tmp_path)
+    persisted_key = b"persisted-jwt-key-material-32byt"
+
+    with patch("comicarr.app.core.runtime.load_or_create_jwt_key", return_value=persisted_key) as load_key:
+        ctx = create_runtime()
+
+    load_key.assert_called_once_with(str(tmp_path))
+    assert ctx.jwt_secure_dir == str(tmp_path)
+    assert ctx.jwt_secret_key == persisted_key
 
 
 def test_runtime_factory_owns_and_projects_one_ai_client_bundle(_legacy_runtime_objects):

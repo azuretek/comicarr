@@ -94,13 +94,19 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   };
 
-  const logout = async (): Promise<void> => {
+  const logout = async () => {
     try {
-      await apiLogout();
+      const result = await apiLogout();
+      if (result.success) {
+        setUser(null);
+      }
+      return result;
     } catch (error) {
       console.error("Logout failed:", error);
-    } finally {
-      setUser(null);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      };
     }
   };
 
