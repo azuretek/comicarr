@@ -58,6 +58,7 @@ def _legacy_runtime_objects(monkeypatch):
     """Install distinct legacy objects that the factory must adopt by identity."""
     config = SimpleNamespace(SECURE_DIR=None, AI_BASE_URL=None, AI_API_KEY=None)
     scheduler = MagicMock(name="scheduler")
+    scheduler.running = False
     ddl_queued = set()
     search_queue = MagicMock(name="search_queue")
     ddl_queue = MagicMock(name="ddl_queue")
@@ -65,6 +66,7 @@ def _legacy_runtime_objects(monkeypatch):
     ddl_lock = MagicMock(name="ddl_lock")
     acquisition_resume_lock = MagicMock(name="acquisition_resume_lock")
     mass_add_pool = MagicMock(name="mass_add_pool")
+    mass_add_pool.is_alive.return_value = False
 
     values = {
         "CONFIG": config,

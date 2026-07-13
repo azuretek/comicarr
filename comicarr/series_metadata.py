@@ -21,12 +21,12 @@ import datetime
 import json
 import os
 import re
-import threading
 
 from sqlalchemy import select
 
 import comicarr
 from comicarr import db, filechecker, helpers, logger, updater
+from comicarr.app.core.workers import start_background_thread
 from comicarr.tables import comics
 
 
@@ -41,7 +41,7 @@ class metadata_Series(object):
         self.refreshSeries = refreshSeries
 
     def update_metadata_thread(self):
-        threading.Thread(target=self.update_metadata).start()
+        start_background_thread(self.update_metadata, name="SeriesMetadata")
 
     def update_metadata(self):
         for cid in self.comiclist:

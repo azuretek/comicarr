@@ -27,14 +27,14 @@ from comicarr.app.series import service
 def test_library_scan_rejects_missing_mount(monkeypatch, scan, config_key, path, error):
     monkeypatch.setattr(comicarr, "CONFIG", SimpleNamespace(**{config_key: path}))
     monkeypatch.setattr(service.os.path, "isdir", MagicMock(return_value=False))
-    thread = MagicMock()
-    monkeypatch.setattr(service.threading, "Thread", thread)
+    start_background_thread = MagicMock()
+    monkeypatch.setattr(service, "start_background_thread", start_background_thread)
 
-    result = scan(None)
+    result = scan(SimpleNamespace(background_workers=MagicMock()))
 
     assert result["success"] is False
     assert error in result["error"]
-    thread.assert_not_called()
+    start_background_thread.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -66,13 +66,13 @@ def test_library_scan_rejects_duplicate_request_before_starting_another_worker(
     monkeypatch.setattr(service.os.path, "isdir", MagicMock(return_value=True))
     monkeypatch.setattr(scanner_module, status_attr, None)
     monkeypatch.setattr(scanner_module, lock_attr, threading.Lock())
-    thread = MagicMock()
-    monkeypatch.setattr(service.threading, "Thread", thread)
+    start_background_thread = MagicMock()
+    monkeypatch.setattr(service, "start_background_thread", start_background_thread)
+    ctx = SimpleNamespace(background_workers=MagicMock())
 
-    first = scan(None)
-    duplicate = scan(None)
+    first = scan(ctx)
+    duplicate = scan(ctx)
 
     assert first["success"] is True
     assert duplicate == {"success": False, "error": "A library scan is already in progress"}
-    assert thread.call_count == 1
-    thread.return_value.start.assert_called_once()
+    start_background_thread.assert_called_once()

@@ -42,6 +42,7 @@ from comicarr import db, logger
 from comicarr.app.acquisition.models import DispatchState
 from comicarr.app.common.dates import normalize_utc_datetime
 from comicarr.app.core.security import LoginRateLimiter
+from comicarr.app.core.workers import start_background_thread
 from comicarr.tables import comics, jobhistory, storyarcs
 
 # Shared rate limiter instance for authentication endpoints.
@@ -931,7 +932,6 @@ def start_migration(ctx, path):
     if _comicarr.MIGRATION_IN_PROGRESS:
         return {"success": False, "error": "Migration already in progress"}
 
-    import threading
     import time
     import uuid
 
@@ -1022,9 +1022,12 @@ def start_migration(ctx, path):
                 _comicarr.ACQUISITION_BLOCK_REASON = "migration_reconciliation_gate_unavailable"
                 logger.error("[MIGRATION] Unable to refresh acquisition reconciliation gate: %s" % gate_error)
 
-    t = threading.Thread(target=_run_fenced_migration, name="MigrationThread")
-    t.daemon = True
-    t.start()
+    start_background_thread(
+        _run_fenced_migration,
+        name="MigrationThread",
+        daemon=True,
+        registry=ctx.background_workers,
+    )
     return {"status": "started", "run_id": run_id}
 
 
