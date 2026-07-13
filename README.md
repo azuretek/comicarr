@@ -2,6 +2,8 @@
 
 An automated comic book (and manga) manager with a modern React frontend. Part of the *arr ecosystem (like Sonarr, Radarr, Lidarr).
 
+[Website](https://comicarr.com) · [Documentation](https://comicarr.com/docs) · [Installation Guide](https://comicarr.com/docs/installation) · [Contributing](CONTRIBUTING.md)
+
 ## Overview
 
 Comicarr is a modernized fork of [Mylar3](https://github.com/mylar3/mylar3), rebuilt with a **React 19** frontend and a **FastAPI** backend. It provides automated comic book library management — monitoring series, searching indexers, downloading via NZB/torrent/DDL clients, and post-processing with metadata tagging.
@@ -21,6 +23,17 @@ Comicarr is a modernized fork of [Mylar3](https://github.com/mylar3/mylar3), reb
 - **Optional AI Assist** — Bring-your-own-key LLM features (suggestions, enrichment) when configured in Settings
 - **Real-time Updates** — Server-Sent Events for live status without page refreshes
 - **Mylar3 Migration** — First-run wizard to import config and library data from an existing Mylar3 install
+
+## Documentation
+
+The [Comicarr documentation](https://comicarr.com/docs) contains complete guides for installing, configuring, using, and maintaining your server. Good places to start:
+
+- [Installation](https://comicarr.com/docs/installation) — Recommended Docker Compose deployment
+- [Initial setup](https://comicarr.com/docs/initial-setup) — Create your account and connect metadata, download, and search providers
+- [Configuration](https://comicarr.com/docs/configuration) — Settings, credentials, integrations, and database options
+- [Updating](https://comicarr.com/docs/deployment/updating) — Back up and upgrade Docker or source installations
+- [Troubleshooting](https://comicarr.com/docs/troubleshooting) — Solutions for common setup and runtime issues
+- [API reference](https://comicarr.com/docs/api) — REST and Mylar3-compatible API documentation
 
 ## Quick Start
 
@@ -49,6 +62,8 @@ docker compose up -d
 ```
 
 Multi-architecture images (`amd64`, `arm64`) are published to `ghcr.io/frankieramirez/comicarr`.
+
+See the [installation guide](https://comicarr.com/docs/installation) for Docker Compose configuration, volume details, environment variables, and platform-specific notes.
 
 ### Manual Installation
 
@@ -174,9 +189,13 @@ Comicarr is built on the foundation of [Mylar3](https://github.com/mylar3/mylar3
 
 ## Support
 
-- [GitHub Issues](https://github.com/frankieramirez/comicarr/issues) — Bug reports and feature requests
+- [Documentation](https://comicarr.com/docs) — Setup, configuration, usage, deployment, and API guides
+- [Troubleshooting](https://comicarr.com/docs/troubleshooting) — Common problems and their solutions
+- [GitHub Discussions](https://github.com/frankieramirez/comicarr/discussions) — Questions, ideas, and community help
+- [GitHub Issues](https://github.com/frankieramirez/comicarr/issues) — Confirmed bug reports and feature requests
 - [Security policy](SECURITY.md) — How to report vulnerabilities
 - [Contributing guide](CONTRIBUTING.md) — Development setup and PR process
+- [Code of Conduct](CODE_OF_CONDUCT.md) — Community participation guidelines
 
 ## License
 
