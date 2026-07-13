@@ -237,6 +237,7 @@ def create_runtime():
         ctx.event_bus = EventBus()
 
         secure_dir = getattr(ctx.config, "SECURE_DIR", None)
+        ctx.jwt_secure_dir = secure_dir
         ctx.jwt_secret_key = load_or_create_jwt_key(secure_dir) if secure_dir else os.urandom(32)
         _initialize_ai_clients(ctx)
         _project_context(ctx)

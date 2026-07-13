@@ -11,6 +11,7 @@
 
 from alembic import context
 from comicarr import logger
+from comicarr.app.core.schema import autogenerate_include_object
 from comicarr.db import get_engine
 from comicarr.tables import metadata
 
@@ -35,7 +36,12 @@ def run_migrations_online():
 
     connection = config.attributes.get("connection")
     if connection is not None:
-        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            include_object=autogenerate_include_object(connection),
+        )
         with context.begin_transaction():
             context.run_migrations()
         return
@@ -43,11 +49,14 @@ def run_migrations_online():
     try:
         engine = config.attributes.get("engine") or get_engine()
     except TypeError as error:
-        raise RuntimeError(
-            "online migrations require DATABASE_URL or an initialized Comicarr configuration"
-        ) from error
+        raise RuntimeError("online migrations require DATABASE_URL or an initialized Comicarr configuration") from error
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            include_object=autogenerate_include_object(connection),
+        )
         with context.begin_transaction():
             context.run_migrations()
 

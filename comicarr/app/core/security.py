@@ -18,6 +18,7 @@ import hmac
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -74,21 +75,80 @@ class LoginRateLimiter(object):
             self._attempts.pop(ip, None)
 
 
+JWT_KEY_BYTES = 32
+JWT_KEY_FILENAME = "jwt.key"
+
+
+def _jwt_key_path(secure_dir):
+    if not secure_dir:
+        raise RuntimeError("Persistent JWT key storage is unavailable")
+    return os.path.join(secure_dir, JWT_KEY_FILENAME)
+
+
+def _replace_jwt_key(secure_dir, key):
+    """Publish a JWT key through a mode-0600 same-directory atomic replace."""
+    if len(key) != JWT_KEY_BYTES:
+        raise ValueError("JWT keys must contain exactly %d bytes" % JWT_KEY_BYTES)
+
+    key_path = _jwt_key_path(secure_dir)
+    temp_fd = None
+    temp_path = None
+    try:
+        temp_fd, temp_path = tempfile.mkstemp(prefix=".jwt.key.", dir=secure_dir)
+        os.chmod(temp_path, 0o600)
+        with os.fdopen(temp_fd, "wb") as temp_file:
+            temp_fd = None
+            temp_file.write(key)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+
+        # This is the commit point. Keep it last so callers can safely update
+        # the in-memory authority whenever this function returns.
+        os.replace(temp_path, key_path)
+        temp_path = None
+    finally:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.warn("[AUTH] Unable to remove JWT key temp file: %s" % type(e).__name__)
+
+
 def load_or_create_jwt_key(secure_dir):
     """Load JWT key from SECURE_DIR/jwt.key, or generate one.
 
     Separate from the Fernet master key — limits blast radius.
     """
-    key_path = os.path.join(secure_dir, "jwt.key")
+    key_path = _jwt_key_path(secure_dir)
     if os.path.exists(key_path):
         with open(key_path, "rb") as f:
-            return f.read().strip()
+            key = f.read()
+        if len(key) != JWT_KEY_BYTES:
+            raise ValueError("Persisted JWT key must contain exactly %d bytes" % JWT_KEY_BYTES)
+        return key
 
-    key = os.urandom(32)
-    with open(key_path, "wb") as f:
-        f.write(key)
-    os.chmod(key_path, 0o600)
+    key = os.urandom(JWT_KEY_BYTES)
+    _replace_jwt_key(secure_dir, key)
     return key
+
+
+def rotate_jwt_key(secure_dir):
+    """Atomically replace the persisted key used to sign UI sessions."""
+    key = os.urandom(JWT_KEY_BYTES)
+    _replace_jwt_key(secure_dir, key)
+    return key
+
+
+def rotate_runtime_jwt_key(ctx):
+    """Rotate durable and in-memory session authority as one serialized action."""
+    with ctx.runtime_lock:
+        key = rotate_jwt_key(ctx.jwt_secure_dir)
+        ctx.jwt_secret_key = key
+        return key
 
 
 def create_session_token(username, secret_key, generation, login_timeout=43800):

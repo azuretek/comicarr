@@ -120,12 +120,16 @@ jobs:
       - name: Install migration dependencies
         run: uv sync --locked --extra dev ${{ matrix.extra && format('--extra {0}', matrix.extra) || '' }}
 
-      - name: Upgrade and check reviewed schema
+      - name: Verify application fresh and legacy migration paths
+        env:
+          DATABASE_URL: ${{ matrix.database_url }}
+        run: uv run pytest tests/integration/test_schema_migration_dialects.py -q
+
+      - name: Check adopted schema
         env:
           DATABASE_URL: ${{ matrix.database_url }}
         run: |
-          uv run alembic upgrade head
-          uv run alembic current
+          uv run alembic current --check-heads
           uv run alembic check
 
   # ===========================================================================

@@ -18,7 +18,6 @@ import json
 import os
 import re
 import shutil
-import threading
 import time
 import zipfile
 from pathlib import Path
@@ -28,6 +27,7 @@ from PIL import Image
 
 import comicarr
 from comicarr import db, getimage, logger, updater
+from comicarr.app.core.workers import start_background_thread
 
 
 def search_comics(
@@ -203,7 +203,7 @@ def manual_metatag(ctx, issue_id, comic_id=None):
 def bulk_metatag(ctx, comic_id, issue_ids):
     """Tag metadata for multiple issues."""
     try:
-        _do_bulk_metatag(comic_id, issue_ids)
+        _do_bulk_metatag(comic_id, issue_ids, registry=ctx.background_workers)
         return {"success": True, "count": len(issue_ids)}
     except Exception as e:
         logger.error("[METADATA] Bulk metatag error: %s" % e)
@@ -213,7 +213,7 @@ def bulk_metatag(ctx, comic_id, issue_ids):
 def group_metatag(ctx, comic_id):
     """Tag metadata for all issues in a series."""
     try:
-        _do_group_metatag(comic_id)
+        _do_group_metatag(comic_id, registry=ctx.background_workers)
         return {"success": True}
     except Exception as e:
         logger.error("[METADATA] Group metatag error: %s" % e)
@@ -467,7 +467,7 @@ def _thread_bulk_meta(comicinfo, issueinfo):
     }
 
 
-def _do_bulk_metatag(ComicID, IssueIDs, threaded=False):
+def _do_bulk_metatag(ComicID, IssueIDs, threaded=False, registry=None):
     """Tag metadata for selected issues. Extracted from WebInterface.bulk_metatag."""
     cinfo = db.raw_select_one(
         "SELECT ComicLocation, ComicVersion, ComicYear, ComicName, AgeRating FROM comics WHERE ComicID=?", [ComicID]
@@ -526,7 +526,12 @@ def _do_bulk_metatag(ComicID, IssueIDs, threaded=False):
         issueinfo.append({"IssueID": ginfo["IssueID"], "Location": ginfo["Location"]})
 
     if threaded is False:
-        threading.Thread(target=_thread_bulk_meta, args=[comicinfo, issueinfo]).start()
+        start_background_thread(
+            _thread_bulk_meta,
+            args=(comicinfo, issueinfo),
+            name="BulkMetadata",
+            registry=registry,
+        )
         return json.dumps({"status": "success"})
     else:
         _thread_bulk_meta(comicinfo, issueinfo)
@@ -556,7 +561,7 @@ def _thread_group_meta(comicinfo, issueinfo):
     }
 
 
-def _do_group_metatag(ComicID, threaded=False):
+def _do_group_metatag(ComicID, threaded=False, registry=None):
     """Tag metadata for all issues in a series. Extracted from WebInterface.group_metatag."""
     cinfo = db.raw_select_one(
         "SELECT ComicLocation, ComicVersion, ComicYear, ComicName, AgeRating FROM comics WHERE ComicID=?", [ComicID]
@@ -606,7 +611,12 @@ def _do_group_metatag(ComicID, threaded=False):
         issueinfo.append({"IssueID": ginfo["IssueID"], "Location": ginfo["Location"]})
 
     if threaded is False:
-        threading.Thread(target=_thread_group_meta, args=[comicinfo, issueinfo]).start()
+        start_background_thread(
+            _thread_group_meta,
+            args=(comicinfo, issueinfo),
+            name="GroupMetadata",
+            registry=registry,
+        )
         return json.dumps({"status": "success"})
     else:
         _thread_group_meta(comicinfo, issueinfo)

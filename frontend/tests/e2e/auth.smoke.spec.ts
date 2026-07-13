@@ -1,4 +1,9 @@
+import { resolve } from "node:path";
 import { expect, test } from "@playwright/test";
+
+import { ADMIN_PASSWORD, ADMIN_USERNAME } from "./support/comicarr-server.mjs";
+
+const authFile = resolve("tests/e2e/.auth/admin.json");
 
 test("unauthenticated users are redirected to login", async ({ browser }) => {
   const context = await browser.newContext({
@@ -43,4 +48,12 @@ test("logout clears the protected session", async ({ page }) => {
 
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByText("Sign in")).toBeVisible();
+
+  // Logout rotates the server-side JWT key, so refresh the shared storage
+  // state before the next smoke test creates its browser context.
+  await page.getByPlaceholder("username").fill(ADMIN_USERNAME);
+  await page.getByPlaceholder("password").fill(ADMIN_PASSWORD);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByText("Dashboard").first()).toBeVisible();
+  await page.context().storageState({ path: authFile });
 });
