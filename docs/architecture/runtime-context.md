@@ -42,7 +42,9 @@ instance to `app.state.ctx`; it does not construct a second view.
   `import_totalfiles`, `import_cid_count`, `import_parsed_count`,
   `import_failure_count`, `import_lock`, `import_button`.
 - Auth/session state: `download_apikey`, `sse_key`, `setup_token`,
-  `jwt_secret_key`, `jwt_generation`.
+  `jwt_secure_dir`, `jwt_secret_key`, `jwt_generation`. Logout rotates the
+  persisted JWT key and the in-memory signing authority under `runtime_lock`;
+  token issuance holds the same lock.
 - Provider/version state: `backend_status_ws`, `backend_status_cv`,
   `current_version`, `current_version_name`, `current_release_name`,
   `latest_version`, `commits_behind`, `install_type`, `current_branch`.
@@ -61,7 +63,8 @@ instance to `app.state.ctx`; it does not construct a second view.
    still permits authenticated diagnostics.
 2. `create_runtime()` adopts the initialized objects exactly once and projects
    the same identities to temporary legacy aliases. It also builds the AI
-   client bundle at this lifecycle boundary.
+   client bundle and loads the persisted JWT signing key at this lifecycle
+   boundary.
 3. `comicarr.start(runtime)` rejects a missing or divergent context before
    starting scheduler/worker activity. Worker pool references are written
    through the compatibility bridge so the shutdown owner sees the same pools.

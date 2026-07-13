@@ -18,6 +18,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Kbd } from "@/components/ui/kbd";
+import { useToast } from "@/components/ui/toast";
 import {
   Tooltip,
   TooltipContent,
@@ -48,14 +49,31 @@ interface NavItem {
 export default function AppSidebar() {
   const { logout, user } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { addToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
   const { setOpenMobile } = useSidebar();
   const [searchQuery, setSearchQuery] = useState("");
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
+  const handleLogout = async () => {
+    if (isLoggingOut) return;
+
+    setIsLoggingOut(true);
+    try {
+      const result = await logout();
+      if (result.success) {
+        navigate("/login");
+        return;
+      }
+      addToast({
+        type: "error",
+        message:
+          "Logout failed. Your session is still active; please try again.",
+      });
+    } finally {
+      setIsLoggingOut(false);
+    }
   };
 
   const handleSearchSubmit = (e: FormEvent<HTMLFormElement>) => {
@@ -224,7 +242,12 @@ export default function AppSidebar() {
           </SidebarMenuItem>
 
           <SidebarMenuItem>
-            <SidebarMenuButton onClick={handleLogout} tooltip="Logout">
+            <SidebarMenuButton
+              onClick={handleLogout}
+              tooltip="Logout"
+              disabled={isLoggingOut}
+              aria-busy={isLoggingOut}
+            >
               <LogOut className="w-4 h-4" />
               <span className="flex-1 text-[13px]">Logout</span>
             </SidebarMenuButton>

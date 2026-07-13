@@ -56,6 +56,7 @@ from comicarr import (
     search_filer,
     updater,
 )
+from comicarr.app.common.redaction import redact_sensitive_text
 from comicarr.app.common.remote_artifacts import (
     resolve_remote_artifact_path,
     safe_remote_filename,
@@ -120,7 +121,7 @@ def parallel_search_providers(scarios_list, timeout=120):
         try:
             return search_the_matrix(scarios_list[0])
         except Exception as e:
-            logger.warn(f"Search error: {e}")
+            logger.warn("Search error: %s" % redact_sensitive_text(e))
             return {"status": False}
 
     executor = get_search_executor()
@@ -153,7 +154,7 @@ def parallel_search_providers(scarios_list, timeout=120):
                             f.cancel()
                     return result
             except Exception as e:
-                logger.warn(f"[PARALLEL-SEARCH] Error from {provider_name}: {e}")
+                logger.warn("[PARALLEL-SEARCH] Error from %s: %s" % (provider_name, redact_sensitive_text(e)))
                 continue
     except TimeoutError:
         logger.warn("[PARALLEL-SEARCH] Search timeout exceeded")
@@ -166,6 +167,14 @@ def parallel_search_providers(scarios_list, timeout=120):
 # This reuses TCP connections across multiple requests, significantly
 # improving performance when making many requests to the same hosts
 _http_session = None
+
+
+def _rss_result_log_summary(result):
+    """Return useful RSS metadata without retaining provider-signed links."""
+    return "rss result: site=%s title=%s" % (
+        redact_sensitive_text(result.get("site", "unknown")),
+        redact_sensitive_text(result.get("title", "unknown")),
+    )
 
 
 def get_http_session():
@@ -2340,7 +2349,7 @@ def searchforissue(
                         }
                     ]
 
-                    logger.info("rss_results[x]: %s" % (x,))
+                    logger.info(_rss_result_log_summary(x))
                     try:
                         foundc = {}
                         foundc["status"] = False
@@ -2406,7 +2415,7 @@ def searchforissue(
                         if any([booktype == "TPB", booktype == "HC", booktype == "GN"]):
                             chktpb = 1
 
-                        logger.info("provider_list: %s" % (provider_list,))
+                        logger.info("provider order: %s" % provider_list["prov_order"])
 
                         intIss = helpers.issuedigits(xr["Issue_Number"])
 
@@ -3266,10 +3275,16 @@ def searcher(
 
         if filen is None:
             if payload is None:
-                logger.error("[PAYLOAD:NONE] Unable to download nzb from link: %s [%s]" % (down_url, link))
+                logger.error(
+                    "[PAYLOAD:NONE] Unable to download nzb from link: %s [%s]"
+                    % (redact_sensitive_text(down_url), redact_sensitive_text(link))
+                )
             else:
                 errorlink = down_url + "?" + urllib.parse.urlencode(payload)
-                logger.error("[PAYLOAD:PRESENT] Unable to download nzb from link: %s [%s]" % (errorlink, link))
+                logger.error(
+                    "[PAYLOAD:PRESENT] Unable to download nzb from link: %s [%s]"
+                    % (redact_sensitive_text(errorlink), redact_sensitive_text(link))
+                )
             return "sab-fail"
         else:
             # convert to a generic type of format to help with post-processing.

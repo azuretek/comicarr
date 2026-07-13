@@ -205,6 +205,12 @@ export async function logout(): Promise<LogoutResponse> {
       credentials: "include",
     });
 
+    // An expired or already-revoked server session is also a successful local
+    // logout. The stale HttpOnly cookie is unusable and will expire naturally.
+    if (response.status === 401) {
+      return { success: true };
+    }
+
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
