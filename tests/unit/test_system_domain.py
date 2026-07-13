@@ -1003,10 +1003,12 @@ class TestConfigService:
 
     def test_sanitize_job_error_redacts_credentials(self):
         message = system_service.sanitize_job_error(
-            "token=secret Authorization: Bearer bearer-secret https://user:pass@example.test failed"
+            "token=secret {'apikey': 'quoted-api-secret'} Authorization: Bearer bearer-secret "
+            "https://user:pass@example.test failed"
         )
 
         assert "secret" not in message
+        assert "quoted-api-secret" not in message
         assert "bearer-secret" not in message
         assert "user:pass" not in message
         assert "[redacted]" in message
@@ -1160,7 +1162,7 @@ def _make_real_config(tmp_path, monkeypatch):
     secure_dir.mkdir()
 
     monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-    encrypted_module._fernet_instance = None
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
 
     cfg = config_module.Config(str(config_path))
     cfg.config_vals()
@@ -1230,7 +1232,7 @@ class TestConfigTransactions:
             parser.write(config_file)
 
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
         monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
         cfg = config_module.Config(str(config_path))
         monkeypatch.setattr(comicarr, "CONFIG", cfg)
@@ -1263,7 +1265,7 @@ class TestConfigTransactions:
             "[Torznab]\nextra_torznabs =\n" % secure_dir
         )
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
         monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
         cfg = config_module.Config(str(config_path))
         cfg.configure = MagicMock()
@@ -1299,7 +1301,7 @@ class TestConfigTransactions:
             "[Torznab]\nextra_torznabs =\n" % secret
         )
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
         monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
         monkeypatch.setattr(comicarr, "CONFIG_FILE", str(config_path))
         cfg = config_module.Config(str(config_path))
@@ -1330,7 +1332,7 @@ class TestConfigTransactions:
             "[Torznab]\nextra_torznabs =\n" % (secure_dir, malformed)
         )
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
         monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
         cfg = config_module.Config(str(config_path))
         cfg.provider_sequence = MagicMock()
@@ -1368,8 +1370,8 @@ class TestConfigTransactions:
             "[Torznab]\nextra_torznabs =\n" % historical_secret
         )
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
-        encrypted_module._fernet_secure_dir = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
         monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
         cfg = config_module.Config(str(config_path))
         cfg.provider_sequence = MagicMock()
@@ -1408,8 +1410,8 @@ class TestConfigTransactions:
             "[Torznab]\nextra_torznabs =\n"
         )
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
-        encrypted_module._fernet_secure_dir = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
         monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
         cfg = config_module.Config(str(config_path))
         cfg.provider_sequence = MagicMock()
@@ -1443,8 +1445,8 @@ class TestConfigTransactions:
             % (secure_dir, torznab_name, torznab_id)
         )
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
-        encrypted_module._fernet_secure_dir = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
         monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
         cfg = config_module.Config(str(config_path))
         cfg.provider_sequence = MagicMock()
@@ -1489,7 +1491,7 @@ class TestConfigTransactions:
     def test_provider_transaction_encrypts_at_rest_and_reloads_plaintext(self, tmp_path, monkeypatch):
         cfg, config_path, config_module = _make_real_config(tmp_path, monkeypatch)
         encrypted_module = config_module.encrypted
-        encrypted_module._fernet_instance = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
         existing_token = encrypted_module.Encryptor(
             "existing-secret",
             secure_dir=cfg.SECURE_DIR,
@@ -1538,7 +1540,7 @@ class TestConfigTransactions:
         first_newznab_storage = persisted.get("Newznab", "extra_newznabs")
         first_torznab_storage = persisted.get("Torznab", "extra_torznabs")
         monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-        encrypted_module._fernet_instance = None
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
         fresh = config_module.Config(str(config_path))
         fresh.config_vals()
         fresh.EXTRA_NEWZNABS, fresh.EXTRA_TORZNABS = fresh.get_extras()

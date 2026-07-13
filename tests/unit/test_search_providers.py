@@ -80,7 +80,7 @@ def test_encrypted_provider_key_is_plaintext_only_in_runtime_plan(tmp_path, monk
 
     secure_dir = tmp_path / "secure"
     secure_dir.mkdir()
-    encrypted_module._fernet_instance = None
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
     secret = "runtime-provider-secret"
     token = encrypted_module.Encryptor(secret, secure_dir=str(secure_dir)).encrypt_it()["password"]
     runtime_config = config_module.Config(str(tmp_path / "config.ini"))
@@ -122,6 +122,13 @@ def test_provider_search_exception_logs_redact_credentials(provider_count, monke
     rendered = "\n".join(messages)
     assert secret not in rendered
     assert "[redacted]" in rendered.lower()
+
+
+def test_newznab_r_query_secret_is_redacted():
+    message = search.redact_sensitive_text("https://indexer.test/api?r=newznab-r-secret")
+
+    assert "newznab-r-secret" not in message
+    assert "r=[redacted]" in message
 
 
 def test_rss_result_log_summary_omits_provider_signed_link():

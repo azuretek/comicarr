@@ -346,11 +346,8 @@ class carePackage(object):
                                     "uid:-REDACTED- / authkey:-REDACTED- / passkey:-REDACTED-", line
                                 )
                                 cnt += structured_redactions
+                                cnt += sum(1 for keyed in redaction_keys if keyed in line)
                                 line = redact_sensitive_text(line, redaction_keys)
-                                for keyed in redaction_keys:
-                                    if keyed in line:
-                                        cnt += 1
-                                        line = line.replace(keyed, "-REDACTED-")
                                 output.write(line)
                                 line = f.readline()
 

@@ -2034,11 +2034,14 @@ class Config(object):
         if not self.SECURE_DIR:
             self.SECURE_DIR = os.path.join(comicarr.DATA_DIR, ".secure")
 
-        if os.path.exists(self.SECURE_DIR):
-            return
         try:
-            os.makedirs(self.SECURE_DIR)
-            os.chmod(self.SECURE_DIR, 0o700)
+            if os.path.exists(self.SECURE_DIR):
+                if os.name != "nt":
+                    os.chmod(self.SECURE_DIR, 0o700)
+                return
+            os.makedirs(self.SECURE_DIR, mode=0o700)
+            if os.name != "nt":
+                os.chmod(self.SECURE_DIR, 0o700)
         except OSError:
             logger.error(
                 "[FATAL] Could not create secure directory at %s. "

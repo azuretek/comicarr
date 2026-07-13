@@ -15,8 +15,10 @@ _PROVIDER_STRUCTURE_PATTERN = re.compile(r"(?i)(provider_list|newznab_info|torzn
 _AUTHORIZATION_PATTERN = re.compile(
     r"(?i)([\"']?authorization[\"']?\s*[:=]\s*[\"']?)(?:basic|bearer|token|digest)\s+[^\s,;\"'}\]]+"
 )
-_NAMED_SECRET_PATTERN = re.compile(r"(?i)(api[ _-]?key|authorization|password|passkey|authkey|token)\s*[=:]\s*[^\s,;]+")
-_QUERY_SECRET_PATTERN = re.compile(r"(?i)([?&](?:apikey|api_key|token|password|passkey|auth|authkey)=)[^&\s]+")
+_NAMED_SECRET_PATTERN = re.compile(
+    r"(?i)([\"']?(?:api[ _-]?key|authorization|password|passkey|authkey|token)[\"']?\s*[=:]\s*[\"']?)(?!\[redacted\])([^\s,;\"'}\]]+)([\"']?)"
+)
+_QUERY_SECRET_PATTERN = re.compile(r"(?i)([?&](?:apikey|api_key|r|token|password|passkey|auth|authkey)=)[^&\s]+")
 _URL_USERINFO_PATTERN = re.compile(r"(?i)(https?://)[^/@\s]+@")
 
 
@@ -32,6 +34,6 @@ def redact_sensitive_text(value, secrets=()):
 
     message = _PROVIDER_STRUCTURE_PATTERN.sub(r"\1: [redacted]", message)
     message = _AUTHORIZATION_PATTERN.sub(r"\1[redacted]", message)
-    message = _NAMED_SECRET_PATTERN.sub(r"\1=[redacted]", message)
+    message = _NAMED_SECRET_PATTERN.sub(r"\1[redacted]\3", message)
     message = _QUERY_SECRET_PATTERN.sub(r"\1[redacted]", message)
     return _URL_USERINFO_PATTERN.sub(r"\1[redacted]@", message)

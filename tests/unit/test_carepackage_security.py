@@ -128,7 +128,7 @@ def test_carepackage_redacts_fernet_provider_extras_without_runtime_config(tmp_p
     data_dir.mkdir()
     log_dir.mkdir()
     secure_dir.mkdir()
-    encrypted_module._fernet_instance = None
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
 
     newznab_secret = "newznab-provider-secret"
     torznab_secret = "torznab-provider-secret"
@@ -215,8 +215,8 @@ def test_carepackage_missing_provider_key_redacts_without_creating_replacement(t
     with open(data_dir / "config.ini", "w") as config_file:
         parser.write(config_file)
 
-    encrypted_module._fernet_instance = None
-    encrypted_module._fernet_secure_dir = None
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+    monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
     monkeypatch.setattr(comicarr, "CONFIG", None)
     monkeypatch.setattr(comicarr, "DATA_DIR", str(data_dir))
     monkeypatch.setattr(comicarr, "PROG_DIR", str(tmp_path))
@@ -240,7 +240,7 @@ def test_encrypt_items_handles_git_token_auth_tuple(tmp_path, monkeypatch):
     config_path.write_text("")
 
     # Reset Fernet cache so master.key is loaded from this test's SECURE_DIR.
-    encrypted_module._fernet_instance = None
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
 
     cfg = config_module.Config(str(config_path))
     for attr_name in config_module.ENCRYPTED_CONFIG_ITEMS:
@@ -264,5 +264,3 @@ def test_encrypt_items_handles_git_token_auth_tuple(tmp_path, monkeypatch):
     assert "ghp_test_token_value" not in encrypted_token
     # Runtime auth tuple shape is unchanged (encrypt writes the parser only).
     assert cfg.GIT_TOKEN == ("ghp_test_token_value", "x-oauth-basic")
-
-    encrypted_module._fernet_instance = None
