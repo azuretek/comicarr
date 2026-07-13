@@ -1,4 +1,4 @@
-import { useState, FormEvent } from "react";
+import { useState, SubmitEvent } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import Logo from "@/components/Logo";
 import type { LucideIcon } from "lucide-react";
@@ -14,7 +14,6 @@ import {
   SidebarMenu,
   SidebarMenuItem,
   SidebarMenuButton,
-  SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Kbd } from "@/components/ui/kbd";
@@ -37,7 +36,18 @@ import {
   Moon,
   Sun,
   FolderInput,
+  ChevronsUpDown,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 interface NavItem {
   path: string;
@@ -52,7 +62,7 @@ export default function AppSidebar() {
   const { addToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
-  const { setOpenMobile } = useSidebar();
+  const { isMobile, setOpenMobile } = useSidebar();
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
@@ -76,7 +86,7 @@ export default function AppSidebar() {
     }
   };
 
-  const handleSearchSubmit = (e: FormEvent<HTMLFormElement>) => {
+  const handleSearchSubmit = (e: SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     const trimmed = searchQuery.trim();
     if (trimmed.length >= 3) {
@@ -110,10 +120,8 @@ export default function AppSidebar() {
     setOpenMobile(false);
   };
 
-  const username =
-    typeof user === "object" && user && "username" in user
-      ? (user as { username?: string }).username || "admin"
-      : "admin";
+  const username = user?.username || "admin";
+  const avatarInitials = username.slice(0, 2).toUpperCase();
 
   const renderNav = (items: NavItem[]) =>
     items.map(({ path, label, icon: Icon, kbd }) => {
@@ -138,16 +146,16 @@ export default function AppSidebar() {
   return (
     <Sidebar collapsible="icon" variant="sidebar">
       {/* Brand header */}
-      <SidebarHeader className="px-3 pt-3 pb-3 border-b border-sidebar-border">
+      <SidebarHeader className="px-3 pt-3 pb-3 border-b-[0.5px] border-sidebar-border h-12">
         <div className="flex items-center gap-2">
           <Link
             to="/"
             onClick={handleNavClick}
             className="flex items-center gap-2 flex-1 min-w-0"
           >
-            <Logo className="h-4 w-auto text-foreground" />
+            <Logo className="h-3 w-auto text-foreground" />
           </Link>
-          <span className="group-data-[collapsible=icon]:hidden font-mono text-[10px] text-[var(--text-muted)] px-1.5 py-0.5 border border-sidebar-border rounded-sm">
+          <span className="group-data-[collapsible=icon]:hidden font-mono text-[10px] text-muted-foreground px-1.5 py-0.5 border border-sidebar-border rounded-sm">
             {APP_VERSION}
           </span>
         </div>
@@ -202,78 +210,80 @@ export default function AppSidebar() {
         <SidebarMenu>{renderNav(managementNav)}</SidebarMenu>
       </SidebarContent>
 
-      <SidebarSeparator />
 
-      {/* Footer: settings, theme, logout + account */}
-      <SidebarFooter className="px-2 pb-2 gap-0">
+      {/* Footer account menu keeps secondary actions out of the main navigation. */}
+      <SidebarFooter className="px-2 pb-2 gap-0 border-t-[0.5px]">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton
-              asChild
-              isActive={isActive("/settings")}
-              tooltip="Settings"
-            >
-              <Link to="/settings" onClick={handleNavClick}>
-                <Settings className="w-4 h-4" />
-                <span className="flex-1 text-[13px]">Settings</span>
-                {isActive("/settings") && (
-                  <Kbd className="group-data-[collapsible=icon]:hidden font-mono text-[10px]">
-                    ⌘,
-                  </Kbd>
-                )}
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={toggleTheme}
-              tooltip={theme === "light" ? "Dark mode" : "Light mode"}
-            >
-              {theme === "light" ? (
-                <Moon className="w-4 h-4" />
-              ) : (
-                <Sun className="w-4 h-4" />
-              )}
-              <span className="flex-1 text-[13px]">
-                {theme === "light" ? "Dark mode" : "Light mode"}
-              </span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={handleLogout}
-              tooltip="Logout"
-              disabled={isLoggingOut}
-              aria-busy={isLoggingOut}
-            >
-              <LogOut className="w-4 h-4" />
-              <span className="flex-1 text-[13px]">Logout</span>
-            </SidebarMenuButton>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <SidebarMenuButton
+                    size="lg"
+                    tooltip={username}
+                    className="data-popup-open:bg-sidebar-accent data-popup-open:text-sidebar-accent-foreground"
+                  />
+                }
+              >
+                <Avatar className="size-8">
+                  <AvatarFallback className="rounded-lg bg-linear-to-br from-primary to-chart-4 text-xs font-semibold text-primary-foreground">
+                    {avatarInitials}
+                  </AvatarFallback>
+                </Avatar>
+                <span className="flex-1 truncate text-left text-sm font-medium">
+                  {username}
+                </span>
+                <ChevronsUpDown className="ml-auto size-4" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                className="w-(--anchor-width) min-w-56 rounded-lg"
+                side={isMobile ? "bottom" : "right"}
+                align="end"
+                sideOffset={4}
+              >
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="p-0 font-normal">
+                    <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
+                      <Avatar className="h-8 w-8 rounded-lg">
+                        <AvatarFallback className="rounded-lg bg-linear-to-br from-primary to-chart-4 text-xs font-semibold text-primary-foreground">
+                          {avatarInitials}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="grid flex-1 text-left text-sm leading-tight">
+                        <span className="truncate font-medium">{username}</span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          admin · ready
+                        </span>
+                      </div>
+                    </div>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => {
+                      navigate("/settings");
+                      handleNavClick();
+                    }}
+                  >
+                    <Settings />
+                    Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={toggleTheme}>
+                    {theme === "light" ? <Moon /> : <Sun />}
+                    {theme === "light" ? "Dark mode" : "Light mode"}
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={isLoggingOut}
+                  onClick={handleLogout}
+                >
+                  <LogOut />
+                  {isLoggingOut ? "Logging out…" : "Log out"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </SidebarMenuItem>
         </SidebarMenu>
-
-        {/* Account footer with status dot */}
-        <div className="mt-2 pt-2 border-t border-sidebar-border flex items-center gap-2 px-2 py-1.5 group-data-[collapsible=icon]:hidden">
-          <div
-            className="w-6 h-6 rounded-full shrink-0"
-            style={{
-              background:
-                "linear-gradient(135deg, var(--primary), var(--chart-4))",
-            }}
-          />
-          <div className="flex-1 min-w-0">
-            <div className="text-[12px] font-medium truncate">{username}</div>
-            <div className="font-mono text-[10px] text-[var(--text-muted)]">
-              admin · ready
-            </div>
-          </div>
-          <div
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ background: "var(--status-active)" }}
-          />
-        </div>
       </SidebarFooter>
     </Sidebar>
   );

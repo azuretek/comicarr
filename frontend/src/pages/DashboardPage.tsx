@@ -187,7 +187,7 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2.5">
               <div className="text-[13px] font-semibold">Active queue</div>
-              <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+              <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
                 {queueCount} item{queueCount === 1 ? "" : "s"}
               </div>
             </div>
@@ -250,7 +250,7 @@ export default function DashboardPage() {
             <div className="flex items-center justify-between gap-3 mb-3">
               <div className="flex items-center gap-2.5">
                 <div className="text-[13px] font-semibold">Recent activity</div>
-                <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+                <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
                   {downloads.length} event{downloads.length === 1 ? "" : "s"} ·
                   30 days
                 </div>
@@ -341,7 +341,7 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2.5">
               <div className="text-[13px] font-semibold">This week</div>
-              <div className="font-mono text-[10px] text-[var(--text-muted)] tracking-wider uppercase">
+              <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
                 {upcoming.length} releases
               </div>
             </div>
@@ -386,11 +386,11 @@ export default function DashboardPage() {
                 >
                   {u.ComicName}
                 </Link>
-                <div className="font-mono text-[10px] text-[var(--text-muted)]">
+                <div className="font-mono text-[10px] text-muted-foreground">
                   #{u.IssueNumber}
                 </div>
               </div>
-              <div className="font-mono text-[10px] text-[var(--text-muted)]">
+              <div className="font-mono text-[10px] text-muted-foreground">
                 {u.Status || "auto"}
               </div>
             </div>

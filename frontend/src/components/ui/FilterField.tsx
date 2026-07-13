@@ -57,7 +57,7 @@ const FilterField = forwardRef<HTMLInputElement, FilterFieldProps>(
           ref={ref}
           type="text"
           {...inputProps}
-          className="flex-1 min-w-0 bg-transparent outline-none text-[12px] placeholder:text-[var(--text-muted)]"
+          className="flex-1 min-w-0 bg-transparent outline-none text-[12px] placeholder:text-muted-foreground"
         />
         {trailing}
         {loading ? (

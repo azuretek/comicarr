@@ -66,19 +66,16 @@ export default function Layout({ children }: LayoutProps) {
         </header>
 
         {/* Desktop omni status bar */}
-        <div className="hidden md:flex h-9 items-center gap-3 border-b border-border bg-card px-4 font-mono text-[11px] text-muted-foreground">
-          <span className="text-foreground uppercase tracking-wide">
-            Comicarr
-          </span>
-          <span className="text-[var(--text-muted)]">/</span>
+        <div className="hidden md:flex h-12 items-center gap-3 border-b-[0.5px] border-border bg-card px-4 font-mono text-[11px] text-muted-foreground">
+          <SidebarTrigger />
           <span>
             mode: <span className="text-foreground">production</span>
           </span>
-          <span className="text-[var(--text-muted)]">·</span>
+          <span className="text-muted-foreground">·</span>
           <span>
             db: <span style={{ color: "var(--status-active)" }}>healthy</span>
           </span>
-          <span className="text-[var(--text-muted)]">·</span>
+          <span className="text-muted-foreground">·</span>
           <span>
             queue: <span className="text-foreground">—</span>
           </span>

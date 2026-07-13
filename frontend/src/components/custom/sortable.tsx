@@ -34,7 +34,7 @@ import {
   type SortableContextProps,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Slot, type SlotProps } from "@radix-ui/react-slot";
+import { useRender } from "@base-ui/react/use-render";
 import * as React from "react";
 import { createPortal } from "react-dom";
 
@@ -247,7 +247,7 @@ function useSortableItem() {
   return context;
 }
 
-interface SortableItemProps extends SlotProps {
+interface SortableItemProps extends useRender.ComponentProps<"div"> {
   /**
    * The unique identifier of the item.
    * @example "item-1"
@@ -301,23 +301,26 @@ function SortableItem({
     transition,
   };
 
-  const Comp = asChild ? Slot : "div";
-
   return (
     <SortableItemContext.Provider value={context}>
-      <Comp
-        data-state={isDragging ? "dragging" : undefined}
-        className={cn(
+      {useRender({
+        defaultTagName: "div",
+        render: asChild ? (props.children as React.ReactElement) : props.render,
+        props: {
+          ...props,
+          children: asChild ? undefined : props.children,
+          "data-state": isDragging ? "dragging" : undefined,
+          className: cn(
           "data-[state=dragging]:cursor-grabbing",
           { "cursor-grab": !isDragging && asTrigger },
           className,
-        )}
-        ref={composeRefs(ref, setNodeRef as React.Ref<HTMLDivElement>)}
-        style={style}
-        {...(asTrigger ? attributes : {})}
-        {...(asTrigger ? listeners : {})}
-        {...props}
-      />
+          ),
+          ref: composeRefs(ref, setNodeRef as React.Ref<HTMLDivElement>),
+          style,
+          ...(asTrigger ? attributes : {}),
+          ...(asTrigger ? listeners : {}),
+        },
+      })}
     </SortableItemContext.Provider>
   );
 }

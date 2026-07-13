@@ -46,7 +46,7 @@ export function SettingField({
     return (
       <label
         htmlFor={fieldId}
-        className="flex items-start gap-3 py-2.5 px-3 rounded-[6px] border cursor-pointer select-none"
+        className="flex items-start gap-3 py-2.5 px-3 rounded-lg border-[0.5px] cursor-pointer select-none"
         style={{
           borderColor: "var(--border)",
           background: "var(--card)",
@@ -100,9 +100,9 @@ export function SettingField({
     return (
       <div className="grid gap-2 sm:gap-4 py-3 sm:items-center grid-cols-1 sm:[grid-template-columns:200px_1fr]">
         <div>
-          <div className="text-[12.5px] font-medium">{label}</div>
+          <div className="text-sm font-medium">{label}</div>
           {helpText && (
-            <div className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+            <div className="text-xs text-muted-foreground mt-0.5 leading-snug">
               {helpText}
             </div>
           )}
