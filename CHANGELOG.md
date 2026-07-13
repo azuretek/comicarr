@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.5
+
+### Patch Changes
+
+- 3d626f0: Revoke all active UI sessions durably on logout while preserving the current session when secure key rotation fails.
+- 2f59687: Persist additional Newznab and Torznab credentials transactionally with encrypted API keys and truthful save failures, while scrubbing provider secrets from diagnostics and retained config backups.
+- 64aea8c: Keep clients, database connections, and runtime context open for terminal process exit when a scheduler job or worker remains alive after its bounded shutdown drain.
+- 61249df: Harden bundled downloader integrations and package vendor clients under Comicarr's supported namespace.
+- 5bd9fdf: Fix modern backend correctness hazards and enforce a strict lint ratchet for active application code.
+- 0433c04: Reject empty, multiple, partial, unknown, and structurally spoofed Alembic revision states before schema mutation, and verify legacy adoption across every supported database dialect.
+
 ## 0.19.4
 
 ### Patch Changes
