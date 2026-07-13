@@ -350,8 +350,11 @@ def _migrate_readinglist_to_storyarcs(connection: Connection) -> None:
         raise MigrationStateError(
             "readinglist does not match the supported legacy layout; missing columns: %s" % ", ".join(missing_columns)
         )
-    columns = ", ".join(_READINGLIST_TO_STORYARCS_COLUMNS)
-    connection.execute(text("INSERT INTO storyarcs(%s) SELECT %s FROM readinglist" % (columns, columns)))
+    quote = connection.dialect.identifier_preparer.quote
+    columns = ", ".join(quote(column) for column in _READINGLIST_TO_STORYARCS_COLUMNS)
+    connection.execute(
+        text("INSERT INTO %s (%s) SELECT %s FROM %s" % (quote("storyarcs"), columns, columns, quote("readinglist")))
+    )
     connection.execute(text("DROP TABLE readinglist"))
 
 
