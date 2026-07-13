@@ -17,7 +17,7 @@ except ModuleNotFoundError:
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 EXPORT_COMMAND = ["uv", "export", "--locked", "--no-dev", "--no-hashes", "--no-emit-project"]
-SETUP_UV_ACTION = "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b"
+SETUP_UV_ACTION = "astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990"
 
 
 def _canonical_requirements(contents):
