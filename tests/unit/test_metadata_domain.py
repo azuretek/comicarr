@@ -203,7 +203,7 @@ class TestMetatag:
         result = metadata_service.bulk_metatag(ctx, "comic456", issue_ids)
         assert result["success"] is True
         assert result["count"] == 3
-        mock_do_bulk.assert_called_once_with("comic456", issue_ids)
+        mock_do_bulk.assert_called_once_with("comic456", issue_ids, registry=ctx.background_workers)
 
     @patch("comicarr.app.metadata.service._do_manual_metatag")
     def test_metatag_handles_error(self, mock_do_metatag):

@@ -23,6 +23,7 @@ if comicarr.LOG_LEVEL is None:
 from comicarr.app.core.context import AppContext
 from comicarr.app.core.security import (
     create_session_token,
+    load_or_create_jwt_key,
     validate_jwt_token,
 )
 from comicarr.app.system import router as system_router
@@ -202,6 +203,101 @@ class TestJWTIntegration:
         assert validate_jwt_token(token, secret, 0) == "admin"
         # Token invalid after generation bump (simulating revocation)
         assert validate_jwt_token(token, secret, 1) is None
+
+    def test_logout_rotates_key_and_revocation_survives_restart(self, tmp_path):
+        """Logout revokes copied tokens in memory and from a fresh runtime key load."""
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        old_key = load_or_create_jwt_key(str(secure_dir))
+        old_token = create_session_token("admin", old_key, generation=0)
+        ctx = _make_test_ctx(
+            jwt_secure_dir=str(secure_dir),
+            jwt_secret_key=old_key,
+        )
+
+        response = system_router.logout(ctx=ctx, username="admin")
+
+        assert response.status_code == 200
+        assert any(
+            name.lower() == b"set-cookie" and b"comicarr_session=" in value and b"Max-Age=0" in value
+            for name, value in response.raw_headers
+        )
+        assert validate_jwt_token(old_token, ctx.jwt_secret_key, 0) is None
+        new_token = create_session_token("admin", ctx.jwt_secret_key, generation=0)
+        assert validate_jwt_token(new_token, ctx.jwt_secret_key, 0) == "admin"
+
+        restarted_key = load_or_create_jwt_key(str(secure_dir))
+        assert restarted_key == ctx.jwt_secret_key
+        assert validate_jwt_token(old_token, restarted_key, 0) is None
+        assert validate_jwt_token(new_token, restarted_key, 0) == "admin"
+
+    def test_logout_persistence_failure_keeps_session_and_cookie(self, tmp_path):
+        """A failed atomic replace must not claim logout or clear a valid cookie."""
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        old_key = load_or_create_jwt_key(str(secure_dir))
+        old_token = create_session_token("admin", old_key, generation=0)
+        ctx = _make_test_ctx(
+            jwt_secure_dir=str(secure_dir),
+            jwt_secret_key=old_key,
+        )
+
+        with patch("comicarr.app.core.security.os.replace", side_effect=OSError("/secret/path failed")):
+            response = system_router.logout(ctx=ctx, username="admin")
+
+        payload = json.loads(response.body)
+        assert response.status_code == 500
+        assert payload == {"success": False, "error": "Unable to revoke active sessions"}
+        assert b"/secret/path" not in response.body
+        assert all(name.lower() != b"set-cookie" for name, _value in response.raw_headers)
+        assert ctx.jwt_secret_key == old_key
+        assert (secure_dir / "jwt.key").read_bytes() == old_key
+        assert validate_jwt_token(old_token, ctx.jwt_secret_key, 0) == "admin"
+
+    def test_logout_without_persistent_key_authority_fails_closed(self):
+        """An ephemeral runtime cannot claim durable session revocation."""
+        ctx = _make_test_ctx(jwt_secure_dir=None)
+
+        response = system_router.logout(ctx=ctx, username="admin")
+
+        assert response.status_code == 500
+        assert all(name.lower() != b"set-cookie" for name, _value in response.raw_headers)
+
+    @pytest.mark.asyncio
+    async def test_login_signs_token_while_holding_rotation_lock(self):
+        """Login and logout share one key-authority serialization boundary."""
+
+        class RecordingLock:
+            def __init__(self):
+                self.held = False
+
+            def __enter__(self):
+                self.held = True
+
+            def __exit__(self, _exc_type, _exc_value, _traceback):
+                self.held = False
+
+        lock = RecordingLock()
+        ctx = _make_test_ctx(runtime_lock=lock)
+
+        def sign_while_locked(*_args, **_kwargs):
+            assert lock.held is True
+            return "signed-token"
+
+        request = _JsonRequest({"username": "admin", "password": "password123"})
+        request.client = None
+        with (
+            patch.object(
+                system_router.system_service,
+                "verify_login",
+                return_value={"success": True, "username": "admin"},
+            ),
+            patch.object(system_router, "create_session_token", side_effect=sign_while_locked),
+        ):
+            response = await system_router.login(request, ctx)
+
+        assert response.status_code == 200
+        assert any(b"signed-token" in value for name, value in response.raw_headers if name.lower() == b"set-cookie")
 
 
 # =============================================================================
@@ -584,6 +680,89 @@ class TestConfigService:
         assert result == {"success": True}
         assert events == ["persist", "scheduler"]
 
+    @pytest.mark.parametrize(
+        ("provider_type", "config_key"),
+        (("newznab", "EXTRA_NEWZNABS"), ("torznab", "EXTRA_TORZNABS")),
+    )
+    def test_update_providers_uses_transactional_extra_provider_key(self, provider_type, config_key):
+        providers = [["Indexer", "https://indexer.test", "1", "secret", "5030", "1", 101]]
+        ctx = _make_test_ctx()
+
+        result = system_service.update_providers(ctx, {"type": provider_type, "providers": providers})
+
+        assert result == {"success": True}
+        ctx.config.apply_transaction.assert_called_once_with({config_key: providers}, configure=False)
+        ctx.config.configure.assert_not_called()
+        ctx.config.writeconfig_values.assert_not_called()
+
+    def test_update_providers_reports_transaction_failure_without_reconfigure(self):
+        old_providers = [("Old", "https://old.test", "1", "old-key", "5030", "1", 100)]
+        new_providers = [["New", "https://new.test", "1", "new-key", "5030", "1", 101]]
+        ctx = _make_test_ctx()
+        ctx.config.EXTRA_NEWZNABS = old_providers
+        ctx.config.apply_transaction.side_effect = None
+        ctx.config.apply_transaction.return_value = False
+
+        result = system_service.update_providers(ctx, {"type": "newznab", "providers": new_providers})
+
+        assert result == {"success": False, "error": "Failed to persist provider configuration"}
+        assert ctx.config.EXTRA_NEWZNABS is old_providers
+        ctx.config.apply_transaction.assert_called_once_with({"EXTRA_NEWZNABS": new_providers}, configure=False)
+        ctx.config.configure.assert_not_called()
+        ctx.config.writeconfig_values.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_providers_returns_bad_request_for_malformed_entry(self):
+        """Malformed provider tuples remain validation errors rather than storage failures."""
+        ctx = _make_test_ctx()
+        ctx.config.validate_provider_extra_value.side_effect = ValueError("invalid provider entry")
+        request = _JsonRequest({"type": "newznab", "providers": [["Too short", "https://short.test", "1"]]})
+
+        response = await system_router.update_providers(request, ctx)
+
+        assert response.status_code == 400
+        assert json.loads(response.body) == {"success": False, "error": "Invalid provider configuration"}
+        ctx.config.apply_transaction.assert_not_called()
+
+    @pytest.mark.parametrize("payload", ({"type": "invalid", "providers": []}, [], None))
+    def test_update_providers_rejects_invalid_payload_without_writing(self, payload):
+        ctx = _make_test_ctx()
+
+        result = system_service.update_providers(ctx, payload)
+
+        assert result["success"] is False
+        ctx.config.apply_transaction.assert_not_called()
+
+    def test_recent_logs_redact_runtime_provider_and_header_credentials(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        provider_secret = "provider-secret-value"
+        bearer_secret = "bearer-secret-value"
+        basic_secret = "basic-secret-value"
+        token_secret = "token-secret-value"
+        query_secret = "query-secret-value"
+        (log_dir / "comicarr.log").write_text(
+            "provider_list: {'info': ('Indexer', 'https://indexer.test', '1', 'provider-secret-value')}\n"
+            "Authorization: Bearer bearer-secret-value\n"
+            "Authorization: Basic basic-secret-value\n"
+            "{'Authorization': 'Token token-secret-value'}\n"
+            "download failed https://indexer.test/api?apikey=query-secret-value\n"
+        )
+        ctx = _make_test_ctx(data_dir=str(tmp_path))
+        ctx.config.LOG_DIR = str(log_dir)
+        ctx.config.EXTRA_NEWZNABS = [("Indexer", "https://indexer.test", "1", provider_secret, "5030", "1", 100)]
+        ctx.config.EXTRA_TORZNABS = []
+
+        result = system_service.get_recent_logs(ctx)
+
+        rendered = "".join(result["logs"])
+        assert provider_secret not in rendered
+        assert bearer_secret not in rendered
+        assert basic_secret not in rendered
+        assert token_secret not in rendered
+        assert query_secret not in rendered
+        assert "[redacted]" in rendered.lower()
+
     @patch("comicarr.app.system.service.secrets.token_hex", return_value="a" * 32)
     def test_regenerate_api_key_persists_new_key(self, mock_token_hex):
         """regenerate_api_key creates, persists, and returns a server-side key."""
@@ -919,9 +1098,14 @@ class TestConfigService:
         assert values["last_error"] == "Previous Auto-Search run was interrupted by restart."
 
     def test_sanitize_job_error_redacts_credentials(self):
-        message = system_service.sanitize_job_error("token=secret https://user:pass@example.test failed")
+        message = system_service.sanitize_job_error(
+            "token=secret {'apikey': 'quoted-api-secret'} Authorization: Bearer bearer-secret "
+            "https://user:pass@example.test failed"
+        )
 
         assert "secret" not in message
+        assert "quoted-api-secret" not in message
+        assert "bearer-secret" not in message
         assert "user:pass" not in message
         assert "[redacted]" in message
 
@@ -978,6 +1162,28 @@ class _JsonRequest:
 
 
 class TestConfigRouter:
+    @pytest.mark.asyncio
+    async def test_update_providers_maps_persistence_failure_to_server_error(self):
+        failure = {"success": False, "error": "Failed to persist provider configuration"}
+        request = _JsonRequest({"type": "newznab", "providers": []})
+
+        with patch.object(system_router.system_service, "update_providers", return_value=failure):
+            response = await system_router.update_providers(request, _make_test_ctx())
+
+        assert response.status_code == 500
+        assert json.loads(response.body) == failure
+
+    @pytest.mark.asyncio
+    async def test_update_providers_maps_validation_failure_to_bad_request(self):
+        failure = {"success": False, "error": "Invalid provider type"}
+        request = _JsonRequest({"type": "invalid", "providers": []})
+
+        with patch.object(system_router.system_service, "update_providers", return_value=failure):
+            response = await system_router.update_providers(request, _make_test_ctx())
+
+        assert response.status_code == 400
+        assert json.loads(response.body) == failure
+
     @pytest.mark.asyncio
     async def test_setup_returns_server_error_when_persistence_fails(self):
         """The setup endpoint distinguishes storage failure from invalid input."""
@@ -1052,13 +1258,14 @@ def _make_real_config(tmp_path, monkeypatch):
     secure_dir.mkdir()
 
     monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
-    encrypted_module._fernet_instance = None
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
 
     cfg = config_module.Config(str(config_path))
     cfg.config_vals()
     cfg.SECURE_DIR = str(secure_dir)
     config_module.config.set("General", "secure_dir", str(secure_dir))
     cfg.provider_sequence = MagicMock()
+    cfg.write_out_provider_searches = MagicMock()
     monkeypatch.setattr(comicarr, "CONFIG", cfg)
     monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
     return cfg, config_path, config_module
@@ -1072,6 +1279,605 @@ def _symlink_or_skip(link_path, target_path):
 
 
 class TestConfigTransactions:
+    @pytest.mark.parametrize(
+        ("config_version", "entry_width", "entry_count"),
+        ((15, 6, 7), (10, 7, 6)),
+    )
+    def test_ambiguous_flat_provider_count_uses_structural_width(self, config_version, entry_width, entry_count):
+        """A 42-field legacy payload never shifts API keys into another column."""
+        from comicarr import config as config_module
+
+        entries = []
+        for index in range(entry_count):
+            entry = [
+                f"Provider {index}",
+                f"https://provider-{index}.test",
+                "1",
+                f"secret-{index}",
+                "5030",
+                "1",
+            ]
+            if entry_width == 7:
+                entry.append(100 + index)
+            entries.append(entry)
+
+        parsed = config_module.parse_provider_extras(
+            ", ".join(str(field) for row in entries for field in row), config_version
+        )
+
+        assert len(parsed) == entry_count
+        assert all(len(entry) == entry_width for entry in parsed)
+        assert [entry[3] for entry in parsed] == [f"secret-{index}" for index in range(entry_count)]
+
+    def test_config_read_encrypts_plaintext_provider_before_projection(self, tmp_path, monkeypatch):
+        from comicarr import config as config_module
+        from comicarr import encrypted as encrypted_module
+
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        config_path = tmp_path / "config.ini"
+        parser = configparser.ConfigParser()
+        parser["General"] = {
+            "config_version": "15",
+            "minimal_ini": "False",
+            "secure_dir": str(secure_dir),
+        }
+        parser["Newznab"] = {"extra_newznabs": "Legacy, https://legacy.test, 1, startup-secret, 5030, 1"}
+        parser["Torznab"] = {"extra_torznabs": ""}
+        with open(config_path, "w") as config_file:
+            parser.write(config_file)
+
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+        cfg = config_module.Config(str(config_path))
+        monkeypatch.setattr(comicarr, "CONFIG", cfg)
+        projections = []
+
+        def project_providers():
+            projections.append((cfg.EXTRA_NEWZNABS[0][3], config_path.read_text()))
+
+        cfg.provider_sequence = MagicMock(side_effect=project_providers)
+        cfg.configure = MagicMock()
+
+        assert cfg.read(startup=False) is cfg
+
+        assert projections
+        assert all(runtime_key == "startup-secret" for runtime_key, _file_text in projections)
+        assert all("startup-secret" not in file_text for _runtime_key, file_text in projections)
+        assert "gAAAAA" in config_path.read_text()
+
+    def test_config_read_fails_closed_when_plaintext_provider_migration_cannot_replace(self, tmp_path, monkeypatch):
+        """Startup never continues while a plaintext provider key remains on disk."""
+        from comicarr import config as config_module
+        from comicarr import encrypted as encrypted_module
+
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        config_path = tmp_path / "config.ini"
+        config_path.write_text(
+            "[General]\nconfig_version = 15\nminimal_ini = False\nsecure_dir = %s\n"
+            "[Newznab]\nextra_newznabs = Legacy, https://legacy.test, 1, startup-secret, 5030, 1\n"
+            "[Torznab]\nextra_torznabs =\n" % secure_dir
+        )
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+        cfg = config_module.Config(str(config_path))
+        cfg.configure = MagicMock()
+        cfg.provider_sequence = MagicMock()
+        cfg._atomic_replace_file = MagicMock(side_effect=OSError("read-only config"))
+
+        with pytest.raises(OSError, match="encrypted provider credentials"):
+            cfg.read(startup=False)
+
+        assert "startup-secret" in config_path.read_text()
+        cfg.provider_sequence.assert_not_called()
+
+    def test_preupgrade_backup_never_copies_plaintext_provider_key(self, tmp_path, monkeypatch):
+        from comicarr import config as config_module
+        from comicarr import encrypted as encrypted_module
+
+        secure_dir = tmp_path / "secure"
+        backup_dir = tmp_path / "backup"
+        secure_dir.mkdir()
+        backup_dir.mkdir()
+        config_path = tmp_path / "config.ini"
+        secret = "preupgrade-provider-secret"
+        config_path.write_text(
+            "[General]\nconfig_version = 14\nminimal_ini = False\nsecure_dir = %s\n"
+            "[Backup]\nbackup_location = %s\nbackup_retention = 2\n"
+            "[Newznab]\nextra_newznabs = Legacy, https://legacy.test, 1, %s, 5030, 1, 301\n"
+            "[Torznab]\nextra_torznabs =\n" % (secure_dir, backup_dir, secret)
+        )
+        historical_backup = backup_dir / "config.ini-v13.backup"
+        historical_backup.write_text(
+            "[General]\nconfig_version = 13\n"
+            "[Newznab]\nextra_newznabs = Old, https://old.test, 1, %s, 5030, 1, 300\n"
+            "[Torznab]\nextra_torznabs =\n" % secret
+        )
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(comicarr, "CONFIG_FILE", str(config_path))
+        cfg = config_module.Config(str(config_path))
+        monkeypatch.setattr(comicarr, "CONFIG", cfg)
+        cfg.provider_sequence = MagicMock()
+        cfg.write_out_provider_searches = MagicMock()
+        cfg.configure = MagicMock()
+
+        assert cfg.read(startup=False) is cfg
+
+        backup_files = list(backup_dir.glob("config.ini-v*.backup*"))
+        assert backup_files
+        assert secret not in config_path.read_text()
+        assert all(secret not in backup.read_text() for backup in backup_files)
+        assert all("gAAAAA" in backup.read_text() for backup in backup_files)
+
+    def test_startup_rejects_malformed_legacy_provider_token_without_rewrite(self, tmp_path, monkeypatch):
+        from comicarr import config as config_module
+        from comicarr import encrypted as encrypted_module
+
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        config_path = tmp_path / "config.ini"
+        malformed = "^~$z$!!!!"
+        config_path.write_text(
+            "[General]\nconfig_version = 15\nminimal_ini = False\nsecure_dir = %s\n"
+            "[Newznab]\nextra_newznabs = Legacy, https://legacy.test, 1, %s, 5030, 1, 301\n"
+            "[Torznab]\nextra_torznabs =\n" % (secure_dir, malformed)
+        )
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+        cfg = config_module.Config(str(config_path))
+        cfg.provider_sequence = MagicMock()
+        cfg.configure = MagicMock()
+
+        with pytest.raises(ValueError, match="decrypt provider credential"):
+            cfg.read(startup=False)
+
+        assert malformed in config_path.read_text()
+        cfg.provider_sequence.assert_not_called()
+
+    def test_startup_missing_provider_key_does_not_create_replacement_authority(self, tmp_path, monkeypatch):
+        from cryptography.fernet import Fernet
+
+        from comicarr import config as config_module
+        from comicarr import encrypted as encrypted_module
+
+        secure_dir = tmp_path / "secure"
+        backup_dir = tmp_path / "backup"
+        secure_dir.mkdir()
+        backup_dir.mkdir()
+        token = Fernet(Fernet.generate_key()).encrypt(b"unrecoverable-secret").decode()
+        historical_secret = "historical-plaintext-secret"
+        config_path = tmp_path / "config.ini"
+        config_path.write_text(
+            "[General]\nconfig_version = 15\nminimal_ini = False\nsecure_dir = %s\n"
+            "[Backup]\nbackup_location = %s\n"
+            "[Newznab]\nextra_newznabs = Legacy, https://legacy.test, 1, %s, 5030, 1, 301\n"
+            "[Torznab]\nextra_torznabs =\n" % (secure_dir, backup_dir, token)
+        )
+        historical_backup = backup_dir / "config.ini-v14.backup"
+        historical_backup.write_text(
+            "[General]\nconfig_version = 14\n"
+            "[Newznab]\nextra_newznabs = Old, https://old.test, 1, %s, 5030, 1, 300\n"
+            "[Torznab]\nextra_torznabs =\n" % historical_secret
+        )
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
+        monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+        cfg = config_module.Config(str(config_path))
+        cfg.provider_sequence = MagicMock()
+        cfg.configure = MagicMock()
+
+        with pytest.raises(ValueError, match="decrypt provider credential"):
+            cfg.read(startup=False)
+
+        assert not (secure_dir / "master.key").exists()
+        assert historical_secret in historical_backup.read_text()
+        cfg.provider_sequence.assert_not_called()
+
+    def test_startup_missing_scalar_key_blocks_provider_and_backup_rewrites(self, tmp_path, monkeypatch):
+        from cryptography.fernet import Fernet
+
+        from comicarr import config as config_module
+        from comicarr import encrypted as encrypted_module
+
+        secure_dir = tmp_path / "secure"
+        backup_dir = tmp_path / "backup"
+        secure_dir.mkdir()
+        backup_dir.mkdir()
+        scalar_token = Fernet(Fernet.generate_key()).encrypt(b"unrecoverable-comicvine-secret").decode()
+        config_path = tmp_path / "config.ini"
+        config_path.write_text(
+            "[General]\nconfig_version = 15\nminimal_ini = False\nsecure_dir = %s\n"
+            "[Backup]\nbackup_location = %s\n"
+            "[CV]\ncomicvine_api = %s\n"
+            "[Newznab]\nextra_newznabs = Legacy, https://legacy.test, 1, live-plaintext-secret, 5030, 1, 301\n"
+            "[Torznab]\nextra_torznabs =\n" % (secure_dir, backup_dir, scalar_token)
+        )
+        historical_backup = backup_dir / "config.ini-v14.backup"
+        historical_backup.write_text(
+            "[General]\nconfig_version = 14\n"
+            "[Newznab]\nextra_newznabs = Old, https://old.test, 1, backup-plaintext-secret, 5030, 1, 300\n"
+            "[Torznab]\nextra_torznabs =\n"
+        )
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
+        monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+        cfg = config_module.Config(str(config_path))
+        cfg.provider_sequence = MagicMock()
+        cfg.configure = MagicMock()
+
+        with pytest.raises(ValueError, match="encrypted configuration authority"):
+            cfg.read(startup=False)
+
+        assert not (secure_dir / "master.key").exists()
+        assert "live-plaintext-secret" in config_path.read_text()
+        assert "backup-plaintext-secret" in historical_backup.read_text()
+        cfg.provider_sequence.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("torznab_name", "torznab_id", "error"),
+        (("duplicate", 302, "Provider names must be unique"), ("Other", 301, "Provider IDs must be unique")),
+    )
+    def test_config_read_rejects_persisted_duplicate_provider_identity_before_projection(
+        self, tmp_path, monkeypatch, torznab_name, torznab_id, error
+    ):
+        from comicarr import config as config_module
+        from comicarr import encrypted as encrypted_module
+
+        secure_dir = tmp_path / "secure"
+        secure_dir.mkdir()
+        config_path = tmp_path / "config.ini"
+        config_path.write_text(
+            "[General]\nconfig_version = 15\nminimal_ini = False\nsecure_dir = %s\n"
+            "[Newznab]\nextra_newznabs = Duplicate, https://newz.test, 1, , 5030, 1, 301\n"
+            "[Torznab]\nextra_torznabs = %s, https://torz.test, 1, , 5070, 1, %s\n"
+            % (secure_dir, torznab_name, torznab_id)
+        )
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
+        monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+        cfg = config_module.Config(str(config_path))
+        cfg.provider_sequence = MagicMock()
+        cfg.configure = MagicMock()
+
+        with pytest.raises(ValueError, match=error):
+            cfg.read(startup=False)
+
+        cfg.provider_sequence.assert_not_called()
+        cfg.configure.assert_not_called()
+
+    def test_legacy_six_field_plaintext_provider_migrates_once(self, tmp_path, monkeypatch):
+        cfg, config_path, config_module = _make_real_config(tmp_path, monkeypatch)
+        cfg.CONFIG_VERSION = 10
+        cfg.EXTRA_NEWZNABS = "Legacy, https://legacy.test, 1, legacy-secret, 5030, 1"
+        cfg.EXTRA_TORZNABS = ""
+        cfg.EXTRA_NEWZNABS, cfg.EXTRA_TORZNABS = cfg.get_extras()
+
+        cfg._load_provider_extra_credentials()
+
+        assert cfg.WRITE_THE_CONFIG is True
+        assert cfg.EXTRA_NEWZNABS[0][3] == "legacy-secret"
+        assert len(cfg.EXTRA_NEWZNABS[0]) == 7
+
+        cfg.CONFIG_VERSION = 15
+        config_module.config.set("General", "config_version", "15")
+        cfg.provider_sequence = MagicMock()
+        assert cfg.writeconfig(startup=True) is True
+        first = configparser.ConfigParser()
+        first.read(config_path)
+        first_storage = first.get("Newznab", "extra_newznabs")
+        first_entries = config_module.parse_provider_extras(first_storage, config_version=15)
+        assert first_entries[0][3].startswith("gAAAAA")
+        assert "legacy-secret" not in first_storage
+
+        assert cfg.writeconfig(startup=True) is True
+        second = configparser.ConfigParser()
+        second.read(config_path)
+        assert second.get("Newznab", "extra_newznabs") == first_storage
+        assert cfg.EXTRA_NEWZNABS[0][3] == "legacy-secret"
+
+    def test_provider_transaction_encrypts_at_rest_and_reloads_plaintext(self, tmp_path, monkeypatch):
+        cfg, config_path, config_module = _make_real_config(tmp_path, monkeypatch)
+        encrypted_module = config_module.encrypted
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        existing_token = encrypted_module.Encryptor(
+            "existing-secret",
+            secure_dir=cfg.SECURE_DIR,
+        ).encrypt_it()["password"]
+        cfg.configure = MagicMock()
+        cfg.provider_sequence = MagicMock()
+        newznabs = [
+            ["Plain", "https://plain.test", "1", "plain-secret", "5030,5040", "1", 201],
+            ["Encrypted", "https://encrypted.test", "1", existing_token, "5070", "1", 202],
+            ["Empty", "https://empty.test", "1", "", "5000", "0", 203],
+        ]
+        torznabs = [["Legacy width", "https://tor.test", "1", "tor-secret", "5070", "1"]]
+
+        assert (
+            cfg.apply_transaction(
+                {
+                    "EXTRA_NEWZNABS": newznabs,
+                    "EXTRA_TORZNABS": torznabs,
+                }
+            )
+            is True
+        )
+        cfg.configure.assert_not_called()
+
+        persisted = configparser.ConfigParser()
+        persisted.read(config_path)
+        persisted_newznabs = config_module.parse_provider_extras(
+            persisted.get("Newznab", "extra_newznabs"),
+            config_version=cfg.CONFIG_VERSION,
+        )
+        persisted_torznabs = config_module.parse_provider_extras(
+            persisted.get("Torznab", "extra_torznabs"),
+            config_version=cfg.CONFIG_VERSION,
+        )
+        assert persisted_newznabs[0][3].startswith("gAAAAA")
+        assert persisted_newznabs[1][3] == existing_token
+        assert persisted_newznabs[2][3] == ""
+        assert persisted_newznabs[0][0:3] == ("Plain", "https://plain.test", "1")
+        assert persisted_newznabs[0][4:] == ("5030#5040", "1", "201")
+        assert persisted_torznabs[0][3].startswith("gAAAAA")
+        assert len(persisted_torznabs[0]) == 7
+        assert "plain-secret" not in config_path.read_text()
+        assert "existing-secret" not in config_path.read_text()
+        assert "tor-secret" not in config_path.read_text()
+
+        first_newznab_storage = persisted.get("Newznab", "extra_newznabs")
+        first_torznab_storage = persisted.get("Torznab", "extra_torznabs")
+        monkeypatch.setattr(config_module, "config", configparser.ConfigParser())
+        monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+        fresh = config_module.Config(str(config_path))
+        fresh.config_vals()
+        fresh.EXTRA_NEWZNABS, fresh.EXTRA_TORZNABS = fresh.get_extras()
+        fresh._load_provider_extra_credentials()
+
+        assert [entry[3] for entry in fresh.EXTRA_NEWZNABS] == ["plain-secret", "existing-secret", ""]
+        assert fresh.EXTRA_TORZNABS[0][3] == "tor-secret"
+        assert len(fresh.EXTRA_TORZNABS[0]) == 7
+        assert fresh.WRITE_THE_CONFIG is False
+
+        fresh.provider_sequence = MagicMock()
+        assert fresh.writeconfig(startup=True) is True
+        second = configparser.ConfigParser()
+        second.read(config_path)
+        assert second.get("Newznab", "extra_newznabs") == first_newznab_storage
+        assert second.get("Torznab", "extra_torznabs") == first_torznab_storage
+
+    def test_provider_transaction_persists_reconciled_order_in_same_write(self, tmp_path, monkeypatch):
+        cfg, config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        cfg.configure = MagicMock()
+        cfg.NEWZNAB = True
+        cfg.PROVIDER_ORDER = None
+        providers = [
+            ["First", "https://first.test", "1", "first-secret", "5030", "1", 201],
+            ["Second", "https://second.test", "1", "second-secret", "5030", "1", 202],
+        ]
+
+        assert cfg.apply_transaction({"EXTRA_NEWZNABS": providers}) is True
+
+        persisted = configparser.ConfigParser()
+        persisted.read(config_path)
+        assert persisted.get("Providers", "provider_order") == "0, First, 1, Second"
+        assert cfg.PROVIDER_ORDER == {"0": "First", "1": "Second"}
+
+        cfg.PROVIDER_ORDER = {"0": "Second", "1": "First"}
+        assert cfg.apply_transaction({"EXTRA_NEWZNABS": providers[1:]}) is True
+        persisted.read(config_path)
+        assert persisted.get("Providers", "provider_order") == "0, Second"
+        assert cfg.PROVIDER_ORDER == {"0": "Second"}
+
+    def test_failed_provider_write_never_publishes_candidate_to_concurrent_reader(self, tmp_path, monkeypatch):
+        cfg, _config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        cfg.configure = MagicMock()
+        old_providers = [("Old", "https://old.test", "1", "old-secret", "5030", "1", 100)]
+        new_providers = [["New", "https://new.test", "1", "new-secret", "5030", "1", 101]]
+        cfg.EXTRA_NEWZNABS = old_providers
+        entered_write = threading.Event()
+        release_write = threading.Event()
+        result = []
+
+        def fail_after_reader_observes(_target, _mode, _write_content, binary=False):
+            assert binary is False
+            entered_write.set()
+            assert release_write.wait(timeout=2)
+            raise OSError("replace failed")
+
+        cfg._atomic_replace_file = fail_after_reader_observes
+        worker = threading.Thread(
+            target=lambda: result.append(cfg.apply_transaction({"EXTRA_NEWZNABS": new_providers}))
+        )
+        worker.start()
+        assert entered_write.wait(timeout=2)
+        assert cfg.EXTRA_NEWZNABS is old_providers
+        release_write.set()
+        worker.join(timeout=2)
+
+        assert result == [False]
+        assert cfg.EXTRA_NEWZNABS == old_providers
+
+    def test_provider_projection_rolls_back_all_rows_when_later_upsert_fails(self, tmp_path, monkeypatch):
+        from sqlalchemy import create_engine, select
+
+        from comicarr import db as db_module
+        from comicarr.tables import provider_searches
+
+        engine = create_engine("sqlite:///:memory:")
+        provider_searches.create(engine)
+        monkeypatch.setattr(db_module, "_engine", engine)
+        cfg, _config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        del cfg.write_out_provider_searches
+        providers = [
+            ("First", "https://first.test", "1", "secret-1", "5030", "1", 201),
+            ("Second", "https://second.test", "1", "secret-2", "5030", "1", 202),
+        ]
+        real_upsert = db_module.upsert_conn
+        calls = 0
+
+        def fail_second_upsert(conn, table_name, values, controls):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("second projection failed")
+            real_upsert(conn, table_name, values, controls)
+
+        monkeypatch.setattr(db_module, "upsert_conn", fail_second_upsert)
+
+        with pytest.raises(RuntimeError, match="second projection failed"):
+            cfg.write_out_provider_searches(
+                provider_order={"0": "First", "1": "Second"},
+                extra_newznabs=providers,
+                extra_torznabs=[],
+            )
+
+        with engine.connect() as conn:
+            assert conn.execute(select(provider_searches)).all() == []
+        engine.dispose()
+
+    def test_provider_projection_tolerates_stale_rows_skips_32p_and_refreshes_identity(self, tmp_path, monkeypatch):
+        from sqlalchemy import create_engine, select
+
+        from comicarr import db as db_module
+        from comicarr.tables import provider_searches
+
+        engine = create_engine("sqlite:///:memory:")
+        provider_searches.create(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                provider_searches.insert(),
+                [
+                    {
+                        "id": 0,
+                        "provider": "Removed",
+                        "type": "newznab",
+                        "lastrun": 1,
+                        "active": False,
+                        "hits": 2,
+                    },
+                    {
+                        "id": 300,
+                        "provider": "Reused",
+                        "type": "newznab",
+                        "lastrun": 3,
+                        "active": True,
+                        "hits": 4,
+                    },
+                    {
+                        "id": 302,
+                        "provider": "Stale",
+                        "type": "newznab",
+                        "lastrun": 5,
+                        "active": True,
+                        "hits": 6,
+                    },
+                ],
+            )
+        monkeypatch.setattr(db_module, "_engine", engine)
+        cfg, _config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        del cfg.write_out_provider_searches
+        torznabs = [("Reused", "https://reused.test", "1", "secret", "5070", "1", 301)]
+        newznabs = [("New", "https://new.test", "1", "secret", "5030", "1", 302)]
+
+        cfg.write_out_provider_searches(
+            provider_order={"0": "32p", "1": "Reused", "2": "New"},
+            extra_newznabs=newznabs,
+            extra_torznabs=torznabs,
+        )
+
+        with engine.connect() as conn:
+            rows = {row.provider: row for row in conn.execute(select(provider_searches))}
+        assert rows["Removed"].id == 0
+        assert rows["Reused"].id == 301
+        assert rows["Reused"].type == "torznab"
+        assert rows["Reused"].lastrun == 3
+        assert rows["New"].id == 302
+        assert rows["New"].lastrun == 0
+        assert "Stale" not in rows
+        assert "32p" not in rows
+        engine.dispose()
+
+    @pytest.mark.parametrize("collision", ("cross-list", "reserved", "duplicate-name"))
+    def test_provider_transaction_rejects_global_id_collisions(self, tmp_path, monkeypatch, collision):
+        cfg, config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        cfg.configure = MagicMock()
+        newznabs = [["Newz", "https://newz.test", "1", "secret", "5030", "1", 301]]
+        values = {"EXTRA_NEWZNABS": newznabs}
+        if collision == "cross-list":
+            values["EXTRA_TORZNABS"] = [["Torz", "https://torz.test", "1", "secret", "5070", "1", 301]]
+        elif collision == "duplicate-name":
+            values["EXTRA_TORZNABS"] = [["newz", "https://torz.test", "1", "secret", "5070", "1", 302]]
+        else:
+            cfg.EXPERIMENTAL = True
+            newznabs[0][6] = 101
+        original_file = config_path.read_bytes()
+        original_runtime = cfg.EXTRA_NEWZNABS
+
+        assert cfg.apply_transaction(values) is False
+
+        assert config_path.read_bytes() == original_file
+        assert cfg.EXTRA_NEWZNABS == original_runtime
+        cfg.configure.assert_not_called()
+
+    def test_provider_transaction_rolls_back_before_projection_on_write_failure(self, tmp_path, monkeypatch):
+        cfg, config_path, config_module = _make_real_config(tmp_path, monkeypatch)
+        provider_events = []
+        cfg.configure = MagicMock()
+        cfg.write_out_provider_searches = MagicMock(side_effect=lambda **_kwargs: provider_events.append("projected"))
+        old_providers = [["Old", "https://old.test", "1", "old-secret", "5030", "1", 100]]
+        new_providers = [["New", "https://new.test", "1", "new-secret", "5030", "1", 101]]
+        assert cfg.apply_transaction({"EXTRA_NEWZNABS": old_providers}) is True
+        original_file = config_path.read_bytes()
+        original_runtime = cfg.EXTRA_NEWZNABS
+        cfg.configure.reset_mock()
+        cfg.write_out_provider_searches.reset_mock()
+        provider_events.clear()
+        real_replace = config_module.os.replace
+
+        def fail_config_replace(source, destination):
+            if config_module.Path(destination) == config_path:
+                raise OSError("replace failed")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(config_module.os, "replace", fail_config_replace)
+
+        assert cfg.apply_transaction({"EXTRA_NEWZNABS": new_providers}) is False
+
+        assert cfg.EXTRA_NEWZNABS == original_runtime
+        assert config_path.read_bytes() == original_file
+        cfg.configure.assert_not_called()
+        assert provider_events == []
+
+    @pytest.mark.parametrize(
+        "providers",
+        (
+            [["Too short", "https://short.test", "1"]],
+            [["Bad token", "https://bad.test", "1", "gAAAAA-invalid", "5030", "1", 100]],
+            [["Bad legacy token", "https://bad.test", "1", "^~$z$!!!!", "5030", "1", 100]],
+            "not-a-provider-list",
+        ),
+    )
+    def test_provider_transaction_rejects_malformed_entries_without_mutation(self, tmp_path, monkeypatch, providers):
+        cfg, config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
+        cfg.configure = MagicMock()
+        original_file = config_path.read_bytes()
+        original_runtime = cfg.EXTRA_NEWZNABS
+
+        assert cfg.apply_transaction({"EXTRA_NEWZNABS": providers}) is False
+
+        assert cfg.EXTRA_NEWZNABS == original_runtime
+        assert config_path.read_bytes() == original_file
+        cfg.configure.assert_not_called()
+
     def test_legacy_cherrypy_logging_setting_is_ignored_but_preserved(self, tmp_path, monkeypatch):
         cfg, config_path, config_module = _make_real_config(tmp_path, monkeypatch)
         if not config_module.config.has_section("Interface"):
@@ -1087,8 +1893,8 @@ class TestConfigTransactions:
         persisted.read(config_path)
         assert persisted.getboolean("Interface", "cherrypy_logging") is True
 
-    def test_locked_value_write_processes_before_provider_sequence(self, tmp_path, monkeypatch):
-        """Provider payloads are applied before sequencing without releasing the write lock."""
+    def test_locked_scalar_write_does_not_reproject_provider_database(self, tmp_path, monkeypatch):
+        """Unrelated settings writes do not add provider database side effects."""
         cfg, _config_path, _config_module = _make_real_config(tmp_path, monkeypatch)
         events = []
         original_process = cfg.process_kwargs
@@ -1102,13 +1908,13 @@ class TestConfigTransactions:
             events.append("write")
 
         cfg.process_kwargs = tracked_process
-        cfg.provider_sequence = MagicMock(side_effect=lambda: events.append("provider_sequence"))
+        cfg.write_out_provider_searches = MagicMock(side_effect=lambda **_kwargs: events.append("provider_projection"))
         cfg._atomic_replace_file = tracked_atomic_replace
 
         assert cfg.writeconfig_values({"COMIC_DIR": "/ordered/library"}) is True
 
         assert cfg.COMIC_DIR == "/ordered/library"
-        assert events == ["process", "provider_sequence", "write"]
+        assert events == ["process", "write"]
 
     def test_writeconfig_values_restores_runtime_when_write_fails(self, tmp_path, monkeypatch):
         """Failed value writes must not leave process_kwargs mutations in memory."""

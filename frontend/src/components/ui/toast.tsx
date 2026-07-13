@@ -108,6 +108,9 @@ function Toast({
 
   return (
     <div
+      role={type === "error" ? "alert" : undefined}
+      aria-live={type === "error" ? "assertive" : undefined}
+      aria-atomic={type === "error" ? "true" : undefined}
       className={cn(
         "flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-in slide-in-from-right",
         styles[type],
@@ -122,6 +125,7 @@ function Toast({
       </div>
       <button
         onClick={onClose}
+        aria-label="Dismiss notification"
         className="text-muted-foreground hover:text-foreground transition-colors"
       >
         <X className="w-4 h-4" />

@@ -41,8 +41,8 @@ Post-U7 the lifespan owns the single ordered sequence:
   2. EventBus.close(), then q.put('exit')         (stop intake/late events)
   3. bounded pool.join, OFF the event loop, on a DEDICATED executor
      (final journal flush == workers fully drained)
-  4. ai/cv client close
-  5. engine.dispose()                             (AFTER the drain)
+  4. recheck every pool's liveness after join
+  5. ai/cv client close and engine.dispose()      (ONLY when all stopped)
   6. executor.shutdown / drain-executor shutdown  (AFTER the drain)
   7. if not comicarr.SIGNAL: SIGNAL='shutdown'
 
@@ -59,6 +59,8 @@ import datetime
 import inspect
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -68,8 +70,14 @@ from sqlalchemy import select
 import comicarr
 from comicarr.app.core.context import AppContext
 from comicarr.app.core.events import EventBus
+from comicarr.app.core.runtime import RuntimeNotInitializedError
+from comicarr.app.core.workers import (
+    BackgroundWorkerRegistry,
+    start_background_thread,
+    submit_background_future,
+)
 from comicarr.app.downloads import journal
-from comicarr.app.main import lifespan
+from comicarr.app.main import _drain_worker_pools, lifespan
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import metadata, pipeline_journal
 
@@ -108,6 +116,9 @@ def _make_ctx(scheduler=None):
     clients are mocks.
     """
     import queue as _q
+
+    if isinstance(scheduler, MagicMock):
+        scheduler.running = False
 
     ctx = AppContext(
         scheduler=scheduler,
@@ -271,6 +282,7 @@ class TestHappyPath:
         assert ctx.refresh_queue.get_nowait() == "exit"
         # Idle-queue happy path leaves SIGNAL defaulting to shutdown.
         assert comicarr.SIGNAL == "shutdown"
+        assert ctx.disposed
 
     @pytest.mark.asyncio
     async def test_shutdown_closes_both_ai_client_variants_after_worker_drain(self, _isolated_db):
@@ -375,6 +387,11 @@ class TestHappyPath:
         release_scheduler = threading.Event()
         scheduler = MagicMock()
         ctx = _make_ctx(scheduler=scheduler)
+        ctx.event_bus = MagicMock()
+        ctx.ai_async_client = MagicMock()
+        ctx.ai_async_client.close = AsyncMock()
+        ctx.ai_client = MagicMock()
+        ctx.cv_session = MagicMock()
         disposed = threading.Event()
         monkeypatch.setattr(appmain, "SCHEDULER_DRAIN_TIMEOUT", 0.05)
 
@@ -402,6 +419,10 @@ class TestHappyPath:
             assert not disposed.is_set()
             assert not ctx.disposed
             assert ctx.snatched_queue.empty()
+            ctx.event_bus.close.assert_called_once()
+            ctx.ai_async_client.close.assert_not_awaited()
+            ctx.ai_client.close.assert_not_called()
+            ctx.cv_session.close.assert_not_called()
         finally:
             release_scheduler.set()
 
@@ -516,6 +537,240 @@ class TestAE5InFlightJournal:
 
 
 class TestBoundedDrainExceeded:
+    def test_drain_result_rechecks_liveness_and_names_only_live_owners(self):
+        ctx = _make_ctx()
+        stopped = _FakePool()
+        stuck = _FakePool(never_joins=True)
+        ctx.sn_pool = stopped
+        ctx.nzb_pool = stuck
+
+        with patch.object(comicarr.logger, "warn") as warn:
+            result = _drain_worker_pools(0.01, ctx)
+
+        assert stopped.join_calls
+        assert stuck.join_calls
+        assert result.live_owners == ("NZBPOOL",)
+        assert not result.all_stopped
+        assert any("NZBPOOL" in call.args[0] for call in warn.call_args_list)
+
+    def test_pool_can_handoff_registered_child_work_during_its_join(self, monkeypatch):
+        from comicarr.app.core import runtime
+
+        ctx = _make_ctx()
+        child_finished = threading.Event()
+        handoff_errors = []
+
+        class _ProducerPool(_FakePool):
+            def join(self, timeout=None):
+                try:
+                    start_background_thread(
+                        child_finished.set,
+                        name="ImportWantedSearch",
+                    )
+                except Exception as e:
+                    handoff_errors.append(e)
+                super().join(timeout)
+
+        ctx.sn_pool = _ProducerPool()
+        monkeypatch.setattr(runtime, "_runtime", ctx)
+
+        result = _drain_worker_pools(1, ctx)
+
+        assert not handoff_errors
+        assert child_finished.is_set()
+        assert result.all_stopped
+
+    @pytest.mark.asyncio
+    async def test_live_worker_preserves_clients_engine_and_runtime_context(self, _isolated_db, monkeypatch):
+        from comicarr.app import main as appmain
+
+        monkeypatch.setattr(appmain, "SHUTDOWN_DRAIN_TIMEOUT", 0.01)
+        ctx = _make_ctx(scheduler=MagicMock())
+        ctx.event_bus = MagicMock()
+        ctx.ai_async_client = MagicMock()
+        ctx.ai_async_client.close = AsyncMock()
+        ctx.ai_client = MagicMock()
+        ctx.cv_session = MagicMock()
+        ctx.sn_pool = _FakePool(never_joins=True)
+        engine = get_engine()
+
+        with (
+            patch.object(comicarr, "SNPOOL", None, create=True),
+            patch.object(comicarr, "NZBPOOL", None, create=True),
+            patch.object(comicarr, "SEARCHPOOL", None, create=True),
+            patch.object(comicarr, "PPPOOL", None, create=True),
+            patch.object(comicarr, "DDLPOOL", None, create=True),
+            patch.object(comicarr, "MASS_ADD", None, create=True),
+            patch.object(comicarr, "MASS_REFRESH", None, create=True),
+            patch.object(engine, "dispose") as dispose,
+        ):
+            await _run_shutdown(ctx)
+
+        ctx.event_bus.close.assert_called_once()
+        ctx.ai_async_client.close.assert_not_awaited()
+        ctx.ai_client.close.assert_not_called()
+        ctx.cv_session.close.assert_not_called()
+        dispose.assert_not_called()
+        assert not ctx.disposed
+
+    @pytest.mark.asyncio
+    async def test_live_registered_background_worker_prevents_resource_disposal(self, _isolated_db, monkeypatch):
+        from comicarr.app import main as appmain
+        from comicarr.app.core import runtime
+
+        monkeypatch.setattr(appmain, "SHUTDOWN_DRAIN_TIMEOUT", 0.01)
+        started = threading.Event()
+        release = threading.Event()
+        ctx = _make_ctx(scheduler=MagicMock())
+        ctx.background_workers = BackgroundWorkerRegistry()
+        ctx.ai_client = MagicMock()
+        engine = get_engine()
+        monkeypatch.setattr(runtime, "_runtime", ctx)
+
+        def _inbox_scan():
+            started.set()
+            release.wait(timeout=2)
+
+        worker = start_background_thread(_inbox_scan, name="API-InboxScan")
+        assert started.wait(timeout=1)
+        assert worker in ctx.background_workers.snapshot()
+        try:
+            with (
+                patch.object(comicarr.logger, "warn") as warn,
+                patch.object(engine, "dispose") as dispose,
+            ):
+                await _run_shutdown(ctx)
+
+            assert any("background:API-InboxScan" in call.args[0] for call in warn.call_args_list)
+            ctx.ai_client.close.assert_not_called()
+            dispose.assert_not_called()
+            assert not ctx.disposed
+        finally:
+            release.set()
+            worker.join(timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_live_provider_future_prevents_resource_disposal(self, _isolated_db, monkeypatch):
+        from comicarr.app import main as appmain
+        from comicarr.app.core import runtime
+
+        monkeypatch.setattr(appmain, "SHUTDOWN_DRAIN_TIMEOUT", 0.01)
+        started = threading.Event()
+        release = threading.Event()
+        ctx = _make_ctx(scheduler=MagicMock())
+        ctx.background_workers = BackgroundWorkerRegistry()
+        engine = get_engine()
+        monkeypatch.setattr(runtime, "_runtime", ctx)
+        executor = ThreadPoolExecutor(max_workers=1)
+
+        def _provider_search():
+            started.set()
+            release.wait(timeout=2)
+
+        future = submit_background_future(
+            executor,
+            _provider_search,
+            name="provider-search:test",
+        )
+        assert started.wait(timeout=1)
+        try:
+            with (
+                patch.object(comicarr.logger, "warn") as warn,
+                patch.object(engine, "dispose") as dispose,
+            ):
+                await _run_shutdown(ctx)
+
+            assert any("background:provider-search:test" in call.args[0] for call in warn.call_args_list)
+            dispose.assert_not_called()
+            assert not ctx.disposed
+        finally:
+            release.set()
+            future.result(timeout=1)
+            executor.shutdown(wait=True)
+
+    def test_closed_background_registry_rejects_late_work(self):
+        registry = BackgroundWorkerRegistry()
+        ctx = _make_ctx()
+        ctx.background_workers = registry
+
+        result = _drain_worker_pools(0, ctx)
+
+        with pytest.raises(RuntimeError, match="closed for shutdown"):
+            registry.start(lambda: None, name="late-worker")
+
+        assert result.all_stopped
+        assert registry.snapshot() == ()
+
+    def test_background_work_is_rejected_before_runtime_initialization(self, monkeypatch):
+        from comicarr.app.core import runtime
+
+        monkeypatch.setattr(runtime, "_runtime", None)
+
+        with pytest.raises(RuntimeNotInitializedError, match="not initialized"):
+            start_background_thread(lambda: None, name="orphan-worker")
+
+    def test_background_worker_failure_is_logged_and_retired(self):
+        registry = BackgroundWorkerRegistry()
+
+        def _fail():
+            raise ValueError("worker failed")
+
+        with patch.object(comicarr.logger, "error") as log_error:
+            worker = registry.start(_fail, name="FailingWorker")
+            worker.join(timeout=1)
+
+        assert not worker.is_alive()
+        assert registry.snapshot() == ()
+        assert any("FailingWorker" in call.args[0] for call in log_error.call_args_list)
+
+    def test_detached_first_party_workers_use_the_shutdown_registry(self):
+        project_root = Path(__file__).resolve().parents[2]
+        allowed_thread_constructors = {
+            "comicarr/__init__.py": 2,
+            "comicarr/app/core/workers.py": 1,
+            "comicarr/app/downloads/service.py": 1,
+            "comicarr/importer.py": 2,
+        }
+        found = {}
+
+        for path in (project_root / "comicarr").rglob("*.py"):
+            if "_vendor" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            threading_modules = {"threading"}
+            thread_symbols = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "threading":
+                            threading_modules.add(alias.asname or alias.name)
+                elif isinstance(node, ast.ImportFrom) and node.module == "threading":
+                    for alias in node.names:
+                        if alias.name == "Thread":
+                            thread_symbols.add(alias.asname or alias.name)
+
+            calls = 0
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name) and node.func.id in thread_symbols:
+                    calls += 1
+                elif (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "Thread"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in threading_modules
+                ):
+                    calls += 1
+            if calls:
+                found[str(path.relative_to(project_root))] = calls
+
+        assert found == allowed_thread_constructors
+
+        search_source = (project_root / "comicarr/search.py").read_text(encoding="utf-8")
+        assert "submit_background_future(" in search_source
+        assert "executor.submit(" not in search_source
+
     @pytest.mark.asyncio
     async def test_slow_worker_drain_returns_after_bound_process_still_exits(self, _isolated_db, monkeypatch):
         from comicarr.app import main as appmain
@@ -593,13 +848,13 @@ class TestRestartIntentPreserved:
 
 
 # ---------------------------------------------------------------------------
-# Error — AssertionError during the join does not short-circuit
+# Error — AssertionError during the join preserves live-owner resources
 # ---------------------------------------------------------------------------
 
 
 class TestAssertionLandmineRemoved:
     @pytest.mark.asyncio
-    async def test_assertion_in_join_does_not_skip_flush_and_dispose(self, _isolated_db):
+    async def test_assertion_in_join_preserves_resources_without_process_short_circuit(self, _isolated_db):
         scheduler = MagicMock()
         ctx = _make_ctx(scheduler=scheduler)
         dispose_called = []
@@ -621,10 +876,12 @@ class TestAssertionLandmineRemoved:
         ):
             await _run_shutdown(ctx, scheduler)
 
-        # An AssertionError in the bounded join must NOT short-circuit to
-        # os._exit before engine.dispose().
+        # An AssertionError must not short-circuit to os._exit. Because this
+        # pool still reports alive afterward, shared resources remain open for
+        # the terminal process-exit path.
         assert not m_exit.called, "no os._exit short-circuit during the drain"
-        assert dispose_called, "engine.dispose() still runs after a join AssertionError"
+        assert not dispose_called, "engine.dispose() must not run beneath a live pool"
+        assert not ctx.disposed
 
 
 # ---------------------------------------------------------------------------
