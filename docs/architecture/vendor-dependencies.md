@@ -1,77 +1,124 @@
-# Vendor dependencies and client contracts
+# Vendor dependencies and redistribution evidence
 
-This document is the source of truth for code that is shipped inside
-`comicarr._vendor`. Vendor code is intentionally namespaced; torrent and
-downloader integrations are imported through Comicarr-owned adapters, while
-the ComicTagger entry point imports its internal package explicitly. The
-application no longer relies on a process-wide `sys.path` mutation or an
-undeclared top-level package.
+This document describes code shipped inside `comicarr._vendor`. The
+machine-readable manifest is `comicarr/_vendor/provenance.py`; contract tests
+compare it with both the source tree and a built wheel.
 
-Inventory and review date: 2026-07-11. The source tree at the Plan 004 base
-(`0f31ad35`) was used for the initial provenance review. The package names
-below are checked by `tests/unit/test_vendor_contracts.py` and the ownership
-metadata in `comicarr/_vendor/provenance.py`.
+Inventory and evidence review date: 2026-07-12. Comicarr commit
+`45720b948f8c0cc9153412171dca8891e266f1c8` imported the inherited Mylar3
+snapshot. That commit proves chain of custody, not the original copyright or
+license authority of every copied component.
 
-## Runtime ownership matrix
+## Status vocabulary
 
-| Runtime capability | Comicarr importer(s) | Packaged owner | Source/version recorded in tree | License/provenance status | Decision |
-| --- | --- | --- | --- | --- | --- |
-| Deluge RPC | `comicarr.torrent.clients.deluge` | `comicarr._vendor.deluge_client` | Bundled RPC client; source headers plus `LICENSE` | MIT notices retained in vendor tree | Retain as an internal vendor behind the adapter until a Deluge 2.x compatibility fixture exists |
-| qBittorrent Web API | `comicarr.torrent.clients.qbittorrent` | `comicarr._vendor.qbittorrent` | Bundled Web API client; source revision not separately recorded | `LICENSE` retained; confirm upstream revision before replacement | Retain behind the adapter; evaluate `qbittorrent-api` only after matching category/save-path/auth behavior |
-| Transmission RPC | `comicarr.torrent.clients.transmission` | `comicarr._vendor.transmissionrpc` | Bundled client `0.11` | MIT notice retained in source | Retain behind the adapter; `transmission-rpc` is a candidate but requires a protocol/field compatibility fixture |
-| rTorrent XML-RPC/SCGI | `comicarr.torrent.clients.rtorrent` | `comicarr._vendor.rtorrent` | Bundled rTorrent client `0.2.9` | MIT notices retained in source | Retain behind the adapter; no flag-day replacement is justified |
-| uTorrent Web API | `comicarr.torrent.clients.utorrent`, legacy `comicarr.utorrent` | `comicarr._vendor.utorrent` | Bundled uTorrent 3.x client | Upstream license status is not explicit in the copied tree; legal review required | Retain for configured users; do not add a new dependency until provenance is resolved |
-| Mega downloads | `comicarr.downloaders.mega` | `comicarr._vendor.mega` | Bundled `mega.py` implementation | Upstream license status requires legal review before redistribution | Retain behavior behind the downloader boundary; no replacement selected |
-| ComicTagger metadata | `comicarr/config.py`, `comictagger.py` | `comicarr._vendor.comictaggerlib` | Bundled ComicTagger `1.3.5` (`ctversion.py`) | Upstream notices are preserved; archive/tagging fixture required before relocation or upgrade | Retain as a separately reviewed subphase; do not change tagging behavior in this migration |
-| Torrent bencode/hash support | `comicarr.app.common.utilities`, torrent adapters, recovery helpers | `comicarr._vendor.bencode` and `comicarr._vendor.rtorrent.lib.bencode` | Bundled helper implementations | Source notices retained; no external dependency selected | Retain as internal support code and keep hashing behind Comicarr helpers |
+- `evidence-recorded` means identifiable license evidence exists as a
+  declaration, header, source notice, or bundled license text. It records
+  engineering evidence; it does not establish completeness or legal clearance.
+- `unresolved` means Comicarr cannot establish redistribution authority for the
+  exact bundled snapshot. No contributor may describe it as cleared without
+  authoritative rights-holder evidence. A Comicarr project owner may separately
+  approve a compatibility-safe replacement or removal without making a
+  redistribution-clearance claim.
+- `integration_owner = Comicarr` identifies the team responsible for the
+  adapter boundary. It does not claim copyright ownership of vendor code.
 
-The only runtime vendor imports found in the base inventory were Deluge,
-qBittorrent, Transmission, rTorrent, uTorrent, Mega, ComicTagger, and bencode.
-`certgen.py`, `get_image_size.py`, and the nested rTorrent XML-RPC helpers are
-packaged support modules rather than public integration entry points; they are
-included in the same ownership boundary.
+The root Comicarr GPL license and the historical Mylar3 distribution do not
+fill missing third-party notice or source-revision evidence.
 
-## Replacement review
+## Packaged inventory
 
-The following primary project metadata was checked on 2026-07-11:
+| Vendor root | Runtime role | Source/version evidence | License evidence in copied tree | Redistribution status |
+| --- | --- | --- | --- | --- |
+| `bencode.py` | Torrent bencode/hash support | Mylar3 import; source version marker `20111107` | MIT notice in source | `evidence-recorded` |
+| `certgen.py` | HTTPS certificate generation support | Mylar3 import; upstream revision unidentified | LGPL-2.1-or-later header; referenced `LGPL2.1.txt` was not inherited | `evidence-recorded` |
+| `comictaggerlib/` | ComicTagger metadata/archive behavior | Bundled version `1.3.5` in `ctversion.py` | Apache-2.0 notices in source files | `evidence-recorded` |
+| `deluge_client/` | Deluge RPC | Mylar3 import; exact upstream version unidentified | Bundled `LICENSE` (MIT) | `evidence-recorded` |
+| `get_image_size.py` | Packaged image-size support; no current first-party import | Mylar3 import; version unidentified | MIT notice in source | `evidence-recorded` |
+| `mega/` | Mega downloads through `comicarr.downloaders.mega` | odwyersoftware/mega.py `1.0.8` base at a pinned revision, plus a localized Mylar3 patch | Conflicting license declarations at the identified base; engineering `NOTICE` is not a license | `unresolved` |
+| `qbittorrent/` | qBittorrent Web API | Mylar3 import; exact upstream revision unidentified | Bundled `LICENSE` (MIT) | `evidence-recorded` |
+| `rtorrent/` | rTorrent XML-RPC/SCGI | Version `0.2.9` in source | Mixed: MIT; GPL-2.0-or-later with OpenSSL exception; embedded Secret Labs terms | `evidence-recorded` |
+| `transmissionrpc/` | Transmission RPC | Version `0.11` in source | MIT notice in source | `evidence-recorded` |
+| `utorrent/` | uTorrent Web API adapter | Mylar3 custody, a probable pinned py-utorrent base, later Comicarr Python 3 port, and a pinned artifact digest | No license in the probable base or copied client; engineering `NOTICE` is not a license | `unresolved` |
 
-- [transmission-rpc on PyPI](https://pypi.org/project/transmission-rpc/) is
-  maintained and MIT-licensed, but its documented protocol support and object
-  fields must be compared with Comicarr's `get_torrent()` shape before any
-  swap.
-- [Deluge on PyPI](https://pypi.org/project/deluge/) is GPLv3+ and current
-  Deluge releases changed the Python/RPC surface. A direct drop-in would need
-  a daemon-version and error-translation fixture.
-- [qbittorrent-api on PyPI](https://pypi.org/project/qbittorrent-api/) is a
-  maintained qBittorrent Web API candidate with current Python support, but
-  its method names and typed objects differ from the bundled client's
-  `download_from_*`, category, and save-path calls.
-- [mega.py on PyPI](https://pypi.org/project/mega.py/) has no recent stable
-  release and carries a non-permissive license declaration; it is not adopted
-  without an explicit redistribution decision.
-- [ComicTagger](https://github.com/comictagger/comictagger) remains a
-  behavior-sensitive archive/tagging tool. Any upgrade must compare generated
-  CBL/ComicRack metadata and CBR-to-CBZ output fixtures.
-- [Transmission's RPC specification](https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md)
-  documents deprecated legacy RPC fields, so protocol compatibility must be
-  tested rather than inferred from a package name.
+`bencode.py`, `certgen.py`, and `get_image_size.py` are standalone modules, not
+packages. They are intentionally part of the manifest and wheel inventory.
+Nested rTorrent helpers belong to the `rtorrent` root.
 
-## Adapter contract
+## Unresolved evidence packets
 
-`comicarr.torrent.contracts` owns the narrow boundary used by search, RSS, and
-recovery code:
+### Mega
 
-- `connect()` returns the vendor client on success or
-  `{"status": False, "error": "..."}` on failure. Repeated calls return the
-  existing connection.
-- `find_torrent()` and `get_torrent()` may use vendor-native identifiers, but
-  failures are falsey and normalized by the adapter.
-- start, pause, and delete methods return a boolean or deleted-path list;
-  vendor exceptions do not leak through routine connection failures.
-- monitor-facing code keeps the established dictionary shape and uses
-  `snatch_status="MONITOR ERROR"` for connection or vendor failures.
+Mylar3 commit `9ad1b5d7d1be7c90cd49e6ec4149ade3d05e3292` introduced
+`lib/mega`. Its tree is the pre-notice Comicarr vendor tree, and later Mylar3
+commits did not change that path. The code base is odwyersoftware/mega.py
+version `1.0.8` at commit `34f3e7335992589eed8f08e675c5fb3038139355`:
+three source files match byte-for-byte, while `mega.py` has a localized 34-line
+Mylar3 delta for redirects and progress hooks.
 
-The adapters deliberately do not expose vendor modules at the application
-root. New integrations must add an ownership row here, update the machine-
-readable provenance map, and add adapter-level fakes before changing client
-selection or configuration behavior.
+Source lineage does not resolve redistribution authority. At that pinned
+upstream revision, `LICENSE` declares Apache-2.0 while `setup.py` declares a
+Creative Commons Attribution-Noncommercial-Share Alike license. The copied
+files do not settle the conflict, so the machine record remains `NOASSERTION`
+and `unresolved`.
+
+### uTorrent
+
+The bundled client has no author, library version, source repository, or
+license metadata. ftao/py-utorrent commit
+`35c4298463247165012ef8f8b4647f10a2fd5bd4` is recorded as a probable direct
+base: `upload.py` is byte-identical at Comicarr's import revision and
+`client.py` has the same API skeleton with a localized Mylar3 patchset. The
+candidate repository has no license file or package license metadata, so it
+cannot establish redistribution authority.
+
+Separately, `upload.py` attributes only its multipart helper to a historical
+PyMOTW URL. The adapter's uTorrent 3.0+ target is daemon compatibility, not a
+client-library version. Comicarr's Python 3 port is a local modification, not
+an upstream version.
+
+Both unresolved directories include an engineering `NOTICE` in the wheel. The
+notice preserves known custody and stop conditions; it grants no rights.
+
+## Import and artifact contract
+
+- Torrent and downloader integrations import through Comicarr-owned adapters
+  and namespaced `comicarr._vendor` modules.
+- One inherited exception remains explicit:
+  `comicarr/app/core/security.py` imports `certgen` by its historical top-level
+  name even though the wheel ships `comicarr._vendor.certgen`. U5 owns draining
+  this import while adding the contributor-boundary ratchet. No new top-level
+  vendor import is allowed.
+- Every top-level directory or standalone Python module shipped below
+  `comicarr/_vendor` must have exactly one provenance entry.
+- Every declared evidence and notice path must exist. Every actual
+  `LICENSE`, `COPYING`, or `NOTICE` file must be claimed exactly once.
+- Custody sources, identified upstreams, probable origin candidates,
+  replacement candidates, and component-only attributions are separate
+  machine fields; none may be substituted for another.
+- A wheel smoke build must contain the same vendor roots and every declared
+  notice. Comicarr's dist-info GPL license does not satisfy a vendor notice.
+- Snapshot digests identify the exact packaged bytes and must change whenever
+  vendor contents or bundled notices change. They are not upstream revisions.
+
+## Adapter contract and future decisions
+
+`comicarr.torrent.contracts` owns the stable result shapes used by search, RSS,
+and recovery. A replacement must preserve connection failures, identifiers,
+category/save-path behavior, start/pause/delete semantics, and monitor errors
+through adapter fixtures before any dependency swap.
+
+Potential maintained alternatives may be evaluated separately, but this unit
+does not select one. Mega and uTorrent remain active compatibility commitments.
+Changing either provenance status requires all of the following:
+
+1. an authoritative source repository plus exact version/revision match for
+   the bundled snapshot;
+2. copyright and license evidence applicable to that snapshot, including any
+   required notices;
+3. an accountable rights-holder decision that applies to the bundled snapshot.
+
+A Comicarr project owner may instead approve a separate behavior/compatibility
+plan for replacement or removal. That governance decision does not upgrade the
+historical snapshot's redistribution status.
+
+Until then, `unresolved` is the only honest machine and documentation state.
