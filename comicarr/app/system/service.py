@@ -41,6 +41,7 @@ import comicarr
 from comicarr import db, logger
 from comicarr.app.acquisition.models import DispatchState
 from comicarr.app.common.dates import normalize_utc_datetime
+from comicarr.app.common.redaction import redact_sensitive_text
 from comicarr.app.core.security import LoginRateLimiter
 from comicarr.app.core.workers import start_background_thread
 from comicarr.tables import comics, jobhistory, storyarcs
@@ -63,6 +64,7 @@ SCHEDULER_JOB_NAMES = {
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
 CONFIG_PERSISTENCE_ERROR = "Failed to persist configuration"
+PROVIDER_CONFIG_PERSISTENCE_ERROR = "Failed to persist provider configuration"
 
 
 def get_weekly_refresh_lock():
@@ -556,14 +558,30 @@ def update_providers(ctx, provider_data):
     if not ctx.config:
         return {"success": False, "error": "Config not loaded"}
 
+    if not isinstance(provider_data, dict):
+        return {"success": False, "error": "Invalid provider payload"}
+
     provider_type = provider_data.get("type")
     providers = provider_data.get("providers", [])
 
     if provider_type not in ("newznab", "torznab"):
         return {"success": False, "error": "Invalid provider type"}
+    if not isinstance(providers, list):
+        return {"success": False, "error": "Invalid provider list"}
 
-    ctx.config.writeconfig_values({provider_type: providers})
-    ctx.config.configure(update=True, startup=False)
+    config_key = "EXTRA_NEWZNABS" if provider_type == "newznab" else "EXTRA_TORZNABS"
+    try:
+        ctx.config.validate_provider_extra_value(config_key, providers)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "Invalid provider configuration"}
+    try:
+        persisted = ctx.config.apply_transaction({config_key: providers}, configure=False)
+    except Exception as e:
+        logger.error("[PROVIDERS] Failed to persist provider configuration: %s" % type(e).__name__)
+        persisted = False
+
+    if persisted is False:
+        return {"success": False, "error": PROVIDER_CONFIG_PERSISTENCE_ERROR}
 
     return {"success": True}
 
@@ -638,7 +656,13 @@ def get_recent_logs(ctx):
     try:
         with open(log_file, "r") as f:
             lines = f.readlines()
-        return {"logs": lines[-200:]}  # Last 200 lines
+        provider_secrets = []
+        if ctx.config:
+            for attr_name in ("EXTRA_NEWZNABS", "EXTRA_TORZNABS"):
+                for entry in getattr(ctx.config, attr_name, []) or []:
+                    if isinstance(entry, (list, tuple)) and len(entry) > 3:
+                        provider_secrets.append(entry[3])
+        return {"logs": [redact_sensitive_text(line, provider_secrets) for line in lines[-200:]]}
     except Exception as e:
         logger.error("[SYSTEM] Error reading logs: %s" % e)
         return {"logs": [], "error": str(e)}
@@ -794,12 +818,7 @@ def request_weekly_refresh(ctx):
 def sanitize_job_error(error):
     """Keep operational errors useful without persisting credentials or large tracebacks."""
     message = re.sub(r"\s+", " ", str(error or "")).strip()
-    message = re.sub(
-        r"(?i)(api[ _-]?key|authorization|password|token)\s*[=:]\s*[^\s,;]+",
-        r"\1=[redacted]",
-        message,
-    )
-    message = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[redacted]@", message)
+    message = redact_sensitive_text(message)
     return message[:500] or "Scheduled job failed; check server logs for details."
 
 

@@ -40,6 +40,87 @@ config = configparser.ConfigParser()
 _CONFIG_TRANSACTION_LOCK = threading.RLock()
 _CONFIG_TEMP_PREFIX = ".comicarr-config-"
 _CONFIG_TEMP_SUFFIX = ".tmp"
+_PROVIDER_EXTRA_FIELDS = ("EXTRA_NEWZNABS", "EXTRA_TORZNABS")
+_PROVIDER_EXTRA_WIDTHS = (6, 7)
+_PROVIDER_CREDENTIAL_INDEX = 3
+_PROVIDER_BOOLEAN_VALUES = {"0", "1", "false", "true", "no", "yes", "off", "on"}
+
+
+def _provider_entry_is_structurally_valid(entry):
+    """Distinguish historical six- and seven-field provider records safely."""
+    if len(entry) not in _PROVIDER_EXTRA_WIDTHS:
+        return False
+    if str(entry[2]).strip().lower() not in _PROVIDER_BOOLEAN_VALUES:
+        return False
+    if str(entry[5]).strip().lower() not in _PROVIDER_BOOLEAN_VALUES:
+        return False
+    if len(entry) == 7:
+        try:
+            int(entry[6])
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def parse_provider_extras(value, config_version=15):
+    """Parse provider extras without assuming one historical tuple width."""
+    if value in (None, "", "None"):
+        return []
+
+    if isinstance(value, (list, tuple)):
+        entries = value
+    elif isinstance(value, str):
+        parts = value.split(", ")
+        candidates = []
+        for width in _PROVIDER_EXTRA_WIDTHS:
+            if len(parts) % width:
+                continue
+            candidate = [parts[index : index + width] for index in range(0, len(parts), width)]
+            if all(_provider_entry_is_structurally_valid(entry) for entry in candidate):
+                candidates.append(candidate)
+        if len(candidates) != 1:
+            raise ValueError("Provider configuration has an invalid field count")
+        entries = candidates[0]
+    else:
+        raise ValueError("Provider configuration must be a list of entries")
+
+    parsed = []
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or not _provider_entry_is_structurally_valid(entry):
+            raise ValueError("Provider entries must contain six or seven fields")
+        parsed.append(tuple(entry))
+    return parsed
+
+
+def serialize_provider_extras(entries):
+    """Serialize validated provider entries using the legacy flat INI format."""
+    flattened = []
+    for entry in parse_provider_extras(entries):
+        for index, value in enumerate(entry):
+            field = "" if value is None else str(value)
+            if index == 4:
+                field = field.replace(",", "#")
+            elif ", " in field:
+                raise ValueError("Provider fields cannot contain the INI delimiter")
+            flattened.append(field)
+    return ", ".join(flattened)
+
+
+def decrypt_provider_credential(value, secure_dir):
+    """Return a runtime provider credential and its reusable Fernet token."""
+    if value in (None, "", "None"):
+        return value, None, False
+    if not isinstance(value, str):
+        value = str(value)
+    if not value.startswith(("gAAAAA", "^~$z$")):
+        return value, None, True
+
+    result = encrypted.Encryptor(value, secure_dir=secure_dir).decrypt_it()
+    if not result.get("status"):
+        raise ValueError("Unable to decrypt provider credential")
+    token = value if value.startswith("gAAAAA") else None
+    return result["password"], token, token is None
+
 
 _CONFIG_DEFINITIONS = OrderedDict(
     {
@@ -559,6 +640,7 @@ class Config(object):
         # initalize the config...
         self._config_file = config_file
         self.WRITE_THE_CONFIG = False
+        self._provider_credential_tokens = {}
 
     def config_vals(self, update=False):
         if update is False:
@@ -709,6 +791,8 @@ class Config(object):
 
     def read(self, startup=False):
         self.config_vals()
+        self._ensure_secure_directory()
+        self._validate_existing_encryption_authority()
 
         if startup is True:
             if self.LOG_DIR is None:
@@ -751,6 +835,15 @@ class Config(object):
                     max_logfiles=self.MAX_LOGFILES,
                 )
 
+        # Validate the live provider authority before backup maintenance is
+        # allowed to encrypt historical plaintext with that same authority.
+        self.EXTRA_NEWZNABS, self.EXTRA_TORZNABS = self.get_extras()
+        provider_migration_needed = self._load_provider_extra_credentials()
+        self._validate_loaded_provider_extras()
+        if provider_migration_needed and self.writeconfig(startup=True) is False:
+            raise OSError("Unable to persist encrypted provider credentials")
+        self._sanitize_provider_backup_credentials()
+
         if any([self.CONFIG_VERSION == 0, self.CONFIG_VERSION < self.newconfig]):
             if not self.BACKUP_LOCATION:
                 # this is needed here since the configuration hasn't run to check the location value yet.
@@ -786,12 +879,18 @@ class Config(object):
         self.EXTRA_TORZNABS = extra_torznabs
         self.IGNORED_PUBLISHERS = self.get_ignored_pubs()
 
+        provider_migration_needed = self._load_provider_extra_credentials()
+        self._validate_loaded_provider_extras()
+        if provider_migration_needed and self.writeconfig(startup=True) is False:
+            raise OSError("Unable to persist encrypted provider credentials")
+
         if startup is False:
             # need to do provider sequence AFTER db check
             self.provider_sequence()
         self.configure(startup=startup)
         if self.WRITE_THE_CONFIG is True or startup is True:
-            self.writeconfig(startup=startup)
+            if self.writeconfig(startup=startup) is False:
+                raise OSError("Unable to persist configuration")
         return self
 
     def config_update(self):
@@ -889,7 +988,7 @@ class Config(object):
                 for chk_e in [self.OLD_VALUES["nzbsu_apikey"], self.OLD_VALUES["dognzb_apikey"]]:
                     if chk_e is not None:
                         if chk_e[:5] == "^~$z$":
-                            nz = encrypted.Encryptor(chk_e)
+                            nz = encrypted.Encryptor(chk_e, secure_dir=self.SECURE_DIR)
                             nz_stat = nz.decrypt_it()
                             if nz_stat["status"] is True:
                                 if chk_e == self.OLD_VALUES["nzbsu_apikey"]:
@@ -913,7 +1012,7 @@ class Config(object):
                         if n_name is None:
                             n_name = ""
                         if ben[3][:5] == "^~$z$":
-                            nz = encrypted.Encryptor(ben[3])
+                            nz = encrypted.Encryptor(ben[3], secure_dir=self.SECURE_DIR)
                             nz_stat = nz.decrypt_it()
                             if nz_stat["status"] is True:
                                 ben[3] = nz_stat["password"]
@@ -1116,6 +1215,278 @@ class Config(object):
             definition_type, section, _, default = definition
         return key, definition_type, section, ini_key, default
 
+    def _provider_max_id(self):
+        provider_ids = [getattr(comicarr, "PROVIDER_START_ID", 0)]
+        for attr_name in _PROVIDER_EXTRA_FIELDS:
+            try:
+                entries = parse_provider_extras(getattr(self, attr_name, []), self.CONFIG_VERSION)
+            except ValueError:
+                continue
+            for entry in entries:
+                if len(entry) == 7:
+                    try:
+                        provider_ids.append(int(entry[6]))
+                    except (TypeError, ValueError):
+                        pass
+        return max(provider_ids)
+
+    def _reserved_provider_ids(self):
+        reserved = set()
+        if self.EXPERIMENTAL:
+            reserved.add(101)
+        if self.ENABLE_DDL and self.ENABLE_GETCOMICS:
+            reserved.add(200)
+        if self.ENABLE_DDL and self.ENABLE_EXTERNAL_SERVER:
+            reserved.add(201)
+        return reserved
+
+    def _validate_existing_encryption_authority(self):
+        """Fail before any write when a live Fernet secret lacks its authority."""
+        for attr_name in ENCRYPTED_CONFIG_ITEMS:
+            value = getattr(self, attr_name, None)
+            if isinstance(value, (tuple, list)) and value:
+                value = value[0]
+            if not isinstance(value, str) or not value.startswith("gAAAAA"):
+                continue
+            result = encrypted.Encryptor(value, secure_dir=self.SECURE_DIR).decrypt_it()
+            if not result.get("status"):
+                raise ValueError("Unable to validate encrypted configuration authority")
+
+    def _reserved_provider_names(self):
+        reserved = set()
+        if self.ENABLE_TORRENT_SEARCH and self.ENABLE_32P:
+            reserved.add("32p")
+        if self.EXPERIMENTAL:
+            reserved.add("experimental")
+        if self.ENABLE_DDL and self.ENABLE_GETCOMICS:
+            reserved.add("ddl(getcomics)")
+        if self.ENABLE_DDL and self.ENABLE_EXTERNAL_SERVER:
+            reserved.add("ddl(external)")
+        return reserved
+
+    @staticmethod
+    def _validate_provider_names(entries, seen_names):
+        for entry in entries:
+            canonical_name = str(entry[0] or entry[1]).strip().casefold()
+            if not canonical_name:
+                raise ValueError("Provider name or host is required")
+            if canonical_name in seen_names:
+                raise ValueError("Provider names must be unique across enabled providers")
+            seen_names.add(canonical_name)
+
+    def _validate_loaded_provider_extras(self):
+        """Validate persisted provider identities before projection or backup work."""
+        seen_ids = self._reserved_provider_ids()
+        seen_names = self._reserved_provider_names()
+        next_id = self._provider_max_id()
+        for attr_name in _PROVIDER_EXTRA_FIELDS:
+            entries = parse_provider_extras(getattr(self, attr_name, []), self.CONFIG_VERSION)
+            normalized, next_id = self._assign_provider_ids(entries, next_id, seen_ids)
+            self._validate_provider_names(normalized, seen_names)
+
+    def _decode_provider_entries(self, entries, token_cache=None):
+        decoded = []
+        cache = dict(self._provider_credential_tokens if token_cache is None else token_cache)
+        migration_needed = False
+        for entry in entries:
+            runtime_entry = list(entry)
+            credential, token, migrate = decrypt_provider_credential(
+                runtime_entry[_PROVIDER_CREDENTIAL_INDEX],
+                self.SECURE_DIR,
+            )
+            runtime_entry[_PROVIDER_CREDENTIAL_INDEX] = credential
+            if token:
+                cache[credential] = token
+            elif migrate and credential in cache:
+                migrate = False
+            migration_needed = migration_needed or migrate
+            decoded.append(tuple(runtime_entry))
+        return decoded, cache, migration_needed
+
+    def _assign_provider_ids(self, entries, next_id=None, seen_ids=None):
+        """Normalize legacy widths and reject duplicate current provider IDs."""
+        next_id = self._provider_max_id() if next_id is None else next_id
+        normalized = []
+        seen_ids = set() if seen_ids is None else seen_ids
+        for entry in entries:
+            values = list(entry)
+            if len(values) == 6:
+                next_id += 1
+                while next_id in seen_ids:
+                    next_id += 1
+                values.append(next_id)
+            else:
+                try:
+                    values[6] = int(values[6])
+                except (TypeError, ValueError) as e:
+                    raise ValueError("Provider ID must be an integer") from e
+            if values[6] in seen_ids:
+                raise ValueError("Provider IDs must be unique across enabled providers")
+            seen_ids.add(values[6])
+            normalized.append(tuple(values))
+        return normalized, next_id
+
+    def _normalize_provider_extra_value(self, value):
+        entries = parse_provider_extras(value, self.CONFIG_VERSION)
+        decoded, token_cache, _migration_needed = self._decode_provider_entries(entries)
+        normalized, _next_id = self._assign_provider_ids(decoded, seen_ids=self._reserved_provider_ids())
+        self._validate_provider_names(normalized, self._reserved_provider_names())
+        self._provider_credential_tokens = token_cache
+        return normalized
+
+    def _load_provider_extra_credentials(self):
+        """Decrypt provider keys after secure-directory authority is available."""
+        decoded_fields = {}
+        token_cache = dict(self._provider_credential_tokens)
+        migration_needed = False
+        for attr_name in _PROVIDER_EXTRA_FIELDS:
+            entries = parse_provider_extras(getattr(self, attr_name, []), self.CONFIG_VERSION)
+            decoded, token_cache, migrate = self._decode_provider_entries(entries, token_cache)
+            decoded_fields[attr_name] = decoded
+            migration_needed = migration_needed or migrate
+
+        for attr_name, entries in decoded_fields.items():
+            setattr(self, attr_name, entries)
+        self._provider_credential_tokens = token_cache
+        if migration_needed:
+            self.ENCRYPT_PASSWORDS = True
+            if not config.has_section("General"):
+                config.add_section("General")
+            config.set("General", "encrypt_passwords", "True")
+            self.WRITE_THE_CONFIG = True
+        return migration_needed
+
+    def _sanitize_provider_backup_credentials(self):
+        """Encrypt provider keys retained in historical config backups."""
+        backup_dir = self.BACKUP_LOCATION
+        if backup_dir in (None, "", "None"):
+            backup_dir = os.path.join(comicarr.DATA_DIR, "backup")
+
+        for backup_name in glob.glob(os.path.join(backup_dir, "config.ini-v*.backup*")):
+            backup_path = Path(backup_name)
+            if backup_path.is_symlink():
+                raise OSError("Refusing to rewrite a symlinked config backup")
+            if not backup_path.is_file():
+                continue
+            backup_config = configparser.ConfigParser()
+            backup_config.read(backup_path)
+            config_version = backup_config.getint("General", "config_version", fallback=15)
+            changed = False
+
+            for section, option in (("Newznab", "extra_newznabs"), ("Torznab", "extra_torznabs")):
+                raw_value = backup_config.get(section, option, raw=True, fallback="")
+                if raw_value in ("", "None"):
+                    continue
+                section_changed = False
+                try:
+                    entries = parse_provider_extras(raw_value, config_version)
+                except ValueError:
+                    backup_config.set(section, option, "")
+                    changed = True
+                    continue
+
+                sanitized = []
+                for entry in entries:
+                    values = list(entry)
+                    credential = values[_PROVIDER_CREDENTIAL_INDEX]
+                    if credential not in (None, "", "None") and not str(credential).startswith("gAAAAA"):
+                        try:
+                            runtime_credential, _token, _migration = decrypt_provider_credential(
+                                credential,
+                                self.SECURE_DIR,
+                            )
+                        except ValueError:
+                            runtime_credential = None
+                        if runtime_credential in (None, "", "None"):
+                            values[_PROVIDER_CREDENTIAL_INDEX] = ""
+                        else:
+                            encrypted_value = encrypted.Encryptor(
+                                str(runtime_credential),
+                                secure_dir=self.SECURE_DIR,
+                            ).encrypt_it()
+                            if not encrypted_value.get("status"):
+                                raise OSError("Unable to sanitize provider credential backup")
+                            values[_PROVIDER_CREDENTIAL_INDEX] = encrypted_value["password"]
+                        section_changed = True
+                    sanitized.append(tuple(values))
+
+                if section_changed:
+                    backup_config.set(section, option, serialize_provider_extras(sanitized))
+                    changed = True
+
+            if changed:
+                backup_mode = stat.S_IMODE(backup_path.stat().st_mode)
+                self._atomic_replace_file(backup_path, backup_mode, backup_config.write)
+
+    def validate_provider_extra_value(self, attr_name, value):
+        """Validate an API provider payload without publishing it to readers."""
+        if attr_name not in _PROVIDER_EXTRA_FIELDS:
+            raise ValueError("Unknown provider configuration field")
+        seen_ids = self._reserved_provider_ids()
+        seen_names = self._reserved_provider_names()
+        next_id = self._provider_max_id()
+        for other_attr in _PROVIDER_EXTRA_FIELDS:
+            if other_attr == attr_name:
+                continue
+            other_entries = parse_provider_extras(getattr(self, other_attr, []), self.CONFIG_VERSION)
+            decoded_other, _token_cache, _migration_needed = self._decode_provider_entries(other_entries)
+            normalized_other, next_id = self._assign_provider_ids(decoded_other, next_id, seen_ids)
+            self._validate_provider_names(normalized_other, seen_names)
+        entries = parse_provider_extras(value, self.CONFIG_VERSION)
+        decoded, _token_cache, _migration_needed = self._decode_provider_entries(entries)
+        normalized, _next_id = self._assign_provider_ids(decoded, next_id, seen_ids)
+        self._validate_provider_names(normalized, seen_names)
+
+    def _prepare_provider_extras_for_write(self, overrides=None):
+        """Build encrypted storage copies while leaving runtime credentials plaintext."""
+        overrides = overrides or {}
+        storage = {}
+        runtime = {}
+        token_cache = dict(self._provider_credential_tokens)
+        next_id = self._provider_max_id()
+        seen_ids = self._reserved_provider_ids()
+        seen_names = self._reserved_provider_names()
+        has_credentials = False
+
+        for attr_name in _PROVIDER_EXTRA_FIELDS:
+            value = overrides.get(attr_name, getattr(self, attr_name, []))
+            entries = parse_provider_extras(value, self.CONFIG_VERSION)
+            decoded, token_cache, _migration_needed = self._decode_provider_entries(entries, token_cache)
+            normalized, next_id = self._assign_provider_ids(decoded, next_id, seen_ids)
+            self._validate_provider_names(normalized, seen_names)
+            encrypted_entries = []
+            for entry in normalized:
+                stored_values = list(entry)
+                credential = entry[_PROVIDER_CREDENTIAL_INDEX]
+                if credential not in (None, "", "None"):
+                    has_credentials = True
+                    token = token_cache.get(credential)
+                    if token is None:
+                        encrypted_value = encrypted.Encryptor(
+                            str(credential),
+                            secure_dir=self.SECURE_DIR,
+                        ).encrypt_it()
+                        if not encrypted_value.get("status"):
+                            raise ValueError("Unable to encrypt provider credential")
+                        token = encrypted_value["password"]
+                        token_cache[credential] = token
+                    stored_values[_PROVIDER_CREDENTIAL_INDEX] = token
+                encrypted_entries.append(tuple(stored_values))
+
+            runtime[attr_name] = normalized
+            storage[attr_name] = serialize_provider_extras(encrypted_entries)
+
+        active_credentials = {
+            entry[_PROVIDER_CREDENTIAL_INDEX]
+            for entries in runtime.values()
+            for entry in entries
+            if entry[_PROVIDER_CREDENTIAL_INDEX] not in (None, "", "None")
+        }
+        active_token_cache = {
+            credential: token_cache[credential] for credential in active_credentials if credential in token_cache
+        }
+        return storage, runtime, active_token_cache, has_credentials
+
     def process_kwargs(self, kwargs):
         """
         Given a big bunch of key value pairs, apply them to the ini.
@@ -1129,6 +1500,9 @@ class Config(object):
                 ]
             ):
                 key, definition_type, section, ini_key, default = self._define(name)
+                if key in _PROVIDER_EXTRA_FIELDS:
+                    setattr(self, key, self._normalize_provider_extra_value(value))
+                    continue
                 if definition_type == str:
                     try:
                         if any([value == "", value is None, len(value) == 0]):
@@ -1214,11 +1588,26 @@ class Config(object):
             file_existed = config_path.is_file()
             file_contents = config_path.read_bytes() if file_existed else None
             file_mode = config_path.stat().st_mode if file_existed else None
+            provider_start_id = comicarr.PROVIDER_START_ID
 
             try:
-                self.process_kwargs(values)
+                provider_values = {key: value for key, value in values.items() if key in _PROVIDER_EXTRA_FIELDS}
+                scalar_values = {key: value for key, value in values.items() if key not in _PROVIDER_EXTRA_FIELDS}
+                if provider_values and scalar_values:
+                    raise ValueError("Provider and scalar settings require separate transactions")
+                if provider_values:
+                    # Provider values are fully normalized and published by
+                    # _writeconfig; the broad legacy configure pass adds no
+                    # provider state and cannot be rolled back safely.
+                    configure = False
+                if scalar_values:
+                    self.process_kwargs(scalar_values)
                 self._encrypt_config_for_write()
-                if self.writeconfig() is False:
+                if provider_values:
+                    persisted = self._writeconfig(provider_values=provider_values)
+                else:
+                    persisted = self.writeconfig()
+                if persisted is False:
                     raise OSError("config write failed")
                 if configure:
                     # configure() still owns legacy filesystem and queue side effects.
@@ -1228,6 +1617,7 @@ class Config(object):
                     self.configure(update=True, startup=False)
                 return True
             except BaseException as e:
+                comicarr.PROVIDER_START_ID = provider_start_id
                 durable_write_happened = self._durable_write_changed(config_path, file_existed, file_contents)
                 runtime_ok = False
                 file_ok = False
@@ -1329,6 +1719,7 @@ class Config(object):
             )
         elif config_path.exists():
             config_path.unlink()
+            self._fsync_directory(config_path.parent)
 
     def _config_write_target(self):
         """Resolve a configured symlink target without replacing the link itself."""
@@ -1392,6 +1783,7 @@ class Config(object):
                 os.fsync(temp_file.fileno())
             os.replace(temp_path, target_path)
             temp_path = None
+            cls._fsync_directory(target_path.parent)
         finally:
             if temp_fd is not None:
                 os.close(temp_fd)
@@ -1402,6 +1794,17 @@ class Config(object):
                     pass
                 except OSError as cleanup_error:
                     logger.warn("[CONFIG] Unable to remove config temp file %s: %s" % (temp_path, cleanup_error))
+
+    @staticmethod
+    def _fsync_directory(directory):
+        """Make a replaced config directory entry crash-durable on POSIX."""
+        if os.name == "nt":
+            return
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def writeconfig(self, values=None, startup=False):
         """Serialize every parser mutation and atomic config-file replacement."""
@@ -1426,8 +1829,11 @@ class Config(object):
             parser_defaults = copy.deepcopy(config._defaults)
             parser_sections = copy.deepcopy(config._sections)
             try:
-                self.process_kwargs(values)
-                if self._writeconfig(startup=startup) is False:
+                provider_values = {key: value for key, value in values.items() if key in _PROVIDER_EXTRA_FIELDS}
+                scalar_values = {key: value for key, value in values.items() if key not in _PROVIDER_EXTRA_FIELDS}
+                if scalar_values:
+                    self.process_kwargs(scalar_values)
+                if self._writeconfig(startup=startup, provider_values=provider_values) is False:
                     raise OSError("config write failed")
                 return True
             except Exception as e:
@@ -1440,25 +1846,46 @@ class Config(object):
                 logger.error("[CONFIG] writeconfig_values failed: %s" % e)
                 return False
 
-    def _writeconfig(self, values=None, startup=False):
+    def _writeconfig(self, values=None, startup=False, provider_values=None):
         try:
             config_path = self._config_write_target()
         except (OSError, RuntimeError) as e:
             logger.warn("[CONFIG] Refusing unsafe configuration write target: %s" % e)
             return False
 
+        if values is not None:
+            value_providers = {key: value for key, value in values.items() if key in _PROVIDER_EXTRA_FIELDS}
+            provider_values = {**(provider_values or {}), **value_providers}
+            scalar_values = {key: value for key, value in values.items() if key not in _PROVIDER_EXTRA_FIELDS}
+            if scalar_values:
+                self.process_kwargs(scalar_values)
+
         logger.fdebug("Writing configuration to file")
-        config.set("Newznab", "extra_newznabs", ", ".join(self.write_extras(self.EXTRA_NEWZNABS)))
-        tmp_torz = self.write_extras(self.EXTRA_TORZNABS)
-        config.set("Torznab", "extra_torznabs", ", ".join(tmp_torz))
+        parser_defaults = copy.deepcopy(config._defaults)
+        parser_sections = copy.deepcopy(config._sections)
+        try:
+            provider_storage, provider_runtime, token_cache, has_provider_credentials = (
+                self._prepare_provider_extras_for_write(provider_values)
+            )
+        except Exception as e:
+            logger.warn("Unable to serialize provider configuration: %s" % type(e).__name__)
+            return False
 
-        # this needs to revert from , to # so that it is stored properly (multiple categories)
-        extra_newznabs, extra_torznabs = self.get_extras()
-        self.EXTRA_NEWZNABS = extra_newznabs
-        self.EXTRA_TORZNABS = extra_torznabs
+        config.set("Newznab", "extra_newznabs", provider_storage["EXTRA_NEWZNABS"])
+        config.set("Torznab", "extra_torznabs", provider_storage["EXTRA_TORZNABS"])
+        if has_provider_credentials:
+            self.ENCRYPT_PASSWORDS = True
+            config.set("General", "encrypt_passwords", "True")
 
-        if startup is False:
-            self.provider_sequence()
+        provider_order = None
+        if startup is False and provider_values:
+            provider_order, serialized_order = self._calculate_provider_order(
+                provider_runtime["EXTRA_NEWZNABS"],
+                provider_runtime["EXTRA_TORZNABS"],
+            )
+            if not config.has_section("Providers"):
+                config.add_section("Providers")
+            config.set("Providers", "PROVIDER_ORDER", serialized_order)
 
         ###this should be moved elsewhere...
         if type(self.IGNORED_PUBLISHERS) != list:
@@ -1475,9 +1902,6 @@ class Config(object):
         ###
         config.set("General", "dynamic_update", str(self.DYNAMIC_UPDATE))
 
-        if values is not None:
-            self.process_kwargs(values)
-
         # Atomic write: restrict the temporary file before making it visible.
         target_mode = 0o600
         try:
@@ -1485,11 +1909,39 @@ class Config(object):
         except FileNotFoundError:
             pass
 
+        file_existed = config_path.is_file()
+        original_file = config_path.read_bytes() if file_existed else None
+        original_mode = config_path.stat().st_mode if file_existed else None
+        durable_write_happened = False
         try:
             self._atomic_replace_file(config_path, target_mode, config.write)
+            durable_write_happened = True
+            if startup is False and provider_values:
+                self.write_out_provider_searches(
+                    provider_order=provider_order,
+                    extra_newznabs=provider_runtime["EXTRA_NEWZNABS"],
+                    extra_torznabs=provider_runtime["EXTRA_TORZNABS"],
+                )
+            self.EXTRA_NEWZNABS = provider_runtime["EXTRA_NEWZNABS"]
+            self.EXTRA_TORZNABS = provider_runtime["EXTRA_TORZNABS"]
+            self._provider_credential_tokens = token_cache
+            for entries in provider_runtime.values():
+                for entry in entries:
+                    comicarr.PROVIDER_START_ID = max(comicarr.PROVIDER_START_ID, int(entry[6]))
+            if provider_order is not None:
+                self.PROVIDER_ORDER = provider_order
             logger.fdebug("Configuration written to disk.")
             return True
         except Exception as e:
+            config._defaults = parser_defaults
+            config._sections = parser_sections
+            if durable_write_happened:
+                try:
+                    self._restore_config_file(config_path, file_existed, original_file, original_mode)
+                except Exception as rollback_error:
+                    logger.error(
+                        "[CONFIG] Failed to restore configuration after provider projection: %s" % rollback_error
+                    )
             logger.warn("Error writing configuration file: %s", e)
             return False
 
@@ -1520,7 +1972,7 @@ class Config(object):
             # Skip values already encrypted with Fernet
             if current_value.startswith("gAAAAA"):
                 if mode == "decrypt":
-                    hp = encrypted.Encryptor(current_value)
+                    hp = encrypted.Encryptor(current_value, secure_dir=self.SECURE_DIR)
                     decrypted = hp.decrypt_it()
                     if decrypted["status"]:
                         setattr(self, k, decrypted["password"])
@@ -1531,7 +1983,7 @@ class Config(object):
             # Legacy base64 encrypted values
             if current_value.startswith("^~$z$"):
                 if mode == "decrypt":
-                    hp = encrypted.Encryptor(current_value)
+                    hp = encrypted.Encryptor(current_value, secure_dir=self.SECURE_DIR)
                     decrypted = hp.decrypt_it()
                     if decrypted["status"]:
                         setattr(self, k, decrypted["password"])
@@ -1544,10 +1996,10 @@ class Config(object):
                         )
                 else:
                     # Re-encrypt legacy base64 → Fernet
-                    hp = encrypted.Encryptor(current_value)
+                    hp = encrypted.Encryptor(current_value, secure_dir=self.SECURE_DIR)
                     decrypted = hp.decrypt_it()
                     if decrypted["status"]:
-                        re_enc = encrypted.Encryptor(decrypted["password"])
+                        re_enc = encrypted.Encryptor(decrypted["password"], secure_dir=self.SECURE_DIR)
                         encrypted_password = re_enc.encrypt_it()
                         if encrypted_password["status"]:
                             config.set(section, ini_key, encrypted_password["password"])
@@ -1556,7 +2008,7 @@ class Config(object):
 
             # Plaintext — encrypt with Fernet
             if mode == "encrypt":
-                hp = encrypted.Encryptor(current_value)
+                hp = encrypted.Encryptor(current_value, secure_dir=self.SECURE_DIR)
                 encrypted_password = hp.encrypt_it()
                 if encrypted_password["status"]:
                     config.set(section, ini_key, encrypted_password["password"])
@@ -1576,6 +2028,26 @@ class Config(object):
             token = token[0]
         if token:
             self.GIT_TOKEN = (token, "x-oauth-basic")
+
+    def _ensure_secure_directory(self):
+        """Establish encryption authority before any configuration persistence."""
+        if not self.SECURE_DIR:
+            self.SECURE_DIR = os.path.join(comicarr.DATA_DIR, ".secure")
+
+        try:
+            if os.path.exists(self.SECURE_DIR):
+                if os.name != "nt":
+                    os.chmod(self.SECURE_DIR, 0o700)
+                return
+            os.makedirs(self.SECURE_DIR, mode=0o700)
+            if os.name != "nt":
+                os.chmod(self.SECURE_DIR, 0o700)
+        except OSError:
+            logger.error(
+                "[FATAL] Could not create secure directory at %s. "
+                "Credential encryption will not work. Fix permissions and restart." % self.SECURE_DIR
+            )
+            raise SystemExit(1)
 
     def configure(self, update=False, startup=False):
 
@@ -1649,19 +2121,7 @@ class Config(object):
                     "[Cache Check] Could not create cache dir. Check permissions of datadir: %s" % comicarr.DATA_DIR
                 )
 
-        if not self.SECURE_DIR:
-            self.SECURE_DIR = os.path.join(comicarr.DATA_DIR, ".secure")
-
-        if not os.path.exists(self.SECURE_DIR):
-            try:
-                os.makedirs(self.SECURE_DIR)
-                os.chmod(self.SECURE_DIR, 0o700)
-            except OSError:
-                logger.error(
-                    "[FATAL] Could not create secure directory at %s. "
-                    "Credential encryption will not work. Fix permissions and restart." % self.SECURE_DIR
-                )
-                raise SystemExit(1)
+        self._ensure_secure_directory()
 
         # Encrypt plaintext credentials now that SECURE_DIR is available
         if self.ENCRYPT_PASSWORDS is True:
@@ -1919,6 +2379,7 @@ class Config(object):
 
         if self.ENCRYPT_PASSWORDS is True:
             self.encrypt_items(mode="decrypt")
+        self._load_provider_extra_credentials()
         if all([self.IGNORE_TOTAL is True, self.IGNORE_HAVETOTAL is True]):
             self.IGNORE_TOTAL = False
             self.IGNORE_HAVETOTAL = False
@@ -2243,30 +2704,8 @@ class Config(object):
         return KEYS_32P
 
     def get_extras(self):
-        cnt = 0
-        while cnt < 2:
-            if cnt == 0:
-                ex = self.EXTRA_NEWZNABS
-            else:
-                ex = self.EXTRA_TORZNABS
-
-            if type(ex) != list:
-                if self.CONFIG_VERSION < 11:
-                    if cnt == 0:
-                        extra_newznabs = list(zip(*[iter(ex.split(", "))] * 6, strict=False))
-                    else:
-                        extra_torznabs = list(zip(*[iter(ex.split(", "))] * 6, strict=False))
-                else:
-                    if cnt == 0:
-                        extra_newznabs = list(zip(*[iter(ex.split(", "))] * 7, strict=False))
-                    else:
-                        extra_torznabs = list(zip(*[iter(ex.split(", "))] * 7, strict=False))
-            else:
-                if cnt == 0:
-                    extra_newznabs = ex
-                else:
-                    extra_torznabs = ex
-            cnt += 1
+        extra_newznabs = parse_provider_extras(self.EXTRA_NEWZNABS, self.CONFIG_VERSION)
+        extra_torznabs = parse_provider_extras(self.EXTRA_TORZNABS, self.CONFIG_VERSION)
 
         x_newzcat = []
         x_torzcat = []
@@ -2327,12 +2766,7 @@ class Config(object):
         return xx_newzcat, xx_torzcat
 
     def get_extra_torznabs(self):
-        extra_torznabs = self.EXTRA_TORZNABS
-        if type(extra_torznabs) != list:
-            if self.CONFIG_VERSION < 11:
-                extra_torznabs = list(zip(*[iter(extra_torznabs.split(", "))] * 6, strict=False))
-            else:
-                extra_torznabs = list(zip(*[iter(extra_torznabs.split(", "))] * 7, strict=False))
+        extra_torznabs = parse_provider_extras(self.EXTRA_TORZNABS, self.CONFIG_VERSION)
         x_torcat = []
         for x in extra_torznabs:
             x_cat = x[4]
@@ -2368,7 +2802,10 @@ class Config(object):
             ignored_pubs = []
         return ignored_pubs
 
-    def provider_sequence(self):
+    def _calculate_provider_order(self, extra_newznabs=None, extra_torznabs=None):
+        """Calculate provider ordering without mutating runtime, disk, or the database."""
+        extra_newznabs = self.EXTRA_NEWZNABS if extra_newznabs is None else extra_newznabs
+        extra_torznabs = self.EXTRA_TORZNABS if extra_torznabs is None else extra_torznabs
         PR = []
         PR_NUM = 0
         if self.ENABLE_TORRENT_SEARCH:
@@ -2392,7 +2829,7 @@ class Config(object):
 
         PPR = ["Experimental", "DDL(GetComics)", "DDL(External)"]
         if self.NEWZNAB:
-            for ens in self.EXTRA_NEWZNABS:
+            for ens in extra_newznabs:
                 if str(ens[5]) == "1":  # if newznabs are enabled
                     if ens[0] == "":
                         en_name = ens[1]
@@ -2405,7 +2842,7 @@ class Config(object):
                     PR_NUM += 1
 
         if self.ENABLE_TORZNAB and self.ENABLE_TORRENT_SEARCH:
-            for ets in self.EXTRA_TORZNABS:
+            for ets in extra_torznabs:
                 if str(ets[5]) == "1":  # if torznabs are enabled
                     if ets[0] == "":
                         et_name = ets[1]
@@ -2503,151 +2940,133 @@ class Config(object):
                 TMPPR_NUM += 1
             PROVIDER_ORDER = PROV_ORDER
 
-        ll = ", ".join(PROVIDER_ORDER)
+        serialized_order = ", ".join(PROVIDER_ORDER)
+        provider_order = dict(list(zip(*[PROVIDER_ORDER[i::2] for i in range(2)], strict=False)))
+        return provider_order, serialized_order
+
+    def provider_sequence(self):
+        """Publish the current provider order and reconcile its database projection."""
+        provider_order, serialized_order = self._calculate_provider_order()
         if not config.has_section("Providers"):
             config.add_section("Providers")
-        config.set("Providers", "PROVIDER_ORDER", ll)
-
-        PROVIDER_ORDER = dict(list(zip(*[PROVIDER_ORDER[i::2] for i in range(2)], strict=False)))
-        self.PROVIDER_ORDER = PROVIDER_ORDER
+        config.set("Providers", "PROVIDER_ORDER", serialized_order)
+        self.PROVIDER_ORDER = provider_order
         logger.fdebug("Provider Order is now set : %s " % self.PROVIDER_ORDER)
 
         self.write_out_provider_searches()
 
-    def write_extras(self, value):
-        flattened = []
-        for item in value:
-            for i in item:
-                try:
-                    if value.index(i) == 4:
-                        ib = i
-                        if "," in ib:
-                            ib = re.sub(",", "#", ib).strip()
-                    elif '"' in i and ' "' in i:
-                        ib = str(i).replace('"', "").strip()
-                    else:
-                        ib = i
-                except:
-                    ib = i
-                flattened.append(str(ib))
-        return flattened
+    @staticmethod
+    def _provider_search_identity(provider, extra_newznabs, extra_torznabs):
+        """Return the canonical database identity for a configured provider."""
+        if provider == "DDL(GetComics)":
+            return provider, "DDL", 200
+        if provider == "DDL(External)":
+            return provider, "DDL(External)", 201
+        if provider.lower() == "experimental":
+            return "experimental", "experimental", 101
+        for provider_type, entries in (("newznab", extra_newznabs), ("torznab", extra_torznabs)):
+            for entry in entries:
+                entry_name = entry[0] or entry[1]
+                if entry_name.lower() == provider.lower():
+                    return entry_name, provider_type, int(entry[6])
+        raise ValueError("Provider order contains an unknown provider")
 
-    def write_out_provider_searches(self):
-        # this is needed for rss to work since the provider table isn't written to
-        # until a search is performed
-        from sqlalchemy import delete, select
+    def write_out_provider_searches(self, provider_order=None, extra_newznabs=None, extra_torznabs=None):
+        """Reconcile the provider-search projection in one database transaction."""
+        from sqlalchemy import select, update
 
         from comicarr.tables import provider_searches
 
-        with db.get_engine().connect() as conn:
-            chk = [dict(row._mapping) for row in conn.execute(select(provider_searches))]
-        p_list = {}
-        write = False
-        if chk:
-            for ck in chk:
-                ck_hits = ck["hits"]
-                if ck_hits is None:
-                    ck_hits = 0
-                t_id = ck["id"]
-                prov_t = ck["provider"]
-                if t_id == "Experimental":
-                    prov_t = "experimental"
-                # logger.fdebug('[%s] t_id: %s' % (ck['provider'], t_id))
-                if any([t_id == 0, t_id is None]):
-                    # id of 0 means it hasn't been assigned - so we need to assign it before we build out the dict
-                    if "DDL(GetComics)" in prov_t:
-                        t_id = 200
-                    if "DDL(External)" in prov_t:
-                        t_id = 201
-                    elif any(["experimental" in prov_t, "Experimental" in prov_t]):
-                        t_id = 101
-                    else:
-                        nnf = False
-                        if self.EXTRA_NEWZNABS:
-                            for n in self.EXTRA_NEWZNABS:
-                                if n[0] == prov_t:
-                                    t_id = n[6]
-                                    nnf = True
-                                    break
-                        if nnf is False and self.EXTRA_TORZNABS:
-                            for n in self.EXTRA_TORZNABS:
-                                if n[0] == prov_t:
-                                    t_id = n[6]
-                                    nnf = True
-                                    break
+        provider_order = self.PROVIDER_ORDER if provider_order is None else provider_order
+        extra_newznabs = self.EXTRA_NEWZNABS if extra_newznabs is None else extra_newznabs
+        extra_torznabs = self.EXTRA_TORZNABS if extra_torznabs is None else extra_torznabs
 
-                    t_ctrl = {"id": t_id, "provider": prov_t}
-                    t_vals = {"active": ck["active"], "lastrun": ck["lastrun"], "type": ck["type"], "hits": ck_hits}
-                    db.upsert("provider_searches", t_vals, t_ctrl)
-                p_list[prov_t] = {
-                    "id": t_id,
-                    "active": ck["active"],
-                    "lastrun": ck["lastrun"],
-                    "type": ck["type"],
-                    "hits": ck_hits,
-                }
-
-        # logger.fdebug('p_list: %s' % (p_list,))
-        for _k, v in self.PROVIDER_ORDER.items():
-            tmp_prov = v
-            if not any(p.lower() == tmp_prov.lower() for p, pv in p_list.items()):
-                write = True
-                # logger.fdebug('%s was not found in search db. Writing it..' % v)
-                if "DDL(GetComics)" in tmp_prov:
-                    t_type = "DDL"
-                    t_id = 200
-                if "DDL(External)" in tmp_prov:
-                    t_type = "DDL(External)"
-                    t_id = 201
-                elif any(["experimental" in tmp_prov, "Experimental" in tmp_prov]):
-                    tmp_prov = "experimental"
-                    t_type = "experimental"
-                    t_id = 101
-                else:
-                    nnf = False
-                    if self.EXTRA_NEWZNABS:
-                        for n in self.EXTRA_NEWZNABS:
-                            if n[0] == tmp_prov:
-                                t_type = "newznab"
-                                t_id = n[6]
-                                nnf = True
-                                break
-                    if nnf is False and self.EXTRA_TORZNABS:
-                        for n in self.EXTRA_TORZNABS:
-                            if n[0] == tmp_prov:
-                                t_type = "torznab"
-                                t_id = n[6]
-                                nnf = True
-                                break
-                ctrls = {"id": t_id, "provider": tmp_prov}
-                vals = {"active": False, "lastrun": 0, "type": t_type, "hits": 0}
-            else:
-                try:
-                    tprov = [p_list[x] for x, y in p_list.items() if x.lower() == tmp_prov.lower()][0]
-                except Exception:
-                    tprov = None
-
-                if tprov:
-                    if tmp_prov == "Experimental":
-                        # needed to ensure the type is set properly for this provider
-                        ptype = tprov["type"]
-                        if tmp_prov == "Experimental":
-                            stmt = delete(provider_searches).where(provider_searches.c.id == 101)
-                            with db.get_engine().begin() as conn:
-                                conn.execute(stmt)
-                            tmp_prov = "experimental"
-                        ctrls = {"id": tprov["id"], "provider": tmp_prov}
-                        vals = {
-                            "active": tprov["active"],
-                            "lastrun": tprov["lastrun"],
-                            "type": ptype,
-                            "hits": tprov["hits"],
+        with db.get_engine().begin() as conn:
+            rows = [dict(row._mapping) for row in conn.execute(select(provider_searches))]
+            existing = {}
+            existing_by_id = {}
+            for row in rows:
+                hits = row["hits"] or 0
+                provider = row["provider"]
+                provider_id = row["id"]
+                provider_type = row["type"]
+                if provider_id in (0, None):
+                    try:
+                        canonical, provider_type, provider_id = self._provider_search_identity(
+                            provider,
+                            extra_newznabs,
+                            extra_torznabs,
+                        )
+                    except ValueError:
+                        existing[provider.lower()] = {
+                            "id": provider_id,
+                            "provider": provider,
+                            "active": row["active"],
+                            "lastrun": row["lastrun"],
+                            "type": provider_type,
+                            "hits": hits,
                         }
-                        write = True
+                        if provider_id not in (0, None):
+                            existing_by_id[provider_id] = existing[provider.lower()]
+                        continue
+                    conn.execute(
+                        update(provider_searches)
+                        .where(provider_searches.c.provider == row["provider"])
+                        .values(id=provider_id, provider=canonical, type=provider_type, hits=hits)
+                    )
+                    provider = canonical
+                existing[provider.lower()] = {
+                    "id": provider_id,
+                    "provider": provider,
+                    "active": row["active"],
+                    "lastrun": row["lastrun"],
+                    "type": provider_type,
+                    "hits": hits,
+                }
+                if provider_id not in (0, None):
+                    existing_by_id[provider_id] = existing[provider.lower()]
 
-            if write is True:
-                logger.fdebug("writing: keys - %s: vals - %s" % (vals, ctrls))
-                db.upsert("provider_searches", vals, ctrls)
+            for provider in provider_order.values():
+                try:
+                    canonical, provider_type, provider_id = self._provider_search_identity(
+                        provider,
+                        extra_newznabs,
+                        extra_torznabs,
+                    )
+                except ValueError:
+                    if provider.lower() in {"32p", "public torrents"}:
+                        # Legacy torrent providers do not use provider_searches.
+                        continue
+                    raise
+                current = existing.get(canonical.lower())
+                if current:
+                    if current["id"] != provider_id or current["type"] != provider_type:
+                        previous_id = current["id"]
+                        conn.execute(
+                            update(provider_searches)
+                            .where(provider_searches.c.provider == current["provider"])
+                            .values(id=provider_id, provider=canonical, type=provider_type)
+                        )
+                        existing_by_id.pop(previous_id, None)
+                        current.update({"id": provider_id, "provider": canonical, "type": provider_type})
+                        existing_by_id[provider_id] = current
+                    continue
+                controls = {"id": provider_id, "provider": canonical}
+                values = {"active": False, "lastrun": 0, "type": provider_type, "hits": 0}
+                logger.fdebug("writing: keys - %s: vals - %s" % (values, controls))
+                id_collision = existing_by_id.get(provider_id)
+                if id_collision:
+                    conn.execute(
+                        update(provider_searches)
+                        .where(provider_searches.c.id == provider_id)
+                        .values(provider=canonical, **values)
+                    )
+                    existing.pop(id_collision["provider"].lower(), None)
+                    current = {"id": provider_id, "provider": canonical, **values}
+                    existing[canonical.lower()] = current
+                    existing_by_id[provider_id] = current
+                else:
+                    db.upsert_conn(conn, "provider_searches", values, controls)
 
 
 def get_manga_destination():
