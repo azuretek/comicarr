@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 
 from fastapi import Request
 
+from comicarr.app.core.workers import BackgroundWorkerRegistry
+
 
 @dataclass
 class AppContext:
@@ -93,6 +95,7 @@ class AppContext:
     ddl_pool: object = None
     mass_add_pool: object = None
     mass_refresh_pool: object = None
+    background_workers: object = field(default_factory=BackgroundWorkerRegistry)
 
     # SSE
     event_bus: object = None  # EventBus instance

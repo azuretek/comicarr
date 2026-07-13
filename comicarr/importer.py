@@ -51,6 +51,7 @@ from comicarr import (
     series_metadata,
     updater,
 )
+from comicarr.app.core.workers import start_background_thread
 from comicarr.tables import annuals, comics, issues
 
 
@@ -993,7 +994,11 @@ def addComictoDB(
                             logger.fdebug("Status of : " + str(result["Status"]))
                             search_list.append(result["IssueID"])
                         if len(search_list) > 0:
-                            threading.Thread(target=search.searchIssueIDList, args=[search_list]).start()
+                            start_background_thread(
+                                search.searchIssueIDList,
+                                args=(search_list,),
+                                name="ImportWantedSearch",
+                            )
                     else:
                         logger.info("No issues marked as wanted for " + comic["ComicName"])
 
