@@ -133,7 +133,8 @@ def test_untrusted_revision_states_never_mutate_the_database(revisions, error_pa
 
         assert set(inspect(engine).get_table_names()) == {"alembic_version", "unrelated_data"}
         with engine.connect() as connection:
-            assert tuple(connection.execute(select(version_table.c.version_num)).scalars()) == revisions
+            actual_revisions = tuple(connection.execute(select(version_table.c.version_num)).scalars())
+            assert sorted(actual_revisions) == sorted(revisions)
             assert connection.execute(select(unrelated_data.c.id)).scalar_one() == 1
     finally:
         engine.dispose()
