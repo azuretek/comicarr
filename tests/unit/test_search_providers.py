@@ -111,6 +111,13 @@ def test_provider_search_exception_logs_redact_credentials(provider_count, monke
 
     monkeypatch.setattr(search, "search_the_matrix", fail_search)
     monkeypatch.setattr(search, "get_search_executor", lambda: executor)
+
+    def submit_background_future(executor, target, *, args=(), kwargs=None, name=None):
+        return executor.submit(target, *args, **(kwargs or {}))
+
+    # Main now routes provider work through the shutdown-owned registry. Keep
+    # this unit test focused on redaction by injecting its local executor.
+    monkeypatch.setattr(search, "submit_background_future", submit_background_future, raising=False)
     monkeypatch.setattr(
         search.logger, "warn", lambda message, *args: messages.append(message % args if args else message)
     )
