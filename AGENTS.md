@@ -18,7 +18,7 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 | Install (backend) | `uv sync` |
 | Install (dev) | `uv sync --extra dev` |
 | Validate dependency lock | `uv lock --check` |
-| Refresh pip compatibility export | `uv export --locked --no-dev --no-hashes --no-emit-project --output-file requirements.txt` |
+| Install with pip (unlocked) | `pip install .` |
 | Install (frontend) | `cd frontend && npm ci` |
 | Run app | `python3 Comicarr.py --nolaunch` |
 | Dev frontend | `cd frontend && npm run dev` |
@@ -36,6 +36,8 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 | Lint fix all | `npm run lint:fix` |
 | Install git hooks | `pre-commit install` (after `uv sync --extra dev`) |
 | Run hooks on tree | `pre-commit run --all-files` |
+| Add dependency | `uv add <package>` |
+| Add dev dep | `uv add --optional dev <package>` |
 
 When using Vite (`npm run dev`) with a separate backend process, the proxy targets `http://localhost:8090`. Override with `VITE_API_PROXY_TARGET` if needed.
 
