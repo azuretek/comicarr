@@ -28,7 +28,7 @@ cffi==2.0.0 ; platform_python_implementation != 'PyPy'
     # via cryptography
 cfscrape==2.1.1
     # via comicarr
-charset-normalizer==3.4.4
+charset-normalizer==3.4.9
     # via requests
 click==8.3.1
     # via uvicorn
