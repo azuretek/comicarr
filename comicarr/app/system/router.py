@@ -209,6 +209,9 @@ async def update_providers(request: Request, ctx: AppContext = Depends(get_conte
     """Update Newznab/Torznab provider configuration."""
     body = await request.json()
     result = await asyncio.to_thread(system_service.update_providers, ctx, body)
+    if not result["success"]:
+        status_code = 500 if result.get("error") == system_service.PROVIDER_CONFIG_PERSISTENCE_ERROR else 400
+        return JSONResponse(status_code=status_code, content=result)
     return result
 
 

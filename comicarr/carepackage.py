@@ -14,6 +14,7 @@ from glob import glob
 import comicarr
 from comicarr import config as config_module
 from comicarr import encrypted, logger, versioncheck
+from comicarr.app.common.redaction import redact_sensitive_text
 
 _LEGACY_32P_CREDENTIAL_LINE_PATTERN = re.compile(
     r"\buid\s*:\s*[^/\r\n]+\s*/\s*authkey\s*:\s*[^/\r\n]+\s*/\s*passkey\s*:\s*\S+",
@@ -246,74 +247,62 @@ class carePackage(object):
             except (configparser.NoSectionError, configparser.NoOptionError):
                 pass
 
-        extra_newznabs = list(zip(*[iter(tmpconfig.get("Newznab", "extra_newznabs").split(", "))] * 7, strict=False))
-        extra_torznabs = list(zip(*[iter(tmpconfig.get("Torznab", "extra_torznabs").split(", "))] * 7, strict=False))
-        cleaned_newznabs = []
-        cleaned_torznabs = []
-        for ens in extra_newznabs:
-            n_host = None
-            n_uid = None
-            n_api = None
-            if ens[1] is not None:
-                n_host = "xXX[REMOVED]XXx"
-            if ens[3] is not None:
-                nzkey = ens[3]
-                if nzkey[:5] == "^~$z$":
-                    nz = encrypted.Encryptor(nzkey)
-                    nz_stat = nz.decrypt_it()
-                    if nz_stat["status"] is True:
-                        nzkey = nz_stat["password"]
-                if nzkey not in self.keylist:
-                    self.keylist.append(nzkey)
-                n_api = "xXX[REMOVED]XXx"
-            if ens[4] is not None:
-                n_uid = "xXX[REMOVED]XXx"
-            newnewzline = (ens[0], n_host, ens[2], n_api, n_uid, ens[5], ens[6])
-            cleaned_newznabs.append(newnewzline)
+        config_version = tmpconfig.getint("General", "config_version", fallback=15)
+        secure_dir = tmpconfig.get(
+            "General",
+            "secure_dir",
+            fallback=None,
+        )
+        if secure_dir in (None, "", "None"):
+            secure_dir = os.path.join(comicarr.DATA_DIR, ".secure")
+        for section, option in (("Newznab", "extra_newznabs"), ("Torznab", "extra_torznabs")):
+            try:
+                entries = config_module.parse_provider_extras(
+                    tmpconfig.get(section, option),
+                    config_version=config_version,
+                )
+            except (configparser.NoSectionError, configparser.NoOptionError, ValueError):
+                if not tmpconfig.has_section(section):
+                    tmpconfig.add_section(section)
+                tmpconfig.set(section, option, "xXX[REMOVED]XXx")
+                continue
 
-        for ets in extra_torznabs:
-            n_host = None
-            n_uid = None
-            n_api = None
-            if ets[1] is not None:
-                n_host = "xXX[REMOVED]XXx"
-            if ets[3] is not None:
-                tzkey = ets[3]
-                if tzkey[:5] == "^~$z$":
-                    tz = encrypted.Encryptor(tzkey)
-                    tz_stat = tz.decrypt_it()
-                    if tz_stat["status"] is True:
-                        tzkey = tz_stat["password"]
-                if tzkey not in self.keylist:
-                    self.keylist.append(tzkey)
-                n_api = "xXX[REMOVED]XXx"
-            if ets[4] is not None:
-                n_uid = "xXX[REMOVED]XXx"
-            newtorline = (ets[0], n_host, ets[2], n_api, ets[4], ets[5], ets[6])
-            cleaned_torznabs.append(newtorline)
+            cleaned_entries = []
+            for entry in entries:
+                cleaned = list(entry)
+                host = cleaned[1]
+                if host not in (None, "", "None") and host not in self.keylist:
+                    self.keylist.append(host)
+                cleaned[1] = "xXX[REMOVED]XXx"
 
-        tmpconfig.set("Newznab", "extra_newznabs", ", ".join(self.write_extras(cleaned_newznabs)))
-        tmpconfig.set("Torznab", "extra_torznabs", ", ".join(self.write_extras(cleaned_torznabs)))
+                stored_key = cleaned[3]
+                if stored_key not in (None, "", "None"):
+                    if stored_key not in self.keylist:
+                        self.keylist.append(stored_key)
+                    try:
+                        runtime_key, _token, _migration = config_module.decrypt_provider_credential(
+                            stored_key,
+                            secure_dir,
+                        )
+                    except ValueError:
+                        runtime_key = None
+                    if runtime_key not in (None, "", "None") and runtime_key not in self.keylist:
+                        self.keylist.append(runtime_key)
+                    cleaned[3] = "xXX[REMOVED]XXx"
+
+                if section == "Newznab" and cleaned[4] not in (None, "", "None"):
+                    if cleaned[4] not in self.keylist:
+                        self.keylist.append(cleaned[4])
+                    cleaned[4] = "xXX[REMOVED]XXx"
+                cleaned_entries.append(tuple(cleaned))
+
+            tmpconfig.set(section, option, config_module.serialize_provider_extras(cleaned_entries))
         try:
             with codecs.open(self.cleanpath, encoding="utf8", mode="w+") as tmp_configfile:
                 tmpconfig.write(tmp_configfile)
             logger.fdebug("Configuration cleaned of keys/passwords and written to temporary location.")
         except IOError as e:
             logger.warn("Error writing configuration file: %s" % e)
-
-    def write_extras(self, value):
-        flattened = []
-        for item in value:
-            for i in item:
-                try:
-                    if '"' in i and ' "' in i:
-                        ib = str(i).replace('"', "").strip()
-                    else:
-                        ib = i
-                except:
-                    ib = i
-                flattened.append(str(ib))
-        return flattened
 
     def panicbutton(self):
         self._collect_runtime_secrets()
@@ -357,6 +346,7 @@ class carePackage(object):
                                     "uid:-REDACTED- / authkey:-REDACTED- / passkey:-REDACTED-", line
                                 )
                                 cnt += structured_redactions
+                                line = redact_sensitive_text(line, redaction_keys)
                                 for keyed in redaction_keys:
                                     if keyed in line:
                                         cnt += 1
