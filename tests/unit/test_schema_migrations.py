@@ -10,7 +10,7 @@
 """Contract tests for the application-owned Alembic migration runner."""
 
 import pytest
-from sqlalchemy import Text, create_engine, inspect, text
+from sqlalchemy import Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.dialects import mysql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.schema import CreateTable
@@ -19,6 +19,7 @@ import comicarr
 from comicarr.app.core.schema import (
     DatabaseState,
     MigrationStateError,
+    autogenerate_include_object,
     classify_database,
     current_revision,
     upgrade_database,
@@ -30,6 +31,33 @@ def test_classifier_identifies_a_fresh_database(tmp_path):
     engine = create_engine("sqlite:///%s" % (tmp_path / "fresh.db"))
 
     assert classify_database(engine) is DatabaseState.FRESH
+
+
+def test_autogenerate_only_equates_full_same_order_unique_indexes(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "unique-index-equivalence.db"))
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE comics (ComicID TEXT)"))
+        conn.execute(text("CREATE UNIQUE INDEX uq_comics_comicid ON comics (ComicID) WHERE ComicID IS NOT NULL"))
+        conn.execute(text("CREATE TABLE snatched (IssueID TEXT, Status TEXT, Provider TEXT)"))
+        conn.execute(text("CREATE UNIQUE INDEX uq_snatched_reversed ON snatched (Provider, Status, IssueID)"))
+
+    comic_id_unique = next(constraint for constraint in comics.constraints if isinstance(constraint, UniqueConstraint))
+    snatched_unique = next(
+        constraint for constraint in metadata.tables["snatched"].constraints if isinstance(constraint, UniqueConstraint)
+    )
+    with engine.connect() as connection:
+        include_object = autogenerate_include_object(connection)
+        assert include_object(comics, "comics", "table", False, None)
+        assert include_object(comic_id_unique, comic_id_unique.name, "unique_constraint", False, None)
+        assert include_object(snatched_unique, snatched_unique.name, "unique_constraint", False, None)
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX uq_comics_comicid"))
+        conn.execute(text("CREATE UNIQUE INDEX uq_comics_comicid ON comics (ComicID)"))
+
+    with engine.connect() as connection:
+        include_object = autogenerate_include_object(connection)
+        assert not include_object(comic_id_unique, comic_id_unique.name, "unique_constraint", False, None)
 
 
 def test_schema_diagnostic_errors_redact_connection_credentials():
@@ -72,11 +100,104 @@ def test_classifier_identifies_a_known_unversioned_comicarr_database(tmp_path):
 
 def test_classifier_identifies_a_versioned_database(tmp_path):
     engine = create_engine("sqlite:///%s" % (tmp_path / "versioned.db"))
+    metadata.create_all(engine)
     with engine.begin() as conn:
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
         conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0001_baseline')"))
 
     assert classify_database(engine) is DatabaseState.VERSIONED
+
+
+def test_classifier_rejects_an_empty_alembic_version_table(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "empty-version.db"))
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE unrelated_data (id INTEGER PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+
+    with pytest.raises(MigrationStateError, match="version table is empty"):
+        upgrade_database(engine)
+
+    assert set(inspect(engine).get_table_names()) == {"alembic_version", "unrelated_data"}
+
+
+@pytest.mark.parametrize("revision", ["not_comicarr", "0001"])
+def test_classifier_rejects_an_unknown_or_partial_alembic_revision(tmp_path, revision):
+    engine = create_engine("sqlite:///%s" % (tmp_path / ("untrusted-version-%s.db" % revision)))
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE unrelated_data (id INTEGER PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES (:revision)"), {"revision": revision})
+
+    with pytest.raises(MigrationStateError, match="unknown Comicarr revision"):
+        upgrade_database(engine)
+
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == revision
+    assert set(inspect(engine).get_table_names()) == {"alembic_version", "unrelated_data"}
+
+
+def test_classifier_rejects_multiple_alembic_revisions(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "multiple-versions.db"))
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(
+            text("INSERT INTO alembic_version(version_num) VALUES ('0001_baseline'), ('0002_legacy_adoption')")
+        )
+
+    with pytest.raises(MigrationStateError, match="exactly one revision"):
+        upgrade_database(engine)
+
+    with engine.connect() as conn:
+        assert set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) == {
+            "0001_baseline",
+            "0002_legacy_adoption",
+        }
+
+
+def test_classifier_rejects_a_known_revision_without_comicarr_provenance(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "spoofed-version.db"))
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE unrelated_data (id INTEGER PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0001_baseline')"))
+
+    with pytest.raises(MigrationStateError, match="versioned database is not a recognized Comicarr database"):
+        upgrade_database(engine)
+
+    assert set(inspect(engine).get_table_names()) == {"alembic_version", "unrelated_data"}
+
+
+def test_classifier_rejects_a_known_revision_with_only_the_minimum_legacy_fingerprint(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "minimally-shaped-spoof.db"))
+    for table_name in ("comics", "issues", "annuals", "mylar_info"):
+        metadata.tables[table_name].create(engine)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0001_baseline')"))
+
+    with pytest.raises(MigrationStateError, match="missing tables required by its Comicarr revision"):
+        upgrade_database(engine)
+
+    assert set(inspect(engine).get_table_names()) == {
+        "alembic_version",
+        "annuals",
+        "comics",
+        "issues",
+        "mylar_info",
+    }
+
+
+def test_upgrade_database_accepts_a_known_prior_comicarr_revision(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "prior-version.db"))
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0001_baseline')"))
+
+    assert upgrade_database(engine) == "0002_legacy_adoption"
+    assert current_revision(engine) == "0002_legacy_adoption"
 
 
 def test_classifier_refuses_to_adopt_an_unknown_nonempty_database(tmp_path):

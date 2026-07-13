@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 
 from fastapi import Request
 
+from comicarr.app.core.workers import BackgroundWorkerRegistry
+
 
 @dataclass
 class AppContext:
@@ -58,6 +60,7 @@ class AppContext:
     data_dir: str = ""
     db_file: str = ""
     config: object = None  # comicarr.config.Config instance
+    jwt_secure_dir: str = None
 
     # Scheduler
     scheduler: object = None  # BackgroundScheduler
@@ -92,6 +95,7 @@ class AppContext:
     ddl_pool: object = None
     mass_add_pool: object = None
     mass_refresh_pool: object = None
+    background_workers: object = field(default_factory=BackgroundWorkerRegistry)
 
     # SSE
     event_bus: object = None  # EventBus instance
@@ -145,7 +149,8 @@ class AppContext:
     sse_key: str = None
     setup_token: str = None
 
-    # JWT
+    # JWT signing authority. The secure directory is immutable after init;
+    # the active key is rotated under ``runtime_lock``.
     jwt_secret_key: bytes = None
     jwt_generation: int = 0
 

@@ -18,15 +18,17 @@ import asyncio
 import json
 import threading
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
+from comicarr import logger
 from comicarr.app.core.context import AppContext, get_context
 from comicarr.app.core.security import (
     COOKIE_NAME,
     create_session_token,
     require_session,
+    rotate_runtime_jwt_key,
     validate_jwt_token,
 )
 from comicarr.app.system import service as system_service
@@ -69,7 +71,10 @@ async def login(request: Request, ctx: AppContext = Depends(get_context)):
 
     # Issue JWT cookie
     login_timeout = getattr(ctx.config, "LOGIN_TIMEOUT", 43800) if ctx.config else 43800
-    token = create_session_token(username, ctx.jwt_secret_key, ctx.jwt_generation, login_timeout)
+    # Serialize issuance with logout rotation so a successful login can never
+    # return a token signed by the just-revoked key.
+    with ctx.runtime_lock:
+        token = create_session_token(username, ctx.jwt_secret_key, ctx.jwt_generation, login_timeout)
 
     enable_https = getattr(ctx.config, "ENABLE_HTTPS", False) if ctx.config else False
     response = JSONResponse(content={"success": True, "username": username})
@@ -85,8 +90,20 @@ async def login(request: Request, ctx: AppContext = Depends(get_context)):
 
 
 @router.post("/auth/logout")
-def logout(response: Response, username: str = Depends(require_session)):
-    """Clear the JWT session cookie."""
+def logout(
+    ctx: AppContext = Depends(get_context),
+    username: str = Depends(require_session),
+):
+    """Revoke every UI session, then clear this client's JWT cookie."""
+    try:
+        rotate_runtime_jwt_key(ctx)
+    except Exception as e:
+        logger.error("[AUTH] Unable to persist logout revocation: %s" % type(e).__name__)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": "Unable to revoke active sessions"},
+        )
+
     response = JSONResponse(content={"success": True})
     response.delete_cookie(COOKIE_NAME)
     return response
@@ -209,6 +226,9 @@ async def update_providers(request: Request, ctx: AppContext = Depends(get_conte
     """Update Newznab/Torznab provider configuration."""
     body = await request.json()
     result = await asyncio.to_thread(system_service.update_providers, ctx, body)
+    if not result["success"]:
+        status_code = 500 if result.get("error") == system_service.PROVIDER_CONFIG_PERSISTENCE_ERROR else 400
+        return JSONResponse(status_code=status_code, content=result)
     return result
 
 

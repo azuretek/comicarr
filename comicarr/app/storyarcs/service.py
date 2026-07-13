@@ -17,13 +17,13 @@ import datetime
 import os
 import random
 import re
-import threading
 import time
 
 import requests
 
 import comicarr
 from comicarr import db, helpers, logger
+from comicarr.app.core.workers import start_background_thread
 from comicarr.app.storyarcs import queries as arc_queries
 from comicarr.tables import comics, issues, storyarcs
 
@@ -109,7 +109,7 @@ def want_all_issues(arc_id):
 
     # Trigger search in background if any were queued
     if queued > 0:
-        threading.Thread(target=_read_get_wanted, args=(arc_id,)).start()
+        start_background_thread(_read_get_wanted, args=(arc_id,), name="StoryArcWantedSearch")
 
     return {"success": True, "data": {"queued": queued, "skipped": skipped}}
 
@@ -120,8 +120,8 @@ def refresh_arc(arc_id):
     if arc_row is None:
         return {"success": False, "error": "Story arc not found"}
 
-    threading.Thread(
-        target=_add_story_arc,
+    start_background_thread(
+        _add_story_arc,
         kwargs={
             "arcid": arc_row["StoryArcID"],
             "cvarcid": arc_row["CV_ArcID"],
@@ -130,7 +130,8 @@ def refresh_arc(arc_id):
             "arclist": None,
             "arcrefresh": True,
         },
-    ).start()
+        name="StoryArcRefresh",
+    )
 
     return {"success": True, "message": "Refreshing %s from ComicVine" % arc_row["StoryArc"]}
 

@@ -120,6 +120,115 @@ def test_carepackage_clean_config_and_logs_redact_newer_secrets(tmp_path, monkey
         assert zip_parser.get(section, option) == "xXX[REMOVED]XXx"
 
 
+def test_carepackage_redacts_fernet_provider_extras_without_runtime_config(tmp_path, monkeypatch):
+    """Maintenance bundles decrypt 6/7-field provider keys using explicit authority."""
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    secure_dir = data_dir / ".secure"
+    data_dir.mkdir()
+    log_dir.mkdir()
+    secure_dir.mkdir()
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+
+    newznab_secret = "newznab-provider-secret"
+    torznab_secret = "torznab-provider-secret"
+    newznab_token = encrypted_module.Encryptor(newznab_secret, secure_dir=str(secure_dir)).encrypt_it()["password"]
+    torznab_token = encrypted_module.Encryptor(torznab_secret, secure_dir=str(secure_dir)).encrypt_it()["password"]
+
+    parser = configparser.ConfigParser()
+    parser["General"] = {"config_version": "15", "secure_dir": "None"}
+    parser["Logs"] = {"log_dir": str(log_dir)}
+    parser["Git"] = {"git_user": "comicarr", "git_branch": "main", "git_token": "", "git_path": ""}
+    parser["Newznab"] = {
+        "extra_newznabs": ", ".join(["Newz", "https://newz.test", "1", newznab_token, "5030", "1", "101"])
+    }
+    parser["Torznab"] = {"extra_torznabs": ", ".join(["Torz", "https://torz.test", "1", torznab_token, "5070", "1"])}
+    config_path = data_dir / "config.ini"
+    with open(config_path, "w") as config_file:
+        parser.write(config_file)
+
+    bearer_secret = "diagnostic-bearer-secret"
+    basic_secret = "diagnostic-basic-secret"
+    token_secret = "diagnostic-token-secret"
+    query_secret = "diagnostic-query-secret"
+    (log_dir / "comicarr.log").write_text(
+        "%s %s\n" % (newznab_secret, torznab_secret)
+        + "provider_list: {'newznab_info': ('Newz', 'https://newz.test', '1', '%s')}\n" % newznab_secret
+        + "Authorization: Bearer %s\n" % bearer_secret
+        + "Authorization: Basic %s\n" % basic_secret
+        + "{'Authorization': 'Token %s'}\n" % token_secret
+        + "https://torz.test/api?apikey=%s\n" % query_secret
+    )
+    (data_dir / "comicarr.db").write_text("")
+
+    monkeypatch.setattr(comicarr, "CONFIG", None)
+    monkeypatch.setattr(comicarr, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(comicarr, "PROG_DIR", str(tmp_path))
+    monkeypatch.setattr(comicarr, "KEYS_32P", {})
+
+    package = carePackage(maintenance=True)
+    package.cleaned_config()
+    clean_config = (log_dir / "clean_config.ini").read_text()
+    package.filename = str(log_dir / "ComicarrRunningEnvironment.txt")
+    package.panicfile = str(log_dir / "carepackage.zip")
+    with open(package.filename, "w") as environment_file:
+        environment_file.write("environment\n")
+    package.panicbutton()
+
+    with zipfile.ZipFile(package.panicfile, "r") as bundle:
+        redacted_log = bundle.read("comicarr.log").decode("utf-8")
+        zipped_config = bundle.read("clean_config.ini").decode("utf-8")
+
+    for secret in (
+        newznab_secret,
+        torznab_secret,
+        newznab_token,
+        torznab_token,
+        bearer_secret,
+        basic_secret,
+        token_secret,
+        query_secret,
+    ):
+        assert secret not in clean_config
+        assert secret not in zipped_config
+        assert secret not in redacted_log
+    assert "REDACTED" in redacted_log.upper()
+
+
+def test_carepackage_missing_provider_key_redacts_without_creating_replacement(tmp_path, monkeypatch):
+    """Reading diagnostics is side-effect free when Fernet authority is missing."""
+    from cryptography.fernet import Fernet
+
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    secure_dir = data_dir / ".secure"
+    data_dir.mkdir()
+    log_dir.mkdir()
+    secure_dir.mkdir()
+    token = Fernet(Fernet.generate_key()).encrypt(b"unrecoverable-secret").decode()
+    parser = configparser.ConfigParser()
+    parser["General"] = {"config_version": "15", "secure_dir": str(secure_dir)}
+    parser["Logs"] = {"log_dir": str(log_dir)}
+    parser["Git"] = {"git_user": "comicarr", "git_branch": "main", "git_token": "", "git_path": ""}
+    parser["Newznab"] = {"extra_newznabs": ", ".join(["Newz", "https://newz.test", "1", token, "5030", "1", "101"])}
+    parser["Torznab"] = {"extra_torznabs": ""}
+    with open(data_dir / "config.ini", "w") as config_file:
+        parser.write(config_file)
+
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
+    monkeypatch.setattr(encrypted_module, "_fernet_secure_dir", None)
+    monkeypatch.setattr(comicarr, "CONFIG", None)
+    monkeypatch.setattr(comicarr, "DATA_DIR", str(data_dir))
+    monkeypatch.setattr(comicarr, "PROG_DIR", str(tmp_path))
+    monkeypatch.setattr(comicarr, "KEYS_32P", {})
+
+    package = carePackage(maintenance=True)
+    package.cleaned_config()
+
+    assert token not in (log_dir / "clean_config.ini").read_text()
+    assert not (secure_dir / "master.key").exists()
+
+
 def test_encrypt_items_handles_git_token_auth_tuple(tmp_path, monkeypatch):
     """configure() rewrites GIT_TOKEN to a requests auth tuple before encrypt_items.
 
@@ -131,7 +240,7 @@ def test_encrypt_items_handles_git_token_auth_tuple(tmp_path, monkeypatch):
     config_path.write_text("")
 
     # Reset Fernet cache so master.key is loaded from this test's SECURE_DIR.
-    encrypted_module._fernet_instance = None
+    monkeypatch.setattr(encrypted_module, "_fernet_instance", None)
 
     cfg = config_module.Config(str(config_path))
     for attr_name in config_module.ENCRYPTED_CONFIG_ITEMS:
@@ -155,5 +264,3 @@ def test_encrypt_items_handles_git_token_auth_tuple(tmp_path, monkeypatch):
     assert "ghp_test_token_value" not in encrypted_token
     # Runtime auth tuple shape is unchanged (encrypt writes the parser only).
     assert cfg.GIT_TOKEN == ("ghp_test_token_value", "x-oauth-basic")
-
-    encrypted_module._fernet_instance = None
