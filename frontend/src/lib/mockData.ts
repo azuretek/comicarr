@@ -350,8 +350,8 @@ function recentDownloads() {
     ComicImage: string | null;
   }> = [];
   const sample = [COVERS[0], COVERS[1], COVERS[2], COVERS[3], COVERS[6]];
-  // `/api/downloads/queue` returns [] in mock mode, so keep the activity
-  // feed in sync: no "Snatched" entries that would imply queued work.
+  // The mock download queue is empty, so keep the activity feed in sync:
+  // no "Snatched" entries that would imply queued work.
   const actions = [
     "Downloaded",
     "Downloaded",
@@ -549,6 +549,9 @@ export function mockApiResponse(
   if (m === "GET" && url === "/api/ai/status") {
     return { configured: false };
   }
+  if (m === "GET" && url === "/api/health") {
+    return { status: "ok" };
+  }
   if (m === "GET" && url === "/api/dashboard") {
     return dashboardPayload();
   }
@@ -596,7 +599,10 @@ export function mockApiResponse(
     return [];
   }
   if (m === "GET" && url === "/api/downloads/queue") {
-    return [];
+    return {
+      queue: [],
+      pagination: { total: 0, limit: 1, offset: 0, has_more: false },
+    };
   }
   if (m === "GET" && url === "/api/config") {
     return {};
