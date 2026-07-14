@@ -44,7 +44,7 @@ test("logout clears the protected session", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("Dashboard").first()).toBeVisible();
 
-  await page.getByRole("button", { name: ADMIN_USERNAME, exact: true }).click();
+  await page.getByRole("button", { name: ADMIN_USERNAME }).click();
   await page.getByRole("menuitem", { name: "Log out", exact: true }).click();
 
   await expect(page).toHaveURL(/\/login$/);
