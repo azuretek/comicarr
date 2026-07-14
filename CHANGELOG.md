@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.7
+
+### Patch Changes
+
+- fd4af61: Show live library, API, and download queue status in the application top bar.
+
 ## 0.19.6
 
 ### Patch Changes
