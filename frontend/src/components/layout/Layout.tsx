@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useLocation } from "react-router-dom";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import AppSidebar from "@/components/layout/AppSidebar";
+import AppStatusBar from "@/components/layout/AppStatusBar";
 import { useAiStatus } from "@/hooks/useAiStatus";
 import { ActivityFeedDrawer } from "@/components/ai/ActivityFeedDrawer";
 import { ChatPanel } from "@/components/ai/ChatPanel";
@@ -68,17 +69,7 @@ export default function Layout({ children }: LayoutProps) {
         {/* Desktop omni status bar */}
         <div className="hidden md:flex h-12 items-center gap-3 border-b-[0.5px] border-border bg-card px-4 font-mono text-[11px] text-muted-foreground">
           <SidebarTrigger />
-          <span>
-            mode: <span className="text-foreground">production</span>
-          </span>
-          <span className="text-muted-foreground">·</span>
-          <span>
-            db: <span style={{ color: "var(--status-active)" }}>healthy</span>
-          </span>
-          <span className="text-muted-foreground">·</span>
-          <span>
-            queue: <span className="text-foreground">—</span>
-          </span>
+          <AppStatusBar />
           <div className="ml-auto flex items-center gap-3">
             {mock && (
               <span

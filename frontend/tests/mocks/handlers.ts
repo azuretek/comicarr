@@ -139,6 +139,15 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/health", () => HttpResponse.json({ status: "ok" })),
+
+  http.get("/api/downloads/queue", () =>
+    HttpResponse.json({
+      queue: [],
+      pagination: { total: 2, limit: 1, offset: 0, has_more: true },
+    }),
+  ),
+
   // -------------------------------------------------------------------------
   // Dashboard endpoints
   // -------------------------------------------------------------------------
