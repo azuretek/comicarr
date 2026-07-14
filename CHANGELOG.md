@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.6
+
+### Patch Changes
+
+- ac143fa: Improve the application error recovery screen with clearer guidance and reload controls.
+
 ## 0.19.5
 
 ### Patch Changes
