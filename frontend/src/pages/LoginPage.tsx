@@ -142,7 +142,7 @@ function SetupForm() {
             onBlur={() => setFocus(null)}
             disabled={isSubmitting}
             autoComplete="username"
-            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)]"
+            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
           />
         </FieldShell>
       </div>
@@ -159,7 +159,7 @@ function SetupForm() {
             onBlur={() => setFocus(null)}
             disabled={isSubmitting}
             autoComplete="new-password"
-            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)] tracking-[0.15em]"
+            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground tracking-[0.15em]"
           />
         </FieldShell>
       </div>
@@ -176,7 +176,7 @@ function SetupForm() {
             onBlur={() => setFocus(null)}
             disabled={isSubmitting}
             autoComplete="new-password"
-            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)] tracking-[0.15em]"
+            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground tracking-[0.15em]"
           />
         </FieldShell>
       </div>
@@ -193,7 +193,7 @@ function SetupForm() {
             onBlur={() => setFocus(null)}
             disabled={isSubmitting}
             autoComplete="off"
-            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)] font-mono"
+            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground font-mono"
           />
         </FieldShell>
         <p className="mt-1.5 font-mono text-[10px] text-muted-foreground leading-relaxed">
@@ -286,7 +286,7 @@ function LoginForm() {
             onBlur={() => setFocus(null)}
             disabled={isVerifying}
             autoComplete="username"
-            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)]"
+            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
           />
         </FieldShell>
       </div>
@@ -303,7 +303,7 @@ function LoginForm() {
             onBlur={() => setFocus(null)}
             disabled={isVerifying}
             autoComplete="current-password"
-            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-[var(--text-muted)] tracking-[0.15em]"
+            className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground tracking-[0.15em]"
           />
           <button
             type="button"

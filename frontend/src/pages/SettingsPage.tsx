@@ -234,7 +234,7 @@ export default function SettingsPage() {
 
         {/* Content panel */}
         <div className="overflow-auto min-w-0">
-          <div className="px-4 py-5 md:px-6 md:py-6 max-w-3xl pb-24">
+          <div className="px-4 py-5 md:px-6 md:py-6 max-w-4xl mx-auto pb-24">
             {section === "general" && <GeneralTab {...tabProps} />}
             {section === "interface" && <InterfaceTab {...tabProps} />}
             {section === "api" && <ApiTab {...apiTabProps} />}

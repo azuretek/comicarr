@@ -58,7 +58,7 @@ FastAPI domain packages live under `comicarr/app/` (e.g. `series/`, `search/`, `
 ## Framework Notes
 
 Python@3.10+|FastAPI + uvicorn, SQLAlchemy Core (not ORM), INI config via Config class
-React@19|Vite build, path alias @/ → src/, TanStack Query for data fetching, Radix UI components
+React@19|Vite build, path alias @/ → src/, TanStack Query for data fetching, Base UI components
 Tailwind@4|postcss.config.js, tailwind.config.js in frontend/
 TypeScript@strict|noUnusedLocals, noUnusedParameters enabled
 
