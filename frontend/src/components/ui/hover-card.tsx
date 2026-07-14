@@ -3,27 +3,45 @@ import { PreviewCard as HoverCardPrimitive } from "@base-ui/react/preview-card";
 
 import { cn } from "@/lib/utils";
 
+type HoverCardTiming = {
+  delay?: number;
+  closeDelay?: number;
+};
+
+const HoverCardTimingContext = React.createContext<HoverCardTiming>({});
+
 const HoverCard = ({
-  openDelay: _openDelay,
-  closeDelay: _closeDelay,
+  openDelay,
+  closeDelay,
+  children,
   ...props
 }: HoverCardPrimitive.Root.Props & {
   openDelay?: number;
   closeDelay?: number;
-}) => <HoverCardPrimitive.Root {...props} />;
+}) => (
+  <HoverCardTimingContext.Provider value={{ delay: openDelay, closeDelay }}>
+    <HoverCardPrimitive.Root {...props}>{children}</HoverCardPrimitive.Root>
+  </HoverCardTimingContext.Provider>
+);
 
 const HoverCardTrigger = React.forwardRef<
   HTMLAnchorElement,
   Omit<HoverCardPrimitive.Trigger.Props, "render"> & { asChild?: boolean }
->(({ asChild, children, ...props }, ref) => (
-  <HoverCardPrimitive.Trigger
-    ref={ref}
-    render={asChild && React.isValidElement(children) ? children : undefined}
-    {...props}
-  >
-    {asChild ? undefined : children}
-  </HoverCardPrimitive.Trigger>
-));
+>(({ asChild, children, delay, closeDelay, ...props }, ref) => {
+  const timing = React.useContext(HoverCardTimingContext);
+
+  return (
+    <HoverCardPrimitive.Trigger
+      ref={ref}
+      delay={delay ?? timing.delay}
+      closeDelay={closeDelay ?? timing.closeDelay}
+      render={asChild && React.isValidElement(children) ? children : undefined}
+      {...props}
+    >
+      {asChild ? undefined : children}
+    </HoverCardPrimitive.Trigger>
+  );
+});
 HoverCardTrigger.displayName = "HoverCardTrigger";
 
 const HoverCardContent = React.forwardRef<
@@ -58,7 +76,7 @@ const HoverCardContent = React.forwardRef<
         <HoverCardPrimitive.Popup
           ref={ref}
           className={cn(
-            "z-50 w-64 rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none transition-[opacity,transform] data-starting-style:scale-95 data-starting-style:opacity-0 data-ending-style:scale-95 data-ending-style:opacity-0 origin-[--transform-origin]",
+            "z-50 w-64 rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none transition-[opacity,transform] data-starting-style:scale-95 data-starting-style:opacity-0 data-ending-style:scale-95 data-ending-style:opacity-0 origin-(--transform-origin)",
             className,
           )}
           {...props}

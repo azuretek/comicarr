@@ -6,9 +6,19 @@ import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-const Accordion = AccordionPrimitive.Root as React.ComponentType<
-  AccordionPrimitive.Root.Props & { type?: string }
->;
+type AccordionProps = Omit<AccordionPrimitive.Root.Props, "multiple"> & {
+  type?: "single" | "multiple";
+  multiple?: boolean;
+};
+
+const Accordion = ({ type, multiple, ...props }: AccordionProps) => (
+  <AccordionPrimitive.Root
+    multiple={
+      multiple ?? (type === undefined ? undefined : type === "multiple")
+    }
+    {...props}
+  />
+);
 
 const AccordionItem = React.forwardRef<
   HTMLDivElement,
@@ -48,7 +58,7 @@ const AccordionContent = React.forwardRef<
 >(({ className, children, ...props }, ref) => (
   <AccordionPrimitive.Panel
     ref={ref}
-    className="overflow-hidden text-sm transition-[height] data-starting-style:h-0 data-ending-style:h-0"
+    className="overflow-hidden text-sm transition-[height] data-starting-style:h-0 data-ending-style:h-0 data-open:h-(--accordion-panel-height)"
     {...props}
   >
     <div className={cn("pb-4 pt-0", className)}>{children}</div>

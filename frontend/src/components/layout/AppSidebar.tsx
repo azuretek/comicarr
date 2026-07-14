@@ -251,7 +251,7 @@ export default function AppSidebar() {
                       <div className="grid flex-1 text-left text-sm leading-tight">
                         <span className="truncate font-medium">{username}</span>
                         <span className="truncate text-xs text-muted-foreground">
-                          admin · ready
+                          {theme === "light" ? "light" : "dark"} mode
                         </span>
                       </div>
                     </div>

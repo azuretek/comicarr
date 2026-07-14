@@ -14,10 +14,21 @@ type CheckboxProps = Omit<
 };
 
 const Checkbox = React.forwardRef<HTMLButtonElement, CheckboxProps>(
-  ({ className, checked, onCheckedChange, onChange, ...props }, ref) => (
+  (
+    {
+      className,
+      checked,
+      indeterminate: indeterminateProp,
+      onCheckedChange,
+      onChange,
+      ...props
+    },
+    ref,
+  ) => (
     <CheckboxPrimitive.Root
       ref={ref}
       checked={checked === "indeterminate" ? false : checked}
+      indeterminate={checked === "indeterminate" || indeterminateProp}
       onCheckedChange={(value) => onCheckedChange?.(value === true)}
       onClick={onChange}
       className={cn(

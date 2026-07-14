@@ -8,7 +8,7 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 - **FastAPI + uvicorn** — `Comicarr.py` runs `uvicorn.run("comicarr.app.main:app", ...)`
 - **SQLAlchemy Core** (not ORM), INI config via `comicarr.config.Config`
 - **urllib3>=2.7.0**
-- **React 19 + Vite** frontend; production assets served from `frontend/dist`
+- **React 19 + Vite + Base UI** frontend; production assets served from `frontend/dist`
 - Default HTTP port: **8090**
 
 ## Commands

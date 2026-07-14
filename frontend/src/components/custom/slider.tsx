@@ -33,7 +33,7 @@ function Slider({
             <React.Fragment key={index}>
               <SliderPrimitive.Thumb
                 index={index}
-                className="border-primary bg-background focus-visible:border-ring focus-visible:ring-ring/50 block h-4 w-4 rounded-full border-2 transition-all outline-none focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50"
+                className="border-primary bg-background focus-visible:border-ring focus-visible:ring-ring/50 block h-4 w-4 rounded-full border-2 transition-all outline-hidden focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-50"
               />
             </React.Fragment>
           ))}

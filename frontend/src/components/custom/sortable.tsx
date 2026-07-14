@@ -276,6 +276,8 @@ function SortableItem({
   asChild,
   className,
   ref,
+  children,
+  render,
   ...props
 }: SortableItemProps & { ref?: React.Ref<HTMLDivElement> }) {
   const {
@@ -305,10 +307,10 @@ function SortableItem({
     <SortableItemContext.Provider value={context}>
       {useRender({
         defaultTagName: "div",
-        render: asChild ? (props.children as React.ReactElement) : props.render,
+        render: asChild ? (children as React.ReactElement) : render,
         props: {
           ...props,
-          children: asChild ? undefined : props.children,
+          ...(asChild ? {} : { children }),
           "data-state": isDragging ? "dragging" : undefined,
           className: cn(
             "data-[state=dragging]:cursor-grabbing",
