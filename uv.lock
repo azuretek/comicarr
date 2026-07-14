@@ -375,7 +375,7 @@ wheels = [
 
 [[package]]
 name = "comicarr"
-version = "0.19.6"
+version = "0.19.7"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
