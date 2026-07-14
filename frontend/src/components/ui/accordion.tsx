@@ -6,7 +6,9 @@ import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-const Accordion = AccordionPrimitive.Root;
+const Accordion = AccordionPrimitive.Root as React.ComponentType<
+  AccordionPrimitive.Root.Props & { type?: string }
+>;
 
 const AccordionItem = React.forwardRef<
   HTMLDivElement,

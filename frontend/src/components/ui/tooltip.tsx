@@ -7,31 +7,38 @@ import { cn } from "@/lib/utils";
 
 const TooltipProvider = ({
   delayDuration,
+  disableHoverableContent: _disableHoverableContent,
   ...props
-}: TooltipPrimitive.Provider.Props & { delayDuration?: number }) => (
-  <TooltipPrimitive.Provider delay={delayDuration} {...props} />
-);
+}: TooltipPrimitive.Provider.Props & {
+  delayDuration?: number;
+  disableHoverableContent?: boolean;
+}) => <TooltipPrimitive.Provider delay={delayDuration} {...props} />;
 
 type LegacyTooltipProps = TooltipPrimitive.Root.Props<unknown> & {
   openDelay?: number;
   closeDelay?: number;
+  delayDuration?: number;
 };
 
 const Tooltip = ({
   openDelay: _openDelay,
   closeDelay: _closeDelay,
+  delayDuration: _delayDuration,
   ...props
 }: LegacyTooltipProps) => <TooltipPrimitive.Root {...props} />;
 
-type TooltipTriggerProps = TooltipPrimitive.Trigger.Props<unknown> & {
+type TooltipTriggerProps = Omit<
+  TooltipPrimitive.Trigger.Props<unknown>,
+  "render"
+> & {
   asChild?: boolean;
 };
 
-const TooltipTrigger = React.forwardRef<HTMLElement, TooltipTriggerProps>(
+const TooltipTrigger = React.forwardRef<HTMLButtonElement, TooltipTriggerProps>(
   ({ asChild, children, ...props }, ref) => (
     <TooltipPrimitive.Trigger
       ref={ref}
-      render={asChild ? children : undefined}
+      render={asChild && React.isValidElement(children) ? children : undefined}
       {...props}
     >
       {asChild ? undefined : children}

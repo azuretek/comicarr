@@ -96,17 +96,17 @@ vi.stubGlobal(
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
     dispatchEvent: vi.fn(),
-  }))
+  })),
 );
 
 // Mock ResizeObserver
 vi.stubGlobal(
   "ResizeObserver",
-  vi.fn().mockImplementation(() => ({
-    observe: vi.fn(),
-    unobserve: vi.fn(),
-    disconnect: vi.fn(),
-  }))
+  class ResizeObserver {
+    observe = vi.fn();
+    unobserve = vi.fn();
+    disconnect = vi.fn();
+  },
 );
 
 // Mock IntersectionObserver
@@ -119,7 +119,7 @@ vi.stubGlobal(
     root: null,
     rootMargin: "",
     thresholds: [],
-  }))
+  })),
 );
 
 // =============================================================================

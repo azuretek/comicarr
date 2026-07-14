@@ -6,7 +6,24 @@ import { Check, ChevronDown, ChevronUp } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-const Select = SelectPrimitive.Root;
+type LegacySelectProps = Omit<
+  SelectPrimitive.Root.Props<string>,
+  "onValueChange"
+> & {
+  type?: string;
+  onValueChange?: (value: string) => void;
+};
+
+const Select = ({
+  type: _type,
+  onValueChange,
+  ...props
+}: LegacySelectProps) => (
+  <SelectPrimitive.Root
+    {...props}
+    onValueChange={(value) => onValueChange?.(value ?? "")}
+  />
+);
 
 const SelectGroup = SelectPrimitive.Group;
 

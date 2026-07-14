@@ -10,7 +10,19 @@ const Sheet = SheetPrimitive.Root;
 
 const SheetTrigger = SheetPrimitive.Trigger;
 
-const SheetClose = SheetPrimitive.Close;
+const SheetClose = React.forwardRef<
+  HTMLButtonElement,
+  Omit<SheetPrimitive.Close.Props, "render"> & { asChild?: boolean }
+>(({ asChild, children, ...props }, ref) => (
+  <SheetPrimitive.Close
+    ref={ref}
+    render={asChild && React.isValidElement(children) ? children : undefined}
+    {...props}
+  >
+    {asChild ? undefined : children}
+  </SheetPrimitive.Close>
+));
+SheetClose.displayName = "SheetClose";
 
 const SheetPortal = SheetPrimitive.Portal;
 

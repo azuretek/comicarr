@@ -3,9 +3,28 @@ import { PreviewCard as HoverCardPrimitive } from "@base-ui/react/preview-card";
 
 import { cn } from "@/lib/utils";
 
-const HoverCard = HoverCardPrimitive.Root;
+const HoverCard = ({
+  openDelay: _openDelay,
+  closeDelay: _closeDelay,
+  ...props
+}: HoverCardPrimitive.Root.Props & {
+  openDelay?: number;
+  closeDelay?: number;
+}) => <HoverCardPrimitive.Root {...props} />;
 
-const HoverCardTrigger = HoverCardPrimitive.Trigger;
+const HoverCardTrigger = React.forwardRef<
+  HTMLAnchorElement,
+  Omit<HoverCardPrimitive.Trigger.Props, "render"> & { asChild?: boolean }
+>(({ asChild, children, ...props }, ref) => (
+  <HoverCardPrimitive.Trigger
+    ref={ref}
+    render={asChild && React.isValidElement(children) ? children : undefined}
+    {...props}
+  >
+    {asChild ? undefined : children}
+  </HoverCardPrimitive.Trigger>
+));
+HoverCardTrigger.displayName = "HoverCardTrigger";
 
 const HoverCardContent = React.forwardRef<
   HTMLDivElement,

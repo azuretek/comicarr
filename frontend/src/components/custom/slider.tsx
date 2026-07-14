@@ -4,7 +4,13 @@ import { cn } from "@/lib/utils";
 import { Slider as SliderPrimitive } from "@base-ui/react/slider";
 import * as React from "react";
 
-function Slider({ className, ...props }: SliderPrimitive.Root.Props) {
+function Slider({
+  className,
+  onValueChange,
+  ...props
+}: Omit<SliderPrimitive.Root.Props, "onValueChange"> & {
+  onValueChange?: (value: number[]) => void;
+}) {
   const value = props.value ?? props.defaultValue ?? props.min ?? 0;
   const thumbCount = Array.isArray(value) ? value.length : 1;
 
@@ -16,6 +22,9 @@ function Slider({ className, ...props }: SliderPrimitive.Root.Props) {
         className,
       )}
       {...props}
+      onValueChange={(value) =>
+        onValueChange?.(typeof value === "number" ? [value] : [...value])
+      }
     >
       <SliderPrimitive.Control className="relative flex w-full touch-none items-center select-none">
         <SliderPrimitive.Track className="bg-secondary relative h-2 w-full grow overflow-hidden rounded-full">
