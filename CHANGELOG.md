@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.8
+
+### Patch Changes
+
+- b56f7dc: Restore manga covers and chapter rows when adding MAL series, and fix library inbox matching so scanned manga files can be processed.
+
 ## 0.19.7
 
 ### Patch Changes
