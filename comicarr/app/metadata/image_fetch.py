@@ -42,22 +42,33 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MiB
 _CHUNK_SIZE = 64 * 1024
 
 
-def is_allowed_image_url(url):
-    """Return True if url is http(s), no userinfo, and host is allowlisted."""
+def normalize_allowed_image_url(url):
+    """Return a normalized allowlisted image URL, or None when unsafe."""
     if not url or not isinstance(url, str):
-        return False
+        return None
     try:
         parsed = urlparse(url)
     except Exception as e:
         logger.fdebug("[METADATA-artwork] Invalid URL parse: %s" % e)
-        return False
+        return None
     if parsed.scheme not in ("http", "https"):
-        return False
+        return None
     if parsed.username or parsed.password:
-        return False
+        return None
     if not parsed.hostname:
-        return False
-    return parsed.hostname in ALLOWED_IMAGE_DOMAINS
+        return None
+    if parsed.hostname not in ALLOWED_IMAGE_DOMAINS:
+        return None
+
+    if parsed.hostname == "myanimelist.net" and parsed.path.startswith("/images/"):
+        return parsed._replace(scheme="https", netloc="cdn.myanimelist.net").geturl()
+
+    return url
+
+
+def is_allowed_image_url(url):
+    """Return True if url is http(s), no userinfo, and host is allowlisted."""
+    return normalize_allowed_image_url(url) is not None
 
 
 def fetch_allowed_image(url):
@@ -66,13 +77,14 @@ def fetch_allowed_image(url):
     Returns (content_bytes, content_type) or None on any failure.
     Streams the body and aborts once MAX_IMAGE_BYTES would be exceeded.
     """
-    if not is_allowed_image_url(url):
+    request_url = normalize_allowed_image_url(url)
+    if request_url is None:
         logger.fdebug("[METADATA-artwork] Rejected non-allowlisted image URL: %s" % url)
         return None
 
     try:
         resp = requests.get(
-            url,
+            request_url,
             timeout=(5, 10),
             headers={"User-Agent": "Comicarr/1.0"},
             allow_redirects=False,
