@@ -2408,9 +2408,9 @@ def validateAndCreateDirectory(dir, create=False, module=None, dmode=None):
             logger.info("%s Found %s directory: %s" % (module, dirmode, dir))
             return True
         else:
-            logger.warn("%s Could not find %s directory: %s" % (module, dirmode, dir))
             if create:
                 if dir.strip():
+                    logger.info("%s %s directory does not exist yet: %s" % (module, dirmode.capitalize(), dir))
                     logger.info(
                         "%s Creating %s directory (%s) : %s" % (module, dirmode, comicarr.CONFIG.CHMOD_DIR, dir)
                     )
@@ -2438,6 +2438,8 @@ def validateAndCreateDirectory(dir, create=False, module=None, dmode=None):
                 else:
                     logger.warn("%s Provided directory [%s] is blank. Aborting." % (module, dir))
                     return False
+            else:
+                logger.warn("%s Could not find %s directory: %s" % (module, dirmode, dir))
     except OSError as e:
         logger.warn("%s Could not create directory: %s [%s]. Aborting." % (module, dir, e))
         return False
