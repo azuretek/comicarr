@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.9
+
+### Patch Changes
+
+- ad8a35a: Restore legacy MyAnimeList manga covers by normalizing provider image URLs to the MAL CDN.
+
 ## 0.19.8
 
 ### Patch Changes
