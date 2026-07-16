@@ -125,6 +125,31 @@ class TestCollectFileGroups:
         assert result == {}
 
 
+class TestLoadLibrarySeries:
+    """Tests for loading the library fields used by inbox matching."""
+
+    def test_uses_dynamic_comic_name_as_dynamic_name(self, importinbox, _mock_globals):
+        mock_row = MagicMock()
+        mock_row._mapping = {
+            "ComicID": "mal-100",
+            "ComicName": "One Piece",
+            "ComicSortName": "One Piece",
+            "DynamicName": "one piece",
+        }
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value = [mock_row]
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__ = lambda _context: mock_conn
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        _mock_globals["db"].get_engine.return_value = mock_engine
+
+        result = importinbox._load_library_series()
+
+        assert result == [dict(mock_row._mapping)]
+        stmt = mock_conn.execute.call_args.args[0]
+        assert stmt.selected_columns.DynamicName.element.name == "DynamicComicName"
+
+
 class TestMatchGroup:
     """Tests for _match_group — matching file groups against library."""
 

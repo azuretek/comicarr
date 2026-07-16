@@ -1082,6 +1082,50 @@ def addComictoDB(
 #                myDB.upsert("importresults", newValue, controlValue)
 
 
+def _upsert_placeholder_manga_chapters(mangaid, manga_name, total):
+    """Create deterministic placeholder rows for missing integer chapters."""
+    if total <= 0:
+        return 0
+
+    existing_chapters = set()
+    rows = db.select_all(
+        select(issues.c.Int_IssueNumber, issues.c.ChapterNumber, issues.c.Issue_Number).where(
+            issues.c.ComicID == mangaid
+        )
+    )
+    for row in rows:
+        int_issue_number = row.get("Int_IssueNumber")
+        if int_issue_number is None:
+            chapter_number = row.get("ChapterNumber") or row.get("Issue_Number")
+            if chapter_number is not None:
+                int_issue_number = helpers.issuedigits(str(chapter_number))
+        if int_issue_number is not None:
+            existing_chapters.add(int_issue_number)
+
+    created = 0
+    for chapter_number in range(1, total + 1):
+        chapter_number_str = str(chapter_number)
+        if helpers.issuedigits(chapter_number_str) in existing_chapters:
+            continue
+
+        placeholder_id = "%s-ch%s" % (mangaid, chapter_number_str)
+        placeholder_values = {
+            "IssueID": placeholder_id,
+            "ComicID": mangaid,
+            "ComicName": manga_name,
+            "Issue_Number": chapter_number_str,
+            "IssueName": "Chapter %s" % chapter_number_str,
+            "Status": "Skipped",
+            "Int_IssueNumber": helpers.issuedigits(chapter_number_str),
+            "ChapterNumber": chapter_number_str,
+            "DateAdded": helpers.now(),
+        }
+        db.upsert("issues", placeholder_values, {"IssueID": placeholder_id})
+        created += 1
+
+    return created
+
+
 def _populate_manga_chapters(mangaid, manga_name, mangadex_uuid, mal_num_chapters, controlValueDict):
     """Shared helper: fetch chapters and set Total/Have for a manga series.
 
@@ -1177,38 +1221,6 @@ def _populate_manga_chapters(mangaid, manga_name, mangadex_uuid, mal_num_chapter
         if total_from_aggregate > 0:
             total = max(total_from_aggregate, issue_count)
 
-            # Generate placeholder issues for chapters not in the language-filtered set
-            if total_from_aggregate > issue_count:
-                existing_chapters = set()
-                with db.get_engine().connect() as conn:
-                    stmt = select(issues.c.ChapterNumber).where(issues.c.ComicID == mangaid)
-                    for row in conn.execute(stmt):
-                        if row[0]:
-                            existing_chapters.add(str(row[0]))
-
-                for ch_num in range(1, total_from_aggregate + 1):
-                    ch_num_str = str(ch_num)
-                    if ch_num_str in existing_chapters:
-                        continue
-
-                    placeholder_id = "%s-ch%s" % (mangaid, ch_num_str)
-                    placeholder_values = {
-                        "IssueID": placeholder_id,
-                        "ComicID": mangaid,
-                        "ComicName": manga_name,
-                        "Issue_Number": ch_num_str,
-                        "IssueName": "Chapter %s" % ch_num_str,
-                        "Status": "Skipped",
-                        "Int_IssueNumber": helpers.issuedigits(ch_num_str),
-                        "ChapterNumber": ch_num_str,
-                        "DateAdded": helpers.now(),
-                    }
-                    db.upsert("issues", placeholder_values, {"IssueID": placeholder_id})
-
-                logger.info(
-                    "[MANGA-IMPORT] Generated %d placeholder chapters for %s (aggregate total: %d, language-filtered: %d)"
-                    % (total_from_aggregate - issue_count, manga_name, total_from_aggregate, issue_count)
-                )
         else:
             total = issue_count
     else:
@@ -1222,6 +1234,13 @@ def _populate_manga_chapters(mangaid, manga_name, mangadex_uuid, mal_num_chapter
             logger.info("[MANGA-IMPORT] Using MAL chapter count for %s: %d" % (manga_name, total))
         except (ValueError, TypeError):
             logger.error("[MANGA-IMPORT] Invalid MAL chapter count for %s: %s" % (manga_name, mal_num_chapters))
+
+    placeholder_count = _upsert_placeholder_manga_chapters(mangaid, manga_name, total)
+    if placeholder_count:
+        logger.info(
+            "[MANGA-IMPORT] Generated %d missing placeholder chapters for %s (total: %d, detailed: %d)"
+            % (placeholder_count, manga_name, total, issue_count)
+        )
 
     # Always set Total/Have — never leave as NULL
     update_values = {
@@ -1478,7 +1497,11 @@ def addMangaToDB_MAL(mangaid, imported=None, calledfrom=None):
     comic_published = status_mapping.get(md_status, "Unknown")
 
     # Resolve MangaDex UUID for chapter data
-    mangadex_uuid = mangadex.find_by_mal_id(mal_numeric_id, title_hint=manga_name)
+    mangadex_uuid = mangadex.find_by_mal_id(
+        mal_numeric_id,
+        title_hint=manga_name,
+        alternate_titles=manga.get("alt_titles", []),
+    )
 
     # Prepare comic values
     comic_values = {

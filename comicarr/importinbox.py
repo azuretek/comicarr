@@ -199,7 +199,7 @@ def _load_library_series():
                 comics.c.ComicID,
                 comics.c.ComicName,
                 comics.c.ComicSortName,
-                comics.c.DynamicName,
+                comics.c.DynamicComicName.label("DynamicName"),
             )
             for row in conn.execute(stmt):
                 series_list.append(dict(row._mapping))

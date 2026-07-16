@@ -301,7 +301,10 @@ def get_manga_details(mal_id):
 
     # Extract images
     main_picture = data.get("main_picture", {})
-    cover_url = _proxy_image_url(main_picture.get("large") or main_picture.get("medium") or "")
+    # Detail payloads are consumed by the backend importer, which needs an
+    # absolute provider URL to cache the image. Search payloads proxy this URL
+    # separately for browser display.
+    cover_url = main_picture.get("large") or main_picture.get("medium") or ""
 
     # Extract year
     start_date = data.get("start_date", "")

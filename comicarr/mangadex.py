@@ -95,6 +95,17 @@ def _make_request(endpoint, params=None, method="GET"):
     except requests.exceptions.Timeout:
         logger.error("[MANGADEX] Request timeout for %s" % endpoint)
         return None
+    except requests.exceptions.HTTPError as e:
+        response = e.response
+        status_code = response.status_code if response is not None else "unknown"
+        request_id = response.headers.get("x-request-id", "unknown") if response is not None else "unknown"
+        detail = response.text if response is not None else str(e)
+        detail = " ".join(str(detail).split())[:400]
+        logger.error(
+            "[MANGADEX] HTTP %s for %s (request-id: %s): %s"
+            % (status_code, endpoint, request_id, detail or "No response body")
+        )
+        return None
     except requests.exceptions.RequestException as e:
         logger.error("[MANGADEX] Request failed: %s" % e)
         return None
@@ -489,15 +500,17 @@ def get_manga_details(manga_id):
     return details
 
 
-def find_by_mal_id(mal_id, title_hint=None):
+def find_by_mal_id(mal_id, title_hint=None, alternate_titles=None):
     """Find MangaDex manga UUID by its MyAnimeList ID.
 
-    Searches MangaDex by title and checks each result's links.mal field
-    to find the matching entry.
+    Searches MangaDex by the primary and alternate MAL titles, then checks
+    each result's links.mal field to find the matching entry.
 
     Args:
         mal_id: MAL numeric ID (string or int, without mal- prefix)
         title_hint: Manga title to search MangaDex with
+        alternate_titles: Optional alternate titles to try if the primary
+            lookup fails or does not return an exact MAL link match
 
     Returns:
         MangaDex manga UUID (string) or None if not found
@@ -506,56 +519,72 @@ def find_by_mal_id(mal_id, title_hint=None):
     if mal_id_str.startswith("mal-"):
         mal_id_str = mal_id_str[4:]
 
-    if not title_hint:
+    raw_titles = [title_hint]
+    if alternate_titles:
+        if isinstance(alternate_titles, str):
+            raw_titles.append(alternate_titles)
+        else:
+            raw_titles.extend(alternate_titles)
+
+    title_hints = []
+    seen_titles = set()
+    for title in raw_titles:
+        title = str(title).strip() if title else ""
+        normalized = title.casefold()
+        if not title or normalized in seen_titles:
+            continue
+        seen_titles.add(normalized)
+        title_hints.append(title)
+
+    title_hints = title_hints[:6]
+    if not title_hints:
         logger.warn("[MANGADEX] find_by_mal_id called without title_hint for MAL %s" % mal_id_str)
         return None
 
-    logger.info("[MANGADEX] Looking up MangaDex UUID for MAL ID %s (title: %s)" % (mal_id_str, title_hint))
+    logger.info("[MANGADEX] Looking up MangaDex UUID for MAL ID %s using %d title(s)" % (mal_id_str, len(title_hints)))
 
-    params = {
-        "title": title_hint,
-        "limit": 10,
-        "includes[]": ["cover_art"],
-        "contentRating[]": _get_content_ratings(),
-        "order[relevance]": "desc",
-    }
-
-    data = _make_request("/manga", params=params)
-    if not data or data.get("result") != "ok":
-        return None
-
-    # First pass: exact MAL ID match via links
-    for manga in data.get("data", []):
-        links = manga.get("attributes", {}).get("links", {})
-        if str(links.get("mal", "")) == mal_id_str:
-            manga_uuid = manga.get("id")
-            logger.info("[MANGADEX] Found MAL %s -> MangaDex %s (via links.mal)" % (mal_id_str, manga_uuid))
-            return manga_uuid
-
-    # Second pass: fuzzy title match as fallback
-    from comicarr.mangasync import _name_similarity
+    from comicarr.scanutil import name_similarity
 
     best_uuid = None
     best_score = 0.0
-    for manga in data.get("data", []):
-        attributes = manga.get("attributes", {})
-        candidate_title = _get_localized_string(attributes.get("title", {}))
-        if not candidate_title:
+    for search_title in title_hints:
+        params = {
+            "title": search_title,
+            "limit": 10,
+            "contentRating[]": _get_content_ratings(),
+            "order[relevance]": "desc",
+        }
+        data = _make_request("/manga", params=params)
+        if not data or data.get("result") != "ok":
+            logger.warn(
+                "[MANGADEX] MAL %s lookup failed for title '%s'; trying remaining titles" % (mal_id_str, search_title)
+            )
             continue
 
-        # Check primary title
-        score = _name_similarity(title_hint, candidate_title)
+        # Prefer an authoritative external-ID match over all title scoring.
+        for manga in data.get("data", []):
+            links = manga.get("attributes", {}).get("links", {})
+            if str(links.get("mal", "")) == mal_id_str:
+                manga_uuid = manga.get("id")
+                logger.info("[MANGADEX] Found MAL %s -> MangaDex %s (via links.mal)" % (mal_id_str, manga_uuid))
+                return manga_uuid
 
-        # Check alt titles too
-        for alt in attributes.get("altTitles", []):
-            alt_title = _get_localized_string(alt)
-            if alt_title:
-                alt_score = _name_similarity(title_hint, alt_title)
-                score = max(score, alt_score)
+        # Retain the best fuzzy candidate, but wait until every title has had
+        # a chance to produce an exact MAL link match before returning it.
+        for manga in data.get("data", []):
+            attributes = manga.get("attributes", {})
+            candidate_titles = [_get_localized_string(attributes.get("title", {}))]
+            candidate_titles.extend(_get_localized_string(alt) for alt in attributes.get("altTitles", []))
 
-        if score > best_score:
-            best_score = score
-            best_uuid = manga.get("id")
+            score = 0.0
+            for hint in title_hints:
+                for candidate_title in candidate_titles:
+                    if candidate_title:
+                        score = max(score, name_similarity(hint, candidate_title))
+
+            if score > best_score:
+                best_score = score
+                best_uuid = manga.get("id")
 
     if best_uuid and best_score >= 0.6:
         logger.info(
