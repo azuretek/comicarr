@@ -383,6 +383,18 @@ class TestImageFetch:
             assert is_allowed_image_url("https://%s/cover.jpg" % host) is True
 
     @patch("comicarr.app.metadata.image_fetch.requests.get")
+    def test_fetch_normalizes_legacy_mal_image_url_to_cdn(self, mock_get):
+        from comicarr.app.metadata.image_fetch import fetch_allowed_image
+
+        jpeg = _jpeg_bytes()
+        mock_get.return_value = _mock_image_response(jpeg)
+
+        result = fetch_allowed_image("https://myanimelist.net/images/manga/5/260006l.webp")
+
+        assert result == (jpeg, "image/jpeg")
+        assert mock_get.call_args.args[0] == "https://cdn.myanimelist.net/images/manga/5/260006l.webp"
+
+    @patch("comicarr.app.metadata.image_fetch.requests.get")
     def test_fetch_rejects_non_200(self, mock_get):
         from comicarr.app.metadata.image_fetch import fetch_allowed_image
 
