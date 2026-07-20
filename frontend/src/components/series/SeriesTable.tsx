@@ -328,7 +328,8 @@ export default function SeriesTable({
           <button
             type="button"
             onClick={() => {
-              setParams({ view: null });
+              setLocalPage(0);
+              setParams({ view: null, page: null });
               setRowSelection({});
             }}
             className={`px-2 py-1.5 transition-colors ${
