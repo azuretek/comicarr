@@ -1965,17 +1965,18 @@ def mangaCheck():
 def mangadexNewChapterCheck():
     """Poll MangaDex for new chapters not yet tracked in the database.
 
-    For each active manga series whose ComicID starts with 'md-', calls
-    the MangaDex API to retrieve the full chapter list and compares it
-    against existing issues in the database.  Any new chapters are inserted
-    as 'Wanted' issues.
+    For each active manga series with a resolvable MangaDex chapter source —
+    MangaDex-issued series, and MyAnimeList ones that have resolved a
+    MangaDexID — calls the MangaDex API to retrieve the full chapter list and
+    compares it against existing issues in the database.  Any new chapters are
+    inserted as 'Wanted' issues.
 
     Uses the built-in rate limiter in mangadex._rate_limit() to stay within
     the MangaDex 5 req/s limit.
 
     Callable from the scheduler or manually.
     """
-    from comicarr import mangadex
+    from comicarr import mangadex, series_kind
     from comicarr.tables import comics as t_comics
     from comicarr.tables import issues as t_issues
 
@@ -2006,9 +2007,7 @@ def mangadexNewChapterCheck():
     for series in manga_series:
         comic_id = series["ComicID"]
         comic_name = series["ComicName"]
-        # md- series carry the MangaDex uuid in the ComicID itself; mal- series
-        # keep it in MangaDexID.
-        mangadex_id = comic_id if str(comic_id).startswith("md-") else series["MangaDexID"]
+        mangadex_id = series_kind.chapter_source_id(series)
         if not mangadex_id:
             continue
 

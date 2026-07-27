@@ -31,7 +31,7 @@ import time
 from sqlalchemy import Integer, and_, delete, func, inspect, or_, select
 
 import comicarr
-from comicarr import db, filechecker, getimage, helpers, logger, notifiers, updater, weeklypull
+from comicarr import db, filechecker, getimage, helpers, logger, notifiers, series_kind, updater, weeklypull
 from comicarr.app.downloads.postprocess_pipeline import (
     PostProcessContext,
     PostProcessInputContext,
@@ -609,10 +609,10 @@ class PostProcessor(object):
 
         self.oneoffinlist = False
 
-        # --- Manga branch: MangaDex (md-) and MyAnimeList (mal-) series both
-        # need manga-specific processing. Omitting mal- sent every MAL download
-        # down the ComicVine path. ---
-        if self.comicid is not None and str(self.comicid).startswith(("md-", "mal-")):
+        # Provider-issued ids only: at this point the series row has not been
+        # loaded, so ContentType cannot participate. Legacy manga predating the
+        # prefixes take the ComicVine path here, as they always have.
+        if self.comicid is not None and series_kind.provider_of(self.comicid) in series_kind.MANGA_PROVIDERS:
             logger.fdebug(
                 "%s Manga series detected (ComicID: %s) - branching to manga post-processing" % (module, self.comicid)
             )
