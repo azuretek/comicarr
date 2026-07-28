@@ -118,7 +118,43 @@ describe("SeriesTable", () => {
 
     // 63 rows at 20 a page is pages 0–3, so the last page is Series 61–63.
     expect(screen.getByText("Series 61")).toBeTruthy();
-    expect(new URLSearchParams(window.location.search).get("page")).toBe("3");
+    // Invariant: an out-of-range page never renders an empty table. The URL
+    // half deliberately inverted with the migration: #381's guarded effect
+    // rewrote `?page=99` to `?page=3`, and pinned that rewrite precisely so
+    // deleting the effect would surface the change rather than hide it. The
+    // clamp is now render-time and display-only (#360), so the URL is left
+    // exactly as the user supplied it.
+    expect(new URLSearchParams(window.location.search).get("page")).toBe("99");
+  });
+
+  // The display clamp must count the rows the global search leaves, not just
+  // the domain-filtered set: the search runs inside useTableState, so the
+  // component reproduces it to size the clamp, and this pins the two against
+  // drifting apart. With the clamp counting all 63 rows, page=99 would clamp
+  // to page 3 of a one-row searched set and render an empty table.
+  it("clamps against the searched rows on a deep link with search and page", async () => {
+    window.history.pushState({}, "", "/library?page=99&search=Series+21");
+
+    const { rerender } = render(
+      <NuqsAdapter>
+        <SeriesTable data={[]} isLoading />
+      </NuqsAdapter>,
+    );
+    await settle();
+
+    rerender(
+      <NuqsAdapter>
+        <SeriesTable data={series(63)} />
+      </NuqsAdapter>,
+    );
+    await settle();
+
+    expect(screen.getByText("Series 21")).toBeTruthy();
+    expect(screen.queryByText("No results.")).toBeNull();
+    expect(new URLSearchParams(window.location.search).get("page")).toBe("99");
+    expect(new URLSearchParams(window.location.search).get("search")).toBe(
+      "Series 21",
+    );
   });
 
   // Regression: `selectedSeriesIds` used to read the raw rowSelection keys, so
