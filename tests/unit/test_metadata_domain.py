@@ -177,6 +177,31 @@ class TestGetIssueInfo:
 
         result = metadata_service.get_issue_info(ctx, "456")
         assert result["Issue_Number"] == "1"
+        mock_db.select_all.assert_called_once()
+
+    @patch("comicarr.db")
+    def test_falls_back_to_active_annuals(self, mock_db):
+        """Annual rows linked from series detail resolve through the same API."""
+        ctx = _make_test_ctx()
+        mock_db.select_all.side_effect = [
+            [],
+            [{"IssueID": "annual-1", "Issue_Number": "Annual 1", "ComicID": "9"}],
+        ]
+
+        result = metadata_service.get_issue_info(ctx, "annual-1")
+        assert result["IssueID"] == "annual-1"
+        assert result["Issue_Number"] == "Annual 1"
+        assert mock_db.select_all.call_count == 2
+
+    @patch("comicarr.db")
+    def test_returns_none_when_missing_from_issues_and_annuals(self, mock_db):
+        """Unknown identifiers return None after both table lookups."""
+        ctx = _make_test_ctx()
+        mock_db.select_all.side_effect = [[], []]
+
+        result = metadata_service.get_issue_info(ctx, "missing")
+        assert result is None
+        assert mock_db.select_all.call_count == 2
 
 
 # =============================================================================
