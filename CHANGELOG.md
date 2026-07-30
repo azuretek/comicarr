@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.20.11
+
+### Patch Changes
+
+- ad7a747: Fix the AI chat thread list returning HTTP 500 on ordinary page loads after upgrading past pre-library-chat installs. Schema validation now requires the complete schema for the _stamped_ Alembic revision rather than the migration head, so `0002` databases missing `ai_chat_*` tables can reach `0003_library_chat` and the recent-chats endpoint can return an empty or populated list.
+- 14b0403: Keep Library list series titles readable at phone widths by adapting the list row to a title-first three-column layout below the md breakpoint.
+- d9970c1: Fix series issue title links so they open the issue detail page instead of redirecting to the Dashboard
+- 88832e9: Fix Story Arcs search so Enter, the Search button, and the empty-state action submit the query and render provider results or clear empty/error states
+
 ## 0.20.10
 
 ### Patch Changes
