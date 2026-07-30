@@ -11,9 +11,12 @@ Startup classifies the configured database before it changes anything:
 - An empty database upgrades from base to the current Alembic head.
 - A database with `alembic_version` upgrades only when the table contains one
   exact revision from Comicarr's reviewed, single-head migration graph and the
-  database contains the complete Comicarr schema required by that revision.
-  Empty, multiple, partial, unknown, or structurally spoofed revision states
-  fail before schema mutation.
+  database contains the complete Comicarr schema required by **that stamped
+  revision** (not the migration head). Tables first introduced by later
+  revisions are optional until those upgrades run, so a pre-library-chat
+  `0002` install is not blocked before `0003_library_chat` can create
+  `ai_chat_*`. Empty, multiple, partial, unknown, or structurally spoofed
+  revision states fail before schema mutation.
 - A pre-Alembic Comicarr database is adopted only after it matches the
   conservative table, column, and `mylar_info` control-row fingerprint.
 - Any other nonempty database is left untouched and worker startup is blocked.

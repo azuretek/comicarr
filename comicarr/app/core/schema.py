@@ -48,6 +48,19 @@ _REQUIRED_LEGACY_COLUMNS = {
     "annuals": {"IssueID", "Issue_Number"},
     "mylar_info": {"DatabaseVersion"},
 }
+# Tables first introduced by a post-baseline revision. When a database is
+# stamped at an earlier known revision these must not be treated as required
+# by that revision — otherwise upgrade to head is blocked before the revision
+# that creates them can run (see #409: pre-chat 0002 installs).
+_REVISION_INTRODUCED_TABLES = {
+    "0003_library_chat": frozenset(
+        {
+            "ai_chat_threads",
+            "ai_chat_messages",
+            "ai_chat_attachments",
+        }
+    ),
+}
 _READINGLIST_TO_STORYARCS_COLUMNS = (
     "StoryArcID",
     "ComicName",
@@ -80,11 +93,29 @@ def _application_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _tables_introduced_after(revision: str, scripts: ScriptDirectory) -> frozenset[str]:
+    """Return tables first created by revisions strictly after ``revision``.
+
+    Head metadata includes every table that exists at the migration head. A
+    database stamped at an earlier known revision is expected to lack tables
+    that later revisions introduce; those absences must not fail closed or
+    upgrade can never create them.
+    """
+
+    introduced: set[str] = set()
+    for script in scripts.walk_revisions():
+        if script.revision == revision:
+            break
+        introduced.update(_REVISION_INTRODUCED_TABLES.get(script.revision, ()))
+    return frozenset(introduced)
+
+
 def _legacy_fingerprint_error(
     engine: Engine,
     *,
     require_control_row: bool = True,
     require_complete_schema: bool = False,
+    optional_tables: frozenset[str] | set[str] | None = None,
 ) -> str | None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names()) - {_ALEMBIC_VERSION_TABLE}
@@ -97,8 +128,9 @@ def _legacy_fingerprint_error(
     if missing:
         return "is missing required Comicarr tables: %s" % ", ".join(missing)
 
+    deferred = frozenset(optional_tables or ())
     if require_complete_schema:
-        missing = sorted(set(metadata.tables) - table_names)
+        missing = sorted((set(metadata.tables) - deferred) - table_names)
         if missing:
             return "is missing tables required by its Comicarr revision: %s" % ", ".join(missing)
 
@@ -167,10 +199,13 @@ def _validate_versioned_database(engine: Engine) -> None:
     if resolved is None or resolved.revision != revision:
         raise MigrationStateError("Alembic version table contains an unknown Comicarr revision: %s" % revision)
 
+    # Require the complete schema for *this* revision, not the migration head.
+    # Tables introduced by later revisions are optional until those upgrades run.
     error = _legacy_fingerprint_error(
         engine,
         require_control_row=False,
         require_complete_schema=True,
+        optional_tables=_tables_introduced_after(revision, scripts),
     )
     if error:
         raise MigrationStateError("versioned database is not a recognized Comicarr database: %s" % error)
