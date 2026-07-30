@@ -31,6 +31,9 @@ const SeriesListPage = () => (
 const SeriesDetailPage = () => (
   <RouteLoader load={() => import("@/pages/SeriesDetailPage")} />
 );
+const IssueDetailPage = () => (
+  <RouteLoader load={() => import("@/pages/IssueDetailPage")} />
+);
 const SearchPage = () => (
   <RouteLoader load={() => import("@/pages/SearchPage")} />
 );
@@ -137,6 +140,10 @@ function AppContent() {
                   <Routes>
                     <Route path="/" element={<DashboardPage />} />
                     <Route path="/library" element={<SeriesListPage />} />
+                    <Route
+                      path="/library/:comicId/issue/:issueId"
+                      element={<IssueDetailPage />}
+                    />
                     <Route
                       path="/library/:comicId"
                       element={<SeriesDetailPage />}

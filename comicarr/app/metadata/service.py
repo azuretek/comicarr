@@ -95,16 +95,26 @@ def get_comic_info(ctx, comic_id):
 
 
 def get_issue_info(ctx, issue_id):
-    """Get issue metadata from database."""
+    """Get issue metadata from database (regular issues, then active annuals)."""
     from sqlalchemy import select
 
     from comicarr import db
+    from comicarr.tables import annuals as t_annuals
     from comicarr.tables import issues as t_issues
 
     stmt = select(t_issues).where(t_issues.c.IssueID == issue_id)
     results = db.select_all(stmt)
     if results and len(results) == 1:
         return results[0]
+
+    # Series detail links annual rows with the same /library/.../issue/... path.
+    annual_stmt = select(t_annuals).where(
+        t_annuals.c.IssueID == issue_id,
+        t_annuals.c.Deleted != 1,
+    )
+    annual_results = db.select_all(annual_stmt)
+    if annual_results and len(annual_results) == 1:
+        return annual_results[0]
     return None
 
 
