@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from sqlalchemy import text
 from starlette.datastructures import UploadFile
 
 import comicarr
@@ -24,6 +25,7 @@ from comicarr import db
 from comicarr.app.ai import chat_images, chat_store
 from comicarr.app.ai.chat_service import stream_turn
 from comicarr.app.ai.router import router
+from comicarr.app.core.schema import upgrade_database
 from comicarr.app.core.security import require_session
 from comicarr.tables import ai_chat_messages, metadata
 
@@ -35,6 +37,31 @@ def chat_db(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     db.shutdown_engine()
     metadata.create_all(db.get_engine())
+    yield tmp_path
+    db.shutdown_engine()
+
+
+@pytest.fixture
+def production_chat_db(tmp_path, monkeypatch):
+    """Schema via the Alembic runner, starting from a pre-library-chat stamp.
+
+    Mirrors upgraded self-hosted installs that still lack ai_chat_* until 0003
+    applies — the path that previously left GET /chat/threads returning 500.
+    """
+    monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(comicarr, "CONFIG", None, raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    db.shutdown_engine()
+    engine = db.get_engine()
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE ai_chat_attachments"))
+        conn.execute(text("DROP TABLE ai_chat_messages"))
+        conn.execute(text("DROP TABLE ai_chat_threads"))
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0002_legacy_adoption')"))
+    assert upgrade_database(engine) == "0003_library_chat"
     yield tmp_path
     db.shutdown_engine()
 
@@ -165,6 +192,28 @@ def test_threads_are_private_paginated_and_return_message_contract(chat_db):
     assert chat_store.get_thread("bob", first["id"]) is None
     assert chat_store.rename_thread("bob", first["id"], "stolen") is None
     assert chat_store.delete_thread("bob", first["id"]) is None
+
+
+def test_thread_list_route_returns_empty_and_populated_after_production_upgrade(production_chat_db):
+    """#409: upgraded installs must list threads without 500 on ordinary page loads."""
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_session] = lambda: "alice"
+
+    with TestClient(app) as client:
+        empty = client.get("/api/ai/chat/threads?limit=30")
+        assert empty.status_code == 200
+        assert empty.json() == {"threads": [], "next_cursor": None}
+
+        thread, _, _ = _create_turn("alice", "Saved chat")
+        populated = client.get("/api/ai/chat/threads?limit=30")
+        assert populated.status_code == 200
+        body = populated.json()
+        assert body["next_cursor"] is None
+        assert len(body["threads"]) == 1
+        assert body["threads"][0]["id"] == thread["id"]
+        assert body["threads"][0]["title"] == "Saved chat"
+        assert body["threads"][0]["message_count"] == 1
 
 
 def test_only_twenty_recent_messages_are_sent_to_provider(chat_db):

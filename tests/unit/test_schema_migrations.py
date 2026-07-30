@@ -200,6 +200,46 @@ def test_upgrade_database_accepts_a_known_prior_comicarr_revision(tmp_path):
     assert current_revision(engine) == "0003_library_chat"
 
 
+def test_upgrade_database_accepts_pre_chat_revision_without_library_chat_tables(tmp_path):
+    """Pre-#296 installs stamped at 0002 lack ai_chat_* tables until 0003 runs.
+
+    Validation must require the schema for the *stamped* revision, not the head
+    metadata, or upgrade is blocked and GET /api/ai/chat/threads 500s forever.
+    """
+    engine = create_engine("sqlite:///%s" % (tmp_path / "pre-chat-version.db"))
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE ai_chat_attachments"))
+        conn.execute(text("DROP TABLE ai_chat_messages"))
+        conn.execute(text("DROP TABLE ai_chat_threads"))
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0002_legacy_adoption')"))
+
+    assert "ai_chat_threads" not in set(inspect(engine).get_table_names())
+    assert classify_database(engine) is DatabaseState.VERSIONED
+    assert upgrade_database(engine) == "0003_library_chat"
+    assert current_revision(engine) == "0003_library_chat"
+    assert {"ai_chat_threads", "ai_chat_messages", "ai_chat_attachments"}.issubset(
+        set(inspect(engine).get_table_names())
+    )
+
+
+def test_head_revision_still_requires_library_chat_tables(tmp_path):
+    engine = create_engine("sqlite:///%s" % (tmp_path / "head-missing-chat.db"))
+    metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE ai_chat_attachments"))
+        conn.execute(text("DROP TABLE ai_chat_messages"))
+        conn.execute(text("DROP TABLE ai_chat_threads"))
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0003_library_chat')"))
+
+    with pytest.raises(MigrationStateError, match="missing tables required by its Comicarr revision"):
+        upgrade_database(engine)
+
+
 def test_classifier_refuses_to_adopt_an_unknown_nonempty_database(tmp_path):
     engine = create_engine("sqlite:///%s" % (tmp_path / "unknown.db"))
     with engine.begin() as conn:
