@@ -37,6 +37,7 @@ import type {
   SearchMissingPreview,
   SearchMissingResult,
 } from "@/types";
+import { displayComicDate, pickComicDate } from "@/lib/format";
 
 type IssueFilter = "all" | "have" | "missing" | "monitored";
 
@@ -647,11 +648,12 @@ export default function SeriesDetailPage() {
               const issueId = issue.id ?? issue.IssueID;
               const issueNumber = issue.number ?? issue.Issue_Number;
               const issueName = issue.name ?? issue.IssueName;
-              const issueDate =
-                issue.releaseDate ??
-                issue.ReleaseDate ??
-                issue.issueDate ??
-                issue.IssueDate;
+              const issueDate = pickComicDate(
+                issue.releaseDate,
+                issue.ReleaseDate,
+                issue.issueDate,
+                issue.IssueDate,
+              );
               const status = getIssueStatus(issue);
               const separateIntent = getSeparateIntent(issue);
               return (
@@ -699,7 +701,7 @@ export default function SeriesDetailPage() {
                     className="font-mono text-[10px]"
                     style={{ color: "var(--muted-foreground)" }}
                   >
-                    {issueDate || "—"}
+                    {displayComicDate(issueDate)}
                   </div>
                   <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                     <StatusBadge status={status} />

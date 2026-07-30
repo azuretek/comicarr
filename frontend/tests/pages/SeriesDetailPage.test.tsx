@@ -236,6 +236,102 @@ describe("SeriesDetailPage", () => {
     expect(screen.queryByText("Reserved handoff")).toBeNull();
   });
 
+  it("renders sentinel/null/empty issue dates as — and keeps valid ISO dates", async () => {
+    server.use(
+      http.get("/api/series/1", () =>
+        HttpResponse.json({
+          comic: {
+            ComicID: "1",
+            ComicName: "Date Edge Cases",
+            ComicYear: "2024",
+            ComicPublisher: "DC Comics",
+            Status: "Active",
+            Have: 0,
+            Total: 4,
+          },
+          issues: [
+            {
+              IssueID: "sentinel",
+              ComicID: "1",
+              Issue_Number: "1",
+              IssueName: "Sentinel release",
+              releaseDate: "0000-00-00",
+              issueDate: "0000-00-00",
+              Status: "Wanted",
+              displayState: "Wanted",
+              missing: true,
+              monitored: true,
+            },
+            {
+              IssueID: "null-date",
+              ComicID: "1",
+              Issue_Number: "2",
+              IssueName: "Null dates",
+              releaseDate: null,
+              issueDate: null,
+              Status: "Wanted",
+              displayState: "Wanted",
+              missing: true,
+              monitored: true,
+            },
+            {
+              IssueID: "empty-date",
+              ComicID: "1",
+              Issue_Number: "3",
+              IssueName: "Empty dates",
+              releaseDate: "",
+              issueDate: "",
+              Status: "Wanted",
+              displayState: "Wanted",
+              missing: true,
+              monitored: true,
+            },
+            {
+              IssueID: "valid-fallback",
+              ComicID: "1",
+              Issue_Number: "4",
+              IssueName: "Valid cover date",
+              releaseDate: "0000-00-00",
+              issueDate: "2025-08-15",
+              Status: "Wanted",
+              displayState: "Wanted",
+              missing: true,
+              monitored: true,
+            },
+          ],
+          annuals: [],
+          summary: {
+            total: 4,
+            issues: 4,
+            annuals: 0,
+            owned: 0,
+            archived: 0,
+            inFlight: 0,
+            missing: 4,
+            monitored: 4,
+            wanted: 4,
+            skipped: 0,
+            ignored: 0,
+            failed: 0,
+            unknown: 0,
+            eligible: 4,
+            completionPercent: 0,
+          },
+        }),
+      ),
+    );
+
+    renderDetail();
+
+    await screen.findByText("Date Edge Cases");
+    expect(screen.getByText("Sentinel release")).toBeTruthy();
+    expect(screen.getByText("Valid cover date")).toBeTruthy();
+    expect(screen.getByText("2025-08-15")).toBeTruthy();
+    expect(screen.queryByText("0000-00-00")).toBeNull();
+    // Three unknown rows share the em dash placeholder used elsewhere on the page.
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+  });
+
   it("previews once, requires confirmation, and follows the accepted durable run", async () => {
     let confirmationPayload: unknown;
     server.use(
