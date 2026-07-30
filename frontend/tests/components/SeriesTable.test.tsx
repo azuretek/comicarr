@@ -252,4 +252,59 @@ describe("SeriesTable", () => {
     expect(screen.getByText("Series 1")).toBeTruthy();
     expect(new URLSearchParams(window.location.search).get("page")).toBeNull();
   });
+
+  // Regression #414: at phone widths the desktop row used
+  // minmax(0,1fr) for the title beside ~670px of fixed tracks, so the title
+  // track (and the truncate span beside the kind badge) collapsed to 0px.
+  // The list now adapts to a 3-column phone grid and the title span is the
+  // flexible primary. jsdom cannot assert clientWidth, so this pins the
+  // layout contract that keeps the title identifiable.
+  it("keeps list-row titles as the flexible primary identifier", () => {
+    window.history.pushState({}, "", "/library");
+
+    const data = [
+      {
+        ComicID: "1",
+        ComicName: "A Very Long Series Title That Must Stay Readable",
+        ComicPublisher: "Publisher House",
+        ComicYear: "2024",
+        Status: "Active",
+        Have: 3,
+        Total: 12,
+        ContentType: "comic",
+      },
+    ] as Comic[];
+
+    const { container } = render(
+      <NuqsAdapter>
+        <SeriesTable data={data} />
+      </NuqsAdapter>,
+    );
+
+    const title = screen.getByTestId("series-row-title");
+    expect(title.textContent).toBe(
+      "A Very Long Series Title That Must Stay Readable",
+    );
+    expect(title.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(["min-w-0", "flex-1", "truncate"]),
+    );
+
+    const titleSlot = title.closest("[data-series-title-slot]");
+    expect(titleSlot).toBeTruthy();
+    expect(titleSlot?.className.split(/\s+/)).toContain("min-w-0");
+
+    const row = container.querySelector("[data-series-row]");
+    expect(row).toBeTruthy();
+    // Phone track list: only checkbox / cover / flexible title.
+    expect(row?.className).toMatch(/grid-cols-\[20px_40px_minmax\(0,1fr\)\]/);
+    // Desktop keeps a non-zero title floor beside fixed secondary columns.
+    expect(row?.className).toMatch(
+      /md:grid-cols-\[20px_40px_minmax\(10rem,1fr\)_/,
+    );
+
+    // Secondary desktop columns must leave the phone grid (max-md:hidden),
+    // not sit as zero-width fr siblings of the title.
+    const desktopOnly = container.querySelectorAll(".max-md\\:hidden");
+    expect(desktopOnly.length).toBeGreaterThan(0);
+  });
 });

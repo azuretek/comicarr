@@ -58,8 +58,17 @@ const seriesParams = {
   view: parseAsStringLiteral(["list", "grid"] as const).withDefault("list"),
 };
 
-// Grid layout: [checkbox, cover, title, publisher, status, issues, progress, year]
-const GRID_COLS = "20px 40px minmax(0,1fr) 160px 100px 110px 180px 60px";
+// List row tracks. Phone widths only keep checkbox / cover / title so the
+// title track always receives free space (#414). Desktop keeps the full row.
+// Title floor on md+ is minmax(10rem, 1fr) so truncate never collapses to 0px
+// beside fixed secondary columns.
+const LIST_ROW_COLS =
+  "grid-cols-[20px_40px_minmax(0,1fr)] md:grid-cols-[20px_40px_minmax(10rem,1fr)_160px_100px_110px_180px_60px]";
+
+/** Secondary desktop-only columns — removed from the grid on phone widths.
+ *  `max-md:hidden` leaves the element's own display (block/flex/inline-flex)
+ *  intact at md+, unlike `hidden md:block` which fights flex utilities. */
+const DESKTOP_COL = "max-md:hidden";
 
 interface SeriesTableProps {
   data?: Comic[];
@@ -427,10 +436,11 @@ export default function SeriesTable({
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-auto">
-          <div className="min-w-[820px] flex flex-col min-h-full">
+          {/* min-width only on md+: phone list is a 3-col adaptive row, not a
+              squeezed desktop table that collapses the title track (#414). */}
+          <div className="flex flex-col min-h-full md:min-w-[820px]">
             <div
-              className="sticky top-0 z-10 px-5 py-2 grid items-center gap-3 border-b border-border bg-muted/30 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70"
-              style={{ gridTemplateColumns: GRID_COLS }}
+              className={`sticky top-0 z-10 px-5 py-2 grid items-center gap-3 border-b border-border bg-muted/30 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70 ${LIST_ROW_COLS}`}
             >
               <Checkbox
                 aria-label="Select all series on page"
@@ -444,21 +454,25 @@ export default function SeriesTable({
                 desc={sorting[0]?.id === "ComicName" && sorting[0].desc}
                 onClick={() => toggleSort("ComicName")}
               />
-              <SortHeader
-                label="publisher"
-                active={sorting[0]?.id === "ComicPublisher"}
-                desc={sorting[0]?.id === "ComicPublisher" && sorting[0].desc}
-                onClick={() => toggleSort("ComicPublisher")}
-              />
-              <SortHeader
-                label="status"
-                active={sorting[0]?.id === "Status"}
-                desc={sorting[0]?.id === "Status" && sorting[0].desc}
-                onClick={() => toggleSort("Status")}
-              />
-              <span>issues</span>
-              <span>progress</span>
-              <span className="text-right">
+              <div className={DESKTOP_COL}>
+                <SortHeader
+                  label="publisher"
+                  active={sorting[0]?.id === "ComicPublisher"}
+                  desc={sorting[0]?.id === "ComicPublisher" && sorting[0].desc}
+                  onClick={() => toggleSort("ComicPublisher")}
+                />
+              </div>
+              <div className={DESKTOP_COL}>
+                <SortHeader
+                  label="status"
+                  active={sorting[0]?.id === "Status"}
+                  desc={sorting[0]?.id === "Status" && sorting[0].desc}
+                  onClick={() => toggleSort("Status")}
+                />
+              </div>
+              <span className={DESKTOP_COL}>issues</span>
+              <span className={DESKTOP_COL}>progress</span>
+              <span className={`${DESKTOP_COL} text-right`}>
                 <SortHeader
                   label="yr"
                   active={sorting[0]?.id === "ComicYear"}
@@ -596,13 +610,24 @@ function SeriesRow({ row, onClick }: SeriesRowProps) {
   const statusColor = statusTextColor(status);
   const isSelected = row.getIsSelected();
 
+  // Phone rows fold secondary metadata under the title so the primary
+  // identifier stays readable without horizontal scroll (#414).
+  const mobileMeta = [
+    comic.ComicPublisher,
+    comic.ComicYear ? `(${comic.ComicYear})` : null,
+    total > 0 ? `${have}/${total}` : null,
+    status || null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <div
       onClick={onClick}
-      className={`px-5 py-2 grid items-center gap-3 border-b border-border/50 text-[12.5px] cursor-pointer transition-colors ${
+      data-series-row
+      className={`px-5 py-2 grid items-center gap-3 border-b border-border/50 text-[12.5px] cursor-pointer transition-colors ${LIST_ROW_COLS} ${
         isSelected ? "bg-primary/10" : "hover:bg-muted/40"
       }`}
-      style={{ gridTemplateColumns: GRID_COLS }}
     >
       <div onClick={(e) => e.stopPropagation()}>
         <Checkbox
@@ -614,26 +639,38 @@ function SeriesRow({ row, onClick }: SeriesRowProps) {
 
       <CoverThumb url={comic.ComicImage} alt={comic.ComicName} />
 
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-medium truncate">{comic.ComicName}</span>
-          <span className="font-mono text-[9px] text-muted-foreground/70 px-1 py-[1px] border border-border rounded-[3px] uppercase tracking-wider flex-shrink-0">
+      <div className="min-w-0" data-series-title-slot>
+        <div className="flex min-w-0 items-center gap-2">
+          {/* flex-1 + min-w-0 keeps the title the flexible primary and stops
+              the kind badge from starving truncate to 0px width (#414). */}
+          <span
+            data-testid="series-row-title"
+            className="min-w-0 flex-1 truncate font-medium"
+          >
+            {comic.ComicName}
+          </span>
+          <span className="font-mono text-[9px] text-muted-foreground/70 px-1 py-[1px] border border-border rounded-[3px] uppercase tracking-wider shrink-0">
             {kindLabel}
           </span>
         </div>
-        {comic.ComicYear && (
-          <div className="text-[11px] text-muted-foreground mt-0.5">
+        {mobileMeta ? (
+          <div className="mt-0.5 truncate text-[11px] text-muted-foreground md:hidden">
+            {mobileMeta}
+          </div>
+        ) : null}
+        {comic.ComicYear ? (
+          <div className="mt-0.5 hidden text-[11px] text-muted-foreground md:block">
             ({comic.ComicYear})
           </div>
-        )}
+        ) : null}
       </div>
 
-      <div className="text-muted-foreground truncate">
+      <div className={`${DESKTOP_COL} text-muted-foreground truncate`}>
         {comic.ComicPublisher || "—"}
       </div>
 
       <div
-        className="inline-flex items-center gap-1.5 font-mono text-[10px]"
+        className={`${DESKTOP_COL} inline-flex items-center gap-1.5 font-mono text-[10px]`}
         style={{ color: statusColor }}
       >
         <span
@@ -643,12 +680,12 @@ function SeriesRow({ row, onClick }: SeriesRowProps) {
         {status || "unknown"}
       </div>
 
-      <div className="font-mono text-[12px] tabular-nums">
+      <div className={`${DESKTOP_COL} font-mono text-[12px] tabular-nums`}>
         <span>{have}</span>
         <span className="text-muted-foreground/60">/{total}</span>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className={`${DESKTOP_COL} flex items-center gap-2`}>
         <div className="flex-1 h-1 bg-border rounded-full overflow-hidden">
           <div
             className="h-full rounded-full transition-all"
@@ -666,7 +703,9 @@ function SeriesRow({ row, onClick }: SeriesRowProps) {
         </span>
       </div>
 
-      <div className="font-mono text-[11px] text-muted-foreground/70 text-right">
+      <div
+        className={`${DESKTOP_COL} font-mono text-[11px] text-muted-foreground/70 text-right`}
+      >
         {comic.ComicYear || "—"}
       </div>
     </div>
