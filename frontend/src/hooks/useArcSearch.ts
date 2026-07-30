@@ -5,8 +5,49 @@ import {
   type UseQueryResult,
   type UseMutationResult,
 } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/api";
+import { apiRequest, ApiError } from "@/lib/api";
 import type { ArcSearchResult } from "@/types";
+
+interface RawArcSearchResult {
+  comicid?: string;
+  cvarcid?: string;
+  name?: string;
+  publisher?: string | null;
+  issues?: string | number | null;
+  description?: string | null;
+  comicimage?: string | null;
+  comicthumb?: string | null;
+  image?: string | null;
+  arclist?: string | null;
+  haveit?: string | null;
+  [key: string]: unknown;
+}
+
+type RawArcSearchResponse =
+  | RawArcSearchResult[]
+  | {
+      results?: RawArcSearchResult[];
+    };
+
+function normalizeArcSearchResults(
+  data: RawArcSearchResponse,
+): ArcSearchResult[] {
+  const rows = Array.isArray(data) ? data : (data.results ?? []);
+  return rows.map((row) => {
+    const cvarcid = String(row.cvarcid ?? row.comicid ?? "");
+    return {
+      id: cvarcid,
+      name: row.name ?? "",
+      publisher: row.publisher ?? null,
+      issues: String(row.issues ?? "?"),
+      description: row.description ?? null,
+      image: row.image || row.comicimage || row.comicthumb || null,
+      cvarcid,
+      arclist: row.arclist ?? null,
+      haveit: row.haveit ?? null,
+    };
+  });
+}
 
 /**
  * Search for story arcs by name (ComicVine)
@@ -16,12 +57,30 @@ export function useFindStoryArc(
 ): UseQueryResult<ArcSearchResult[]> {
   return useQuery({
     queryKey: ["arcSearch", query],
-    queryFn: () =>
-      apiRequest<ArcSearchResult[]>("POST", "/api/search/comics", {
-        name: query,
-        type: "story_arc",
-      }),
-    enabled: !!query && query.length > 2,
+    queryFn: async () => {
+      try {
+        const data = await apiRequest<RawArcSearchResponse>(
+          "POST",
+          "/api/search/comics",
+          {
+            name: query,
+            type: "story_arc",
+          },
+        );
+        return normalizeArcSearchResults(data);
+      } catch (error) {
+        // Backend returns 400 with this detail when the provider finds no matches.
+        // Surface that as an empty list so the page can show a distinct empty state.
+        if (
+          error instanceof ApiError &&
+          /no results/i.test(error.userMessage)
+        ) {
+          return [];
+        }
+        throw error;
+      }
+    },
+    enabled: !!query && query.trim().length > 2,
     staleTime: 10 * 60 * 1000,
   });
 }

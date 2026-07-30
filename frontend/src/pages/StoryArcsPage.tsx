@@ -12,9 +12,11 @@ export default function StoryArcsPage() {
   const { data: arcs, isLoading, error } = useStoryArcs();
   const { data: aiStatus } = useAiStatus();
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchFormRef = useRef<HTMLFormElement>(null);
 
-  const handleSearchFocus = () => {
+  const handleSearchAction = () => {
     searchInputRef.current?.focus();
+    searchFormRef.current?.requestSubmit();
   };
 
   const count = arcs?.length ?? 0;
@@ -33,7 +35,7 @@ export default function StoryArcsPage() {
       <div className="px-5 py-4 space-y-6">
         {aiStatus?.configured && <ArcGenerator />}
 
-        <ArcSearch searchInputRef={searchInputRef} />
+        <ArcSearch searchInputRef={searchInputRef} formRef={searchFormRef} />
 
         {isLoading ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -70,7 +72,7 @@ export default function StoryArcsPage() {
             ))}
           </div>
         ) : (
-          <StoryArcEmptyState onSearchFocus={handleSearchFocus} />
+          <StoryArcEmptyState onSearchFocus={handleSearchAction} />
         )}
       </div>
     </div>
