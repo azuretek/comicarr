@@ -266,7 +266,7 @@ _KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("MAX_LOGFILES", int, "Logs", 5),
     ConfigKey("LOG_LEVEL", int, "Logs", 1, readable=True, writable=True),
     ConfigKey("GIT_PATH", str, "Git", None),
-    ConfigKey("GIT_USER", str, "Git", "comicarr"),
+    ConfigKey("GIT_USER", str, "Git", "frankieramirez"),
     ConfigKey("GIT_TOKEN", str, "Git", None),
     ConfigKey("GIT_BRANCH", str, "Git", None),
     ConfigKey("CHECK_GITHUB", bool, "Git", False),
