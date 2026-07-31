@@ -14,7 +14,7 @@ import { AcquisitionHealthTab } from "@/components/settings/AcquisitionHealthTab
 import { SaveButton } from "@/components/settings/SaveButton";
 import PageHeader from "@/components/layout/PageHeader";
 import { prepareConfigSaveData } from "@/lib/configSave";
-import { APP_VERSION, formatAppVersion } from "@/lib/version";
+import { formatAppVersion } from "@/lib/version";
 import type { Config } from "@/types";
 import type {
   ReadableConfig,
@@ -272,7 +272,7 @@ export default function SettingsPage() {
 
 function AboutSection({ config }: { config: Config }) {
   const rows: Array<[string, string]> = [
-    ["version", APP_VERSION],
+    ["version", formatAppVersion(false)],
     ["config path", config.config_path || "/config/config.ini"],
     ["data directory", config.data_dir || "—"],
     ["python", config.python_version || "—"],

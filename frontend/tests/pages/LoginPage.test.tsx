@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { server } from "../mocks/server";
 import { http, HttpResponse } from "msw";
 import { render, screen } from "../test-utils";
+import { formatAppVersion } from "@/lib/version";
 import LoginPage from "@/pages/LoginPage";
 
 describe("LoginPage", () => {
@@ -28,6 +29,7 @@ describe("LoginPage", () => {
     expect(
       screen.getByPlaceholderText("from server logs if required"),
     ).toBeTruthy();
+    expect(screen.getByText(formatAppVersion())).toBeTruthy();
   });
 
   it("submits setup token with credentials", async () => {
