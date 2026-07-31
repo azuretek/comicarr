@@ -205,14 +205,42 @@ The group is the **story of one subject**, not a batch / `run_id`.
 | Rule | Value |
 |---|---|
 | Identity | `(subject_type, subject_id)` |
-| Opens on | `grab.succeeded`, `download.succeeded`, `import.started`, `tag.started` |
-| Closes on | Allowlist of terminal pairs (mirrors journal `TERMINAL_STAGES` spirit) — not “anything that isn’t an advance” |
-| Retry | Opens a **second** story; never reopens the first |
+| Opens on | First **advance** for that subject (table below) |
+| Closes on | Normative terminal-pair **allowlist** (table below) — not “anything that isn’t an advance” |
+| Retry | Opens a **second** story; never reopens or merges with the first |
 | Collapse | **Always** collapsed; group-of-one degenerates to a plain row |
 | Position | Opening row’s `created_at`; **nothing re-sorts** |
-| Open header | Derived from `pipeline_journal.stage` (max rank across concurrent attempts) |
+| Open header | Derived from `pipeline_journal.stage` — **highest `stage_rank` among open rows** for the subject (concurrent attempts) |
 | Closed header | Terminal event’s own sentence |
 | Trouble | Non-`normal` events are closing events → headers; never trapped interior rows |
+
+### Opening advances and terminal-pair allowlist
+
+Terminality is a function of the **`(activity, status)` pair**, not of `status` alone
+(`succeeded` ends `import` but not `grab`). The allowlist mirrors the journal’s
+`TERMINAL_STAGES` spirit so UI “done” and pipeline “done” cannot drift
+([#428](https://github.com/frankieramirez/comicarr/issues/428); `journal.py`
+`TERMINAL_STAGES` / `STAGE_RANK`).
+
+| Role | Legal pairs |
+|---|---|
+| **Advance** (opens a story if none is open; keeps an open story open) | `grab.succeeded`, `download.succeeded`, `import.started`, `tag.started` |
+| **Terminal** (closes the open story for that subject) | `grab.failed`, `grab.blocked`, `grab.cancelled`; `download.failed`, `download.cancelled`; `import.succeeded`, `import.failed`, `import.needs_attention`, `import.cancelled`; `tag.succeeded`, `tag.failed`, `tag.needs_attention` |
+
+Rules that follow from the tables:
+
+1. **Only the four advances** may open or extend a multi-event story. Single-event
+   rows (`add.*`, `refresh.*`, run brackets, etc.) are stories of one and render as
+   plain rows — they do not use the advance/terminal lattice.
+2. **A retry never reopens a closed story.** After a terminal pair, the next advance
+   for the same `(subject_type, subject_id)` starts a **new** adjacent story (new
+   opening `created_at`). It must not mutate or re-parent the prior closed group.
+3. **Concurrent open attempts** (e.g. two DDL journal rows for one issue) reduce the
+   open header by **max `stage_rank`** among that subject’s open `pipeline_journal`
+   rows (`STAGE_RANK`: reserved 5 → snatched 10 → downloaded 20 → post_processing 30
+   → moved 40; terminals are not open). Furthest-along attempt wins the header.
+4. **Every non-`normal` severity event is a closer** under the allowlist, so trouble
+   is always a group header, never an interior row.
 
 Decision: [Decide grouping and collapse rules for the timeline](https://github.com/frankieramirez/comicarr/issues/428).
 Prototype asset (throwaway): branch `prototype/timeline-view` — **Variant A (Ledger)**
@@ -255,10 +283,23 @@ One **publish facade** owns narrative insert + SSE publish (precedent: `ai/servi
 `log_activity`, corrected):
 
 1. Narrative row **co-commits** into the caller’s transaction when `conn` is supplied.
-2. Publish **after commit**, never before durability.
-3. Gate journal-backed publishes on `record_transition`’s **`won`** return (idempotent under concurrency).
-4. Publish is **best-effort** (no outbox) — the list is query-backed.
-5. Enforce legal cells and `reason_code` invariants at this choke point.
+2. **SSE publish only after a successful commit** of the transaction that made the row
+   durable — never on insert success alone, never before durability, never after
+   rollback. Invert the `log_activity` bug (publish even when insert failed).
+3. **Shared-`conn` behavior:** when the caller passes `conn`, the facade inserts on
+   that connection and **does not** publish inside the open transaction. The caller
+   remains the transaction owner (today’s post-processor pattern: local
+   `with db.get_engine().begin() as conn:` around journal + related writes). Publish
+   runs only after that owner’s commit succeeds. Facade-owned writes (no `conn`)
+   commit first, then publish.
+4. **Do not** wire publish to SQLAlchemy Core `ConnectionEvents.commit` listeners —
+   they fire **pre**-commit (verified on Core; `SessionEvents.after_commit` is
+   ORM-only and unavailable here). Post-commit is a call-order contract on the
+   local transaction owner, not an event-listen hook.
+5. Gate journal-backed publishes on `record_transition`’s **`won`** return (idempotent under concurrency).
+6. Publish is **best-effort** (no outbox, no poller) — the list is query-backed; a
+   dropped SSE only delays an open page until the next refetch.
+7. Enforce legal cells and `reason_code` invariants at this choke point.
 
 ### Wire
 
