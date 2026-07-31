@@ -368,7 +368,9 @@ export const handlers = [
     return HttpResponse.json({
       current_version: "1.0.0",
       latest_version: "1.0.0",
-      commits_behind: 0,
+      release_version: "1.0.0",
+      update_state: "current",
+      update_reason: null,
     });
   }),
 

@@ -19,7 +19,6 @@
 
 import calendar
 import datetime
-import json
 import os
 import platform
 import re
@@ -48,7 +47,8 @@ _VERSION_FIELDS = {
     "current_release_name": "CURRENT_RELEASE_NAME",
     "current_branch": "CURRENT_BRANCH",
     "latest_version": "LATEST_VERSION",
-    "commits_behind": "COMMITS_BEHIND",
+    "update_state": "UPDATE_STATE",
+    "update_reason": "UPDATE_REASON",
     "install_type": "INSTALL_TYPE",
     "update_value": "UPDATE_VALUE",
 }
@@ -56,6 +56,17 @@ _VERSION_FIELDS = {
 # GitHub update-check calls must not hang indefinitely on a dropped SYN
 # (air-gapped / firewalled installs). Bound from issue #446: 10s connect, 10s read.
 _GITHUB_REQUEST_TIMEOUT = (10, 10)
+
+# Constant owner/repo — update checks never read GIT_USER (issue #470 / #456).
+_GITHUB_RELEASES_LATEST = "https://api.github.com/repos/frankieramirez/comicarr/releases/latest"
+
+UPDATE_STATE_BEHIND = "behind"
+UPDATE_STATE_CURRENT = "current"
+UPDATE_STATE_UNKNOWN = "unknown"
+
+REASON_NEVER_CHECKED = "never_checked"
+REASON_UNREACHABLE = "unreachable"
+REASON_RATE_LIMITED = "rate_limited"
 
 
 def _set_version_state(**fields):
@@ -201,8 +212,10 @@ def getVersion(ptv):
             cur_commit_hash = output[:opp]
             cur_branch = output[opp : output.find("\n", opp + 1)].strip()
 
-            if cur_commit_hash.startswith("v") and ptv["check_github_on_startup"] is True:
-                url2 = "https://api.github.com/repos/%s/comicarr/tags" % (ptv["git_user"])
+            # Resolve a tagged checkout to its commit SHA when GitHub checks are on.
+            # Uses the constant comicarr repo; does not drive the semver update check.
+            if cur_commit_hash.startswith("v") and ptv.get("check_github") is True:
+                url2 = "https://api.github.com/repos/frankieramirez/comicarr/tags"
                 try:
                     response = requests.get(url2, verify=True, auth=ptv["git_token"], timeout=_GITHUB_REQUEST_TIMEOUT)
                     git = response.json()
@@ -217,8 +230,7 @@ def getVersion(ptv):
                                 cur_commit_hash = x["commit"]["sha"]
                                 break
                         logger.info("version_name: %s" % current_version_name)
-                        url3 = "https://api.github.com/repos/%s/comicarr/releases/tags/%s" % (
-                            ptv["git_user"],
+                        url3 = "https://api.github.com/repos/frankieramirez/comicarr/releases/tags/%s" % (
                             current_version_name,
                         )
                         # logger.fdebug('url3: %s' % url3)
@@ -347,8 +359,7 @@ def getVersion(ptv):
 
         if current_version_name is not None and current_release_name is None and branch == "master":
             # only master has tags - so if not master, no need to check at all.
-            # and comicarr.CONFIG.CHECK_GITHUB_ON_STARTUP is True:
-            url2 = "https://api.github.com/repos/%s/comicarr/releases/tags/%s" % (ptv["git_user"], current_version_name)
+            url2 = "https://api.github.com/repos/frankieramirez/comicarr/releases/tags/%s" % (current_version_name,)
             try:
                 response = requests.get(
                     url2, verify=True, auth=comicarr.CONFIG.GIT_TOKEN, timeout=_GITHUB_REQUEST_TIMEOUT
@@ -421,109 +432,150 @@ def getVersion(ptv):
             logger.warn("Unable to determine which commit is currently being run. Defaulting to Master branch.")
 
 
-def checkGithub(current_version=None):
-    if current_version is None:
-        current_version = comicarr.CURRENT_VERSION
+def _strip_leading_v(tag_name):
+    """Strip a single leading ``v`` from a GitHub release tag at the boundary."""
+    if tag_name is None:
+        return None
+    text = str(tag_name).strip()
+    if not text:
+        return None
+    if text[0] in ("v", "V"):
+        return text[1:]
+    return text
 
-    if comicarr.INSTALL_TYPE == "docker":
-        itype = "true"
-    else:
-        itype = "false"
 
-    # Get the latest commit available from github
-    url = "https://api.github.com/repos/%s/comicarr/commits/%s" % (comicarr.CONFIG.GIT_USER, comicarr.CONFIG.GIT_BRANCH)
+def _classify_release_state(local_version, remote_version):
+    """Compare Changesets semver strings into behind | current | unknown.
+
+    Ahead-of-remote installs collapse to ``current``. Unparseable versions
+    never report as up to date.
+    """
+    from packaging.version import InvalidVersion, Version
+
+    if not local_version or not remote_version:
+        return UPDATE_STATE_UNKNOWN
     try:
-        response = requests.get(url, verify=True, auth=comicarr.CONFIG.GIT_TOKEN, timeout=_GITHUB_REQUEST_TIMEOUT)
-        git = response.json()
-        _set_version_state(latest_version=git["sha"])
+        local_v = Version(str(local_version))
+        remote_v = Version(str(remote_version))
+    except InvalidVersion:
+        return UPDATE_STATE_UNKNOWN
+    if local_v < remote_v:
+        return UPDATE_STATE_BEHIND
+    return UPDATE_STATE_CURRENT
+
+
+def _apply_update_state(update_state, update_reason=None, latest_version=None, message=None):
+    """Persist update state for GET /api/system/version and return the check payload."""
+    fields = {"update_state": update_state, "update_reason": update_reason}
+    if latest_version is not None:
+        fields["latest_version"] = latest_version
+    _set_version_state(**fields)
+    from comicarr.app.system.service import get_release_version
+
+    release_version = get_release_version()
+    return {
+        "status": "success" if update_state != UPDATE_STATE_UNKNOWN else "failure",
+        "update_state": update_state,
+        "update_reason": update_reason,
+        "latest_version": latest_version if latest_version is not None else _get_version_state("latest_version"),
+        "release_version": release_version,
+        "current_version": comicarr.CURRENT_VERSION,
+        "install_type": comicarr.INSTALL_TYPE,
+        "message": message,
+    }
+
+
+def checkGithub(current_version=None):
+    """Compare local release semver against GitHub releases/latest.
+
+    ``current_version`` is accepted for call-site compatibility (install SHA)
+    but is not used for behind-ness — that is always Changesets release identity.
+    """
+    del current_version  # SHA identity is not the release line.
+
+    from comicarr.app.system.service import get_release_version
+
+    release_version = get_release_version()
+    auth = getattr(comicarr.CONFIG, "GIT_TOKEN", None)
+
+    try:
+        response = requests.get(
+            _GITHUB_RELEASES_LATEST,
+            verify=True,
+            auth=auth,
+            timeout=_GITHUB_REQUEST_TIMEOUT,
+        )
     except Exception as e:
-        if "sha" in str(e):
-            le_message = "Updater will only work with the comicarr repo branches"
-        else:
-            le_message = "Could not get latest commit from github"
-        logger.warn("[ERROR] %s . Error returned: %s" % (le_message, e))
-        # A failed check must not publish 0 -- the API cannot tell that apart from
-        # "up to date", so a transient outage would clear a real update notice.
-        # Keep the last known-good count; only seed one when none exists yet.
-        if _get_version_state("commits_behind") is None:
-            _set_version_state(commits_behind=0)
-        rtnline = {
-            "status": "failure",
-            "current_version": comicarr.CURRENT_VERSION,
-            "latest_version": comicarr.CURRENT_VERSION,
-            "commits_behind": comicarr.COMMITS_BEHIND,
-            "message": le_message,
-        }
-        _set_version_state(update_value=json.dumps({"update_value": None, "docker": itype}))
+        logger.warn("[CHECK_GITHUB] Could not reach GitHub releases/latest: %s" % e)
+        return _apply_update_state(
+            UPDATE_STATE_UNKNOWN,
+            update_reason=REASON_UNREACHABLE,
+            message="Could not reach GitHub releases",
+        )
+
+    status_code = getattr(response, "status_code", None)
+    if status_code in (403, 429):
+        logger.warn("[CHECK_GITHUB] GitHub rate limited (HTTP %s)" % status_code)
+        return _apply_update_state(
+            UPDATE_STATE_UNKNOWN,
+            update_reason=REASON_RATE_LIMITED,
+            message="GitHub rate limited the release check",
+        )
+    if status_code != 200:
+        logger.warn("[CHECK_GITHUB] Unexpected GitHub status for releases/latest: %s" % status_code)
+        return _apply_update_state(
+            UPDATE_STATE_UNKNOWN,
+            update_reason=REASON_UNREACHABLE,
+            message="Could not get latest release from GitHub",
+        )
+
+    try:
+        payload = response.json()
+        latest_version = _strip_leading_v(payload.get("tag_name"))
+    except Exception as e:
+        logger.warn("[CHECK_GITHUB] Could not parse GitHub releases/latest response: %s" % e)
+        return _apply_update_state(
+            UPDATE_STATE_UNKNOWN,
+            update_reason=REASON_UNREACHABLE,
+            message="Could not parse GitHub release response",
+        )
+
+    if not latest_version:
+        logger.warn("[CHECK_GITHUB] releases/latest response had no usable tag_name")
+        return _apply_update_state(
+            UPDATE_STATE_UNKNOWN,
+            update_reason=REASON_UNREACHABLE,
+            message="GitHub release had no tag_name",
+        )
+
+    update_state = _classify_release_state(release_version, latest_version)
+    if update_state == UPDATE_STATE_UNKNOWN:
+        logger.warn(
+            "[CHECK_GITHUB] Could not compare local release %r to remote %r" % (release_version, latest_version)
+        )
+        return _apply_update_state(
+            UPDATE_STATE_UNKNOWN,
+            update_reason=REASON_UNREACHABLE,
+            latest_version=latest_version,
+            message="Could not compare release versions",
+        )
+
+    if update_state == UPDATE_STATE_BEHIND:
+        chk_message = "New version is available. Latest release is %s (running %s)" % (
+            latest_version,
+            release_version,
+        )
     else:
-        # See how many commits behind we are
-        if current_version is not None:
-            logger.fdebug(
-                "Comparing currently installed version [%s] with latest github version [%s]"
-                % (current_version, comicarr.LATEST_VERSION)
-            )
-            url = "https://api.github.com/repos/%s/comicarr/compare/%s...%s" % (
-                comicarr.CONFIG.GIT_USER,
-                current_version,
-                comicarr.LATEST_VERSION,
-            )
+        chk_message = "Comicarr is up to date (release %s)" % release_version
+    logger.info("[CHECK_GITHUB] %s" % chk_message)
 
-            try:
-                response = requests.get(
-                    url, verify=True, auth=comicarr.CONFIG.GIT_TOKEN, timeout=_GITHUB_REQUEST_TIMEOUT
-                )
-                git = response.json()
-                _set_version_state(commits_behind=git["total_commits"])
-            except Exception as e:
-                logger.warn("[ERROR] Could not get commits behind from github: %s" % e)
-                # Same as above: preserve the last known-good count rather than
-                # reporting a false "up to date" when the compare call fails.
-                if _get_version_state("commits_behind") is None:
-                    _set_version_state(commits_behind=0)
-                rtnline = {
-                    "status": "failure",
-                    "current_version": comicarr.CURRENT_VERSION,
-                    "latest_version": comicarr.CURRENT_VERSION,
-                    "commits_behind": comicarr.COMMITS_BEHIND,
-                    "message": "Could not get #of commits behind from github",
-                }
-                _set_version_state(update_value=json.dumps({"update_value": None, "docker": itype}))
-            else:
-                if comicarr.COMMITS_BEHIND >= 1:
-                    chk_message = "New version is available. You are %s commits behind" % comicarr.COMMITS_BEHIND
-                    if comicarr.CONFIG.AUTO_UPDATE is True:
-                        comicarr.SIGNAL = "update"
-                elif comicarr.COMMITS_BEHIND == 0:
-                    chk_message = "Comicarr is up to date"
-                elif comicarr.COMMITS_BEHIND == -1:
-                    chk_message = (
-                        "You are running an unknown version of Comicarr. Run the updater to identify your version"
-                    )
-                logger.info("[CHECK_GITHUB] %s" % chk_message)
-                rtnline = {
-                    "status": "success",
-                    "current_version": comicarr.CURRENT_VERSION,
-                    "latest_version": comicarr.LATEST_VERSION,
-                    "commits_behind": comicarr.COMMITS_BEHIND,
-                    "message": chk_message,
-                }
-                _set_version_state(update_value=json.dumps({"update_value": comicarr.COMMITS_BEHIND, "docker": itype}))
-        else:
-            chk_message = "You are running an unknown version of Comicarr. Run the updater to identify your version"
-            logger.info("[CHECK_GITHUB] %s" % chk_message)
-            rtnline = {
-                "status": "failure",
-                "current_version": comicarr.CURRENT_VERSION,
-                "latest_version": comicarr.CURRENT_VERSION,
-                "commits_behind": -1,
-                "message": chk_message,
-            }
-            _set_version_state(update_value=json.dumps({"update_value": -1, "docker": itype}))
-
-    # return comicarr.LATEST_VERSION
-    rtnline = dict(rtnline, **{"event": "check_update", "docker": itype})
-    comicarr.GLOBAL_MESSAGES = rtnline
-    return rtnline
+    # No GLOBAL_MESSAGES / check_update producer — badge will poll (later ticket).
+    return _apply_update_state(
+        update_state,
+        update_reason=None,
+        latest_version=latest_version,
+        message=chk_message,
+    )
 
 
 def update():
@@ -614,8 +666,7 @@ def versionload(cli_values=None, carepackage_call=False):
             "git_branch": comicarr.CONFIG.GIT_BRANCH,
             "git_user": comicarr.CONFIG.GIT_USER,
             "git_token": comicarr.CONFIG.GIT_TOKEN,
-            "auto_update": comicarr.CONFIG.AUTO_UPDATE,
-            "check_github_on_startup": comicarr.CONFIG.CHECK_GITHUB_ON_STARTUP,
+            "check_github": comicarr.CONFIG.CHECK_GITHUB,
             "git_path": comicarr.CONFIG.GIT_PATH,
         }
 
@@ -625,6 +676,9 @@ def versionload(cli_values=None, carepackage_call=False):
         current_version=version_info["current_version"],
         current_version_name=version_info["current_version_name"],
         current_release_name=version_info["current_release_name"],
+        # Until a release check runs, never claim current/behind.
+        update_state=UPDATE_STATE_UNKNOWN,
+        update_reason=REASON_NEVER_CHECKED,
     )
 
     if cli_values or carepackage_call is True:
@@ -657,9 +711,8 @@ def versionload(cli_values=None, carepackage_call=False):
 
     logger.info("Version information: %s [%s]" % (comicarr.CONFIG.GIT_BRANCH, comicarr.CURRENT_VERSION))
 
-    _set_version_state(latest_version=comicarr.CURRENT_VERSION)
-
-    if comicarr.CONFIG.CHECK_GITHUB_ON_STARTUP and comicarr.INSTALL_TYPE != "docker":
+    # When checking is on, run on startup for every install type (no Docker gate).
+    if comicarr.CONFIG.CHECK_GITHUB:
         stmt = select(jobhistory.c.prev_run_timestamp).where(jobhistory.c.JobName == "Check Version")
         with db.get_engine().connect() as conn:
             chk_last = conn.execute(stmt).mappings().fetchone()
@@ -673,22 +726,9 @@ def versionload(cli_values=None, carepackage_call=False):
                     prev_run = True
                     logger.info("[CHECK_GITHUB] Version check ran  < 15 minutes ago. Not running.")
 
-            if prev_run is False:
-                try:
-                    ac = comicarr.versioncheckit.CheckVersion()
-                    cc = ac.run(scheduled_job=False)
-                    _set_version_state(latest_version=cc["latest_version"])
-                except Exception:
-                    try:
-                        _set_version_state(latest_version=cc["current_version"])
-                    except Exception:
-                        _set_version_state(latest_version=comicarr.CURRENT_VERSION)
-
-    if comicarr.CONFIG.AUTO_UPDATE:
-        if (
-            comicarr.CURRENT_VERSION != comicarr.LATEST_VERSION
-            and comicarr.INSTALL_TYPE != "win"
-            and comicarr.COMMITS_BEHIND > 0
-        ):
-            logger.info("Auto-updating has been enabled. Attempting to auto-update.")
-            comicarr.SIGNAL = "update"
+        if prev_run is False:
+            try:
+                ac = comicarr.versioncheckit.CheckVersion()
+                ac.run(scheduled_job=False)
+            except Exception as e:
+                logger.warn("[CHECK_GITHUB] Startup release check failed: %s" % e)
