@@ -299,11 +299,22 @@ async def search_one_wanted_issue(
 def get_wanted(
     limit: int = Query(None),
     offset: int = Query(0),
+    q: str = Query(None, max_length=200),
     story_arcs: bool = Query(False, alias="story_arcs"),
     ctx: AppContext = Depends(get_context),
 ):
-    """Get all wanted issues with optional story arcs and annuals."""
-    return series_service.get_wanted(ctx, limit=limit, offset=offset, include_story_arcs=story_arcs)
+    """Get all wanted issues with optional story arcs and annuals.
+
+    ``q`` is a case-insensitive substring match on series name or issue
+    number and is applied before pagination.
+    """
+    return series_service.get_wanted(
+        ctx,
+        limit=limit,
+        offset=offset,
+        include_story_arcs=story_arcs,
+        search=q,
+    )
 
 
 # ---------------------------------------------------------------------------

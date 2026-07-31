@@ -101,14 +101,18 @@ export function useUpcoming(
 export function useWanted(
   limit = 50,
   offset = 0,
+  q = "",
 ): UseQueryResult<WantedResponse> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  const search = q.trim();
+  if (search) params.set("q", search);
   return useQuery({
-    queryKey: ["wanted", limit, offset],
+    queryKey: ["wanted", limit, offset, search],
     queryFn: () =>
-      apiRequest<WantedResponse>(
-        "GET",
-        `/api/wanted?limit=${limit}&offset=${offset}`,
-      ),
+      apiRequest<WantedResponse>("GET", `/api/wanted?${params.toString()}`),
     staleTime: 2 * 60 * 1000,
   });
 }

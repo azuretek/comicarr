@@ -227,8 +227,13 @@ def unqueue_issue(issue_id, audit_identity):
 # ---------------------------------------------------------------------------
 
 
-def get_wanted_issues(limit=None, offset=None):
-    """Get all wanted issues joined with comic info."""
+def get_wanted_issues(limit=None, offset=None, search=None):
+    """Get all wanted issues joined with comic info.
+
+    When ``search`` is set, ComicName and Issue_Number are matched with a
+    case-insensitive substring filter *before* pagination so the page total,
+    has_more flag, and returned rows all describe the same filtered set.
+    """
     stmt = (
         select(
             t_comics.c.ComicName,
@@ -250,6 +255,14 @@ def get_wanted_issues(limit=None, offset=None):
         .select_from(t_comics.join(t_issues, t_comics.c.ComicID == t_issues.c.ComicID))
         .where(t_issues.c.Status == "Wanted")
     )
+    if search and str(search).strip():
+        pattern = "%%%s%%" % str(search).strip().lower()
+        stmt = stmt.where(
+            or_(
+                t_comics.c.ComicName.ilike(pattern),
+                t_issues.c.Issue_Number.ilike(pattern),
+            )
+        )
     if limit is not None:
         return paginated_query(stmt, limit=limit, offset=offset)
     return db.select_all(stmt)
