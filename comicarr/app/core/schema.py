@@ -60,6 +60,7 @@ _REVISION_INTRODUCED_TABLES = {
             "ai_chat_attachments",
         }
     ),
+    "0004_activity_events": frozenset({"activity_events"}),
 }
 _READINGLIST_TO_STORYARCS_COLUMNS = (
     "StoryArcID",
