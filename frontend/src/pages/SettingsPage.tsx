@@ -14,6 +14,7 @@ import { AcquisitionHealthTab } from "@/components/settings/AcquisitionHealthTab
 import { SaveButton } from "@/components/settings/SaveButton";
 import PageHeader from "@/components/layout/PageHeader";
 import { prepareConfigSaveData } from "@/lib/configSave";
+import { formatAppVersion } from "@/lib/version";
 import type { Config } from "@/types";
 import type {
   ReadableConfig,
@@ -168,7 +169,9 @@ export default function SettingsPage() {
   }
 
   const configPath = config?.config_path || "/config/config.ini";
-  const version = config?.version ? `comicarr v${config.version}` : "comicarr";
+  // Same release SSOT as sidebar/login/onboarding (frontend/package.json), not
+  // config.version which used to surface git SHAs or stale install metadata.
+  const version = `comicarr ${formatAppVersion()}`;
 
   const configData: ReadableConfig = config ?? {};
   const tabProps = { config: configData, formData, onChange: handleChange };
@@ -269,7 +272,7 @@ export default function SettingsPage() {
 
 function AboutSection({ config }: { config: Config }) {
   const rows: Array<[string, string]> = [
-    ["version", config.version || "—"],
+    ["version", formatAppVersion(false)],
     ["config path", config.config_path || "/config/config.ini"],
     ["data directory", config.data_dir || "—"],
     ["python", config.python_version || "—"],
