@@ -53,6 +53,10 @@ _VERSION_FIELDS = {
     "update_value": "UPDATE_VALUE",
 }
 
+# GitHub update-check calls must not hang indefinitely on a dropped SYN
+# (air-gapped / firewalled installs). Bound from issue #446: 10s connect, 10s read.
+_GITHUB_REQUEST_TIMEOUT = (10, 10)
+
 
 def _set_version_state(**fields):
     """Write version state once and project it to legacy callers.
@@ -200,7 +204,7 @@ def getVersion(ptv):
             if cur_commit_hash.startswith("v") and ptv["check_github_on_startup"] is True:
                 url2 = "https://api.github.com/repos/%s/comicarr/tags" % (ptv["git_user"])
                 try:
-                    response = requests.get(url2, verify=True, auth=ptv["git_token"])
+                    response = requests.get(url2, verify=True, auth=ptv["git_token"], timeout=_GITHUB_REQUEST_TIMEOUT)
                     git = response.json()
                 except Exception as e:
                     logger.warn("[ERROR] %s" % e)
@@ -219,7 +223,9 @@ def getVersion(ptv):
                         )
                         # logger.fdebug('url3: %s' % url3)
                         try:
-                            repochk = requests.get(url3, verify=True, auth=ptv["git_token"])
+                            repochk = requests.get(
+                                url3, verify=True, auth=ptv["git_token"], timeout=_GITHUB_REQUEST_TIMEOUT
+                            )
                             repo_resp = repochk.json()
                             # logger.fdebug('repo_resp: %s' % repo_resp)
                             current_release_name = repo_resp["name"]
@@ -344,7 +350,9 @@ def getVersion(ptv):
             # and comicarr.CONFIG.CHECK_GITHUB_ON_STARTUP is True:
             url2 = "https://api.github.com/repos/%s/comicarr/releases/tags/%s" % (ptv["git_user"], current_version_name)
             try:
-                response = requests.get(url2, verify=True, auth=comicarr.CONFIG.GIT_TOKEN)
+                response = requests.get(
+                    url2, verify=True, auth=comicarr.CONFIG.GIT_TOKEN, timeout=_GITHUB_REQUEST_TIMEOUT
+                )
                 git = response.json()
                 current_release_name = git["name"]
             except Exception:
@@ -425,7 +433,7 @@ def checkGithub(current_version=None):
     # Get the latest commit available from github
     url = "https://api.github.com/repos/%s/comicarr/commits/%s" % (comicarr.CONFIG.GIT_USER, comicarr.CONFIG.GIT_BRANCH)
     try:
-        response = requests.get(url, verify=True, auth=comicarr.CONFIG.GIT_TOKEN)
+        response = requests.get(url, verify=True, auth=comicarr.CONFIG.GIT_TOKEN, timeout=_GITHUB_REQUEST_TIMEOUT)
         git = response.json()
         _set_version_state(latest_version=git["sha"])
     except Exception as e:
@@ -461,7 +469,9 @@ def checkGithub(current_version=None):
             )
 
             try:
-                response = requests.get(url, verify=True, auth=comicarr.CONFIG.GIT_TOKEN)
+                response = requests.get(
+                    url, verify=True, auth=comicarr.CONFIG.GIT_TOKEN, timeout=_GITHUB_REQUEST_TIMEOUT
+                )
                 git = response.json()
                 _set_version_state(commits_behind=git["total_commits"])
             except Exception as e:

@@ -134,6 +134,50 @@ class TestATransientOutageDoesNotClearAKnownUpdate:
         assert system_service.get_version_info(ctx)["commits_behind"] == 0
 
 
+class TestGithubRequestTimeout:
+    """Update checks must bound connect/read so a dropped SYN cannot hang forever.
+
+    Issue #455 / #446: failed checks keep retrying on the 360-minute schedule.
+    That policy is only safe when each attempt has a hard timeout (10s, 10s).
+    """
+
+    def test_check_github_passes_timeout_on_every_request(self, ctx):
+        responses = [
+            _github_response({"sha": "bbbbbbb"}),
+            _github_response({"total_commits": 1}),
+        ]
+        with patch.object(versioncheck.requests, "get", side_effect=responses) as mock_get:
+            versioncheck.checkGithub(current_version="aaaaaaa")
+
+        assert mock_get.call_count == 2
+        for call in mock_get.call_args_list:
+            assert call.kwargs.get("timeout") == versioncheck._GITHUB_REQUEST_TIMEOUT
+        assert versioncheck._GITHUB_REQUEST_TIMEOUT == (10, 10)
+
+    def test_check_github_preserves_auth_with_timeout(self, ctx):
+        token = ("ghp_test", "x-oauth-basic")
+        comicarr.CONFIG.GIT_TOKEN = token
+        responses = [
+            _github_response({"sha": "bbbbbbb"}),
+            _github_response({"total_commits": 0}),
+        ]
+        with patch.object(versioncheck.requests, "get", side_effect=responses) as mock_get:
+            versioncheck.checkGithub(current_version="aaaaaaa")
+
+        for call in mock_get.call_args_list:
+            assert call.kwargs.get("auth") is token
+            assert call.kwargs.get("timeout") == (10, 10)
+
+    def test_timeout_error_is_treated_as_a_failed_check(self, ctx):
+        with patch.object(
+            versioncheck.requests, "get", side_effect=versioncheck.requests.exceptions.Timeout("connect timed out")
+        ):
+            result = versioncheck.checkGithub(current_version="aaaaaaa")
+
+        assert result["status"] == "failure"
+        assert system_service.get_version_info(ctx)["commits_behind"] == 0
+
+
 class TestVersionStateHelper:
     def test_writes_context_and_legacy_together(self, ctx):
         versioncheck._set_version_state(current_branch="python3-dev")
