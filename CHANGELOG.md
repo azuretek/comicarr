@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.12
+
+### Patch Changes
+
+- e1601bf: Show one release version across the sidebar, Settings, and About instead of mixing the package badge with a git SHA or stale install metadata.
+- b7c8c6d: Render unknown series issue dates as a placeholder instead of the `0000-00-00` storage sentinel.
+- 5ec70d4: Wanted filtering now searches the full queue, not only the currently loaded page. Typing a filter term sends it to `/api/wanted` so match count, pagination total, and Next/Previous all describe the same filtered result set — matches that used to sit on page 2 are no longer invisible from page 1.
+
 ## 0.20.11
 
 ### Patch Changes
