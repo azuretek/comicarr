@@ -8,6 +8,7 @@ import configparser
 import datetime
 import json
 import os
+import re
 import stat
 import threading
 from unittest.mock import MagicMock, patch
@@ -605,27 +606,52 @@ class TestConfigService:
         result = system_service.get_safe_config(ctx)
         assert result["nzb_downloader_label"] == "None"
 
-    def test_get_safe_config_includes_version_from_context(self):
-        """get_safe_config includes version when ctx.current_version is set."""
-        ctx = _make_test_ctx(current_version="1.2.3")
-        result = system_service.get_safe_config(ctx)
-        assert result["version"] == "1.2.3"
+    def test_get_safe_config_uses_release_version_not_git_sha(self):
+        """config.version is the release semver, never ctx.current_version (git SHA)."""
+        ctx = _make_test_ctx(current_version="a1b2c3d4e5f6789")
+        with patch.object(system_service, "get_release_version", return_value="0.20.10"):
+            result = system_service.get_safe_config(ctx)
+        assert result["version"] == "0.20.10"
+        assert result["version"] != ctx.current_version
 
+    def test_get_safe_config_ignores_stale_current_version_name(self):
+        """Install tags on the runtime context must not leak into config.version."""
+        ctx = _make_test_ctx(current_version="deadbeef", current_version_name="v0.19.13")
+        with patch.object(system_service, "get_release_version", return_value="0.20.10"):
+            result = system_service.get_safe_config(ctx)
+        assert result["version"] == "0.20.10"
+
+    @patch.object(system_service, "_read_pyproject_version", return_value=None)
     @patch("importlib.metadata.version", return_value="0.8.0")
-    def test_get_safe_config_falls_back_to_importlib_metadata(self, mock_version):
-        """get_safe_config falls back to importlib.metadata when ctx.current_version is None."""
-        ctx = _make_test_ctx(current_version=None)
+    def test_get_safe_config_falls_back_to_importlib_metadata(self, mock_version, mock_pyproject):
+        """get_safe_config uses importlib when pyproject is unavailable."""
+        ctx = _make_test_ctx(current_version="abc1234")
         result = system_service.get_safe_config(ctx)
         assert result["version"] == "0.8.0"
         mock_version.assert_called_once_with("comicarr")
 
+    @patch.object(system_service, "_read_pyproject_version", return_value=None)
     @patch("importlib.metadata.version", side_effect=Exception("not found"))
-    @patch("pathlib.Path.is_file", return_value=False)
-    def test_get_safe_config_omits_version_when_unavailable(self, mock_isfile, mock_version):
-        """get_safe_config omits version key when all sources fail."""
-        ctx = _make_test_ctx(current_version=None)
+    def test_get_safe_config_omits_version_when_unavailable(self, mock_version, mock_pyproject):
+        """get_safe_config omits version key when all release sources fail."""
+        ctx = _make_test_ctx(current_version="abc1234")
         result = system_service.get_safe_config(ctx)
         assert "version" not in result
+
+    def test_get_release_version_prefers_pyproject_over_importlib(self):
+        """pyproject.toml is the release SSOT when both sources are present."""
+        with (
+            patch.object(system_service, "_read_pyproject_version", return_value="0.20.10"),
+            patch("importlib.metadata.version", return_value="0.19.13") as mock_meta,
+        ):
+            assert system_service.get_release_version() == "0.20.10"
+            mock_meta.assert_not_called()
+
+    def test_get_release_version_reads_live_pyproject(self):
+        """Repo pyproject.toml is readable and looks like a release version."""
+        version = system_service.get_release_version()
+        assert version is not None
+        assert re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version)
 
     def test_update_config_accepts_lowercase_keys(self):
         """update_config normalizes lowercase keys to uppercase."""

@@ -213,6 +213,52 @@ def initial_setup(ctx, username, password, setup_token):
 # Sorted so the response key order is stable; get_safe_config reads it every call.
 _READABLE_KEYS = sorted(readable_keys())
 
+# Repo root: comicarr/app/system/service.py → ../../../..
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+
+def get_release_version():
+    """Return the Changesets-managed release version (semver), not a git SHA.
+
+    User-facing ``config.version`` must match the frontend package badge. The
+    runtime ``current_version`` field is often a commit hash or an unexpanded
+    export-subst placeholder; those stay on ``/api/system/version`` / build
+    identity, not on the app version string.
+
+    Preference order:
+    1. ``pyproject.toml`` project.version (release SSOT in source/Docker trees)
+    2. ``importlib.metadata`` for pure installs without a nearby pyproject
+    """
+    version = _read_pyproject_version()
+    if version:
+        return version
+    try:
+        from importlib.metadata import version as package_version
+
+        return package_version("comicarr")
+    except Exception:
+        return None
+
+
+def _read_pyproject_version():
+    """Read [project].version from the repo pyproject.toml when present."""
+    pyproject = _REPO_ROOT / "pyproject.toml"
+    if not pyproject.is_file():
+        return None
+    try:
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10
+            import tomli as tomllib
+        with open(pyproject, "rb") as f:
+            data = tomllib.load(f)
+        version = data.get("project", {}).get("version")
+        if not version or "%" in str(version) or "$" in str(version):
+            return None
+        return str(version)
+    except Exception:
+        return None
+
 
 def get_safe_config(ctx):
     """Return configuration as a safe dict (no passwords/keys)."""
@@ -252,28 +298,8 @@ def get_safe_config(ctx):
 
     # Lowercase all keys for frontend convention
     result = {k.lower(): v for k, v in result.items()}
-    version = ctx.current_version
-    # Fall back to package metadata if version is missing or contains
-    # unexpanded git export-subst placeholders (e.g. "%H$")
-    if not version or "%" in version or "$" in version:
-        try:
-            from importlib.metadata import version as get_version
-
-            version = get_version("comicarr")
-        except Exception:
-            version = None
-    # Final fallback: read version directly from pyproject.toml
-    if not version:
-        try:
-            import tomllib
-
-            pyproject = Path(__file__).resolve().parent.parent.parent.parent / "pyproject.toml"
-            if pyproject.is_file():
-                with open(pyproject, "rb") as f:
-                    data = tomllib.load(f)
-                version = data.get("project", {}).get("version")
-        except Exception:
-            version = None
+    # Release semver only — never ctx.current_version (git SHA / install id).
+    version = get_release_version()
     if version:
         result["version"] = version
     return result
