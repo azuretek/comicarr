@@ -559,7 +559,14 @@ export function mockApiResponse(
     return SERIES;
   }
   if (m === "GET" && url === "/api/wanted") {
-    const all = wantedIssues();
+    const q = (parsed.searchParams.get("q") ?? "").trim().toLowerCase();
+    const all = wantedIssues().filter((issue) => {
+      if (!q) return true;
+      return (
+        issue.ComicName?.toLowerCase().includes(q) ||
+        issue.Issue_Number?.toLowerCase().includes(q)
+      );
+    });
     const limit = Number(parsed.searchParams.get("limit") ?? 50);
     const offset = Number(parsed.searchParams.get("offset") ?? 0);
     const issues = all.slice(offset, offset + limit);

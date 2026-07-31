@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Search, RefreshCw } from "lucide-react";
 import {
   useWanted,
@@ -17,12 +17,29 @@ import PageHeader from "@/components/layout/PageHeader";
 import FilterField from "@/components/ui/FilterField";
 import { useServerPage } from "@/components/data-table/useServerPage";
 import { useTableState } from "@/components/data-table/useTableState";
+import { useDebounce } from "@/hooks/use-debounce";
 
 export default function WantedPage() {
-  const { limit, offset, nextPage, prevPage } = useServerPage(50);
-  const [searchQuery, setSearchQuery] = useState("");
+  // Search is an input to the server fetch (same model as Activity #377):
+  // page-local filtering would only see the current offset window and would
+  // leave pagination totals describing the unfiltered queue (#408).
+  const { limit, offset, nextPage, prevPage, resetPage } = useServerPage(50);
+  const [searchQuery, setSearchQueryState] = useState("");
+  const debouncedSearch = useDebounce(searchQuery, 400);
 
-  const { data, isLoading, error, refetch } = useWanted(limit, offset);
+  const setSearchQuery = useCallback(
+    (value: string) => {
+      setSearchQueryState(value);
+      resetPage();
+    },
+    [resetPage],
+  );
+
+  const { data, isLoading, error, refetch } = useWanted(
+    limit,
+    offset,
+    debouncedSearch,
+  );
   const issues = data?.issues || [];
   const pagination = data?.pagination;
 
@@ -31,19 +48,11 @@ export default function WantedPage() {
   const bulkUnqueue = useBulkUnqueueIssues();
   const { addToast } = useToast();
 
-  const filteredIssues = searchQuery
-    ? issues.filter(
-        (i) =>
-          i.ComicName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          i.Issue_Number?.toLowerCase().includes(searchQuery.toLowerCase()),
-      )
-    : issues;
-
   const columns = useWantedColumns();
   // The server page is an input to the fetch that produced `issues`, so the
   // hook holds no page state (#360); `pagination` is omitted deliberately.
   const { table, selectedIds, clearSelection } = useTableState({
-    data: filteredIssues,
+    data: issues,
     columns,
     getRowId: (row) => row.IssueID,
     selection: { scope: "filtered" },
@@ -156,6 +165,8 @@ export default function WantedPage() {
   };
 
   const total = pagination?.total ?? issues.length;
+  const isFiltering = Boolean(debouncedSearch.trim());
+  const matchCount = isFiltering ? total : null;
 
   return (
     <div className="page-transition">
@@ -207,10 +218,10 @@ export default function WantedPage() {
             shortcut="/"
           />
         </div>
-        {searchQuery && (
+        {matchCount !== null && (
           <div className="font-mono text-[11px] text-muted-foreground">
-            {filteredIssues.length} match
-            {filteredIssues.length === 1 ? "" : "es"}
+            {matchCount} match
+            {matchCount === 1 ? "" : "es"}
           </div>
         )}
       </div>

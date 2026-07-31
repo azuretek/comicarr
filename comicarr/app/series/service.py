@@ -833,11 +833,15 @@ def search_all_missing(
     }
 
 
-def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False):
-    """Get all wanted issues, optionally with story arcs and annuals."""
+def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False, search=None):
+    """Get all wanted issues, optionally with story arcs and annuals.
+
+    ``search`` filters ComicName / Issue_Number before pagination so the
+    returned rows and pagination metadata describe the same result set.
+    """
     # Issues
     if limit is not None:
-        paginated = series_queries.get_wanted_issues(limit=limit, offset=offset)
+        paginated = series_queries.get_wanted_issues(limit=limit, offset=offset, search=search)
         result = {
             "issues": paginated["results"],
             "pagination": {
@@ -848,7 +852,7 @@ def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False):
             },
         }
     else:
-        result = {"issues": series_queries.get_wanted_issues()}
+        result = {"issues": series_queries.get_wanted_issues(search=search)}
 
     # Story arcs
     if include_story_arcs:
