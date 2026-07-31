@@ -20,8 +20,18 @@ import pytest
 
 import comicarr
 from comicarr import versioncheck
+from comicarr.app.config.registry import REGISTRY
 from comicarr.app.core.context import AppContext
 from comicarr.app.system import service as system_service
+
+
+def test_git_user_default_is_project_owner():
+    """Out-of-box update checks must hit frankieramirez/comicarr, not comicarr/comicarr.
+
+    The latter resolves to an unrelated third-party repo, so a 404 looks like
+    "no releases" rather than a misconfigured owner. Regression for #456.
+    """
+    assert REGISTRY["GIT_USER"].default == "frankieramirez"
 
 
 @pytest.fixture
