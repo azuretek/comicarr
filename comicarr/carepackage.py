@@ -200,12 +200,16 @@ class carePackage(object):
             git_branch = git_tmp["git_branch"]
             git_token = git_tmp["git_token"]
             self.git_path = git_tmp["git_path"]
+            try:
+                check_github = git_tmp.getboolean("check_github", fallback=True)
+            except Exception:
+                check_github = True
             self.pass_thru_vals = {
                 "git_user": git_user,
                 "git_branch": git_branch,
                 "git_token": git_token,
                 "git_path": self.git_path,
-                "check_github": False,
+                "check_github": check_github,
             }
         else:
             self.log_dir = comicarr.CONFIG.LOG_DIR

@@ -37,6 +37,7 @@ export type {
   SearchRunRetryResult,
   ForceSearchResult,
   SearchResult,
+  WantedAcquisitionAnnotation,
   WantedIssue,
   UpcomingIssue,
   SeriesDetail,

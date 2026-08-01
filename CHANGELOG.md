@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.21.0
+
+### Minor Changes
+
+- fca4d33: Update checks now compare the Changesets release version against GitHub `releases/latest` (semver `behind` / `current` / `unknown`) instead of counting commits. `GET /api/system/version` exposes `update_state`, `update_reason`, `release_version`, and a v-stripped `latest_version`; `commits_behind` is gone. Automatic release checks default **on** for new and existing installs (config version 16 rewrites a still-`False` `CHECK_GITHUB` to `True`). Comicarr contacts GitHub every 6 hours when checking is enabled — set `check_github = False` under `[Git]` in `config.ini` to opt out. The dead update toast path and `AUTO_UPDATE` self-apply are retired.
+- 9522693: Wanted rows now show a live-sticky search annotation (searching…, no match · N tries, never searched) from the latest acquisition run item, without changing when an issue leaves Wanted.
+
+### Patch Changes
+
+- 0d586ab: Default `GIT_USER` now points at the Comicarr project owner so update checks hit the real repository instead of an unrelated third-party one.
+- 32b9084: Failed downloads now terminalize `pipeline_journal` so needs-attention and in-flight counts stay honest when a download fails or auto-retry re-searches.
+
 ## 0.20.12
 
 ### Patch Changes

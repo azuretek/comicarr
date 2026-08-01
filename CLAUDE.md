@@ -25,9 +25,11 @@ Default HTTP port is **8090**. Vite dev proxy targets `http://localhost:8090` (o
 
 ## Releases
 
-Releases are automated via Changesets. See the `releases` skill (`.claude/skills/releases/SKILL.md`) for the full workflow.
+Releases are automated via Changesets. See the `releases` skill (`.claude/skills/releases/SKILL.md`) for the full workflow. Human-facing prose rules live in `CONTRIBUTING.md` → *Writing a changeset (operator-facing)*.
 
 **When a refactor earns a changeset:** when it changes something an *operator* could observe. Pure internal restructuring with verified-identical behaviour does not get one, and neither does tooling/CI-only work — `changeset-status.yml` treats a missing changeset as an allowed warning for exactly that. A change only a *contributor* can observe (a new lint gate, a type that now rejects a bad key) is documented here, not in the changelog.
+
+**How to write the summary:** Changeset text is **operator-facing** by default — outcome-first prose naming what the operator can see or do. Avoid ticket-only, filename-only, or internals-as-headline bullets. In-app What's New / update notes render `CHANGELOG.md` with only a mechanical transform (no editorial filter). Never land a changeset whose whole body is "No user-visible behaviour changes." — omit the changeset instead and let the next operator-visible change carry the version bump.
 
 ## Branch & PR Conventions
 

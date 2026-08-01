@@ -63,18 +63,6 @@ def _provider_entry_is_structurally_valid(entry):
     return True
 
 
-def apply_check_github_v16_migration(old_version, check_github):
-    """CONFIG_VERSION 15 → 16: rewrite CHECK_GITHUB False to True only.
-
-    Existing installs that still have automatic release checks off are turned
-    on. Values already True are left alone. Operators can still opt out after
-    the upgrade via config.ini.
-    """
-    if old_version < 16 and check_github is False:
-        return True
-    return check_github
-
-
 def parse_provider_extras(value, config_version=15):
     """Parse provider extras without assuming one historical tuple width."""
     if value in (None, "", "None"):
@@ -466,21 +454,26 @@ class Config(object):
                 # 12-ddl seperation into multiple providers, new keys, update tables
                 # 13-remove dognzb and nzbsu as independent options (throw them under newznabs if present)
                 self.config_update()
-            # 16 — default-on GitHub release checks for existing installs (#470)
             if self.CONFIG_VERSION < 16:
-                migrated = apply_check_github_v16_migration(self.CONFIG_VERSION, self.CHECK_GITHUB)
-                if migrated is not self.CHECK_GITHUB:
-                    self.CHECK_GITHUB = migrated
-                    try:
-                        config.set("Git", "check_github", str(self.CHECK_GITHUB))
-                    except configparser.NoSectionError:
+                # Issue #470: default release checks on for existing installs that
+                # still carry the old False default. Only rewrite False → True;
+                # an operator who opts out after this bump keeps CHECK_GITHUB off
+                # because CONFIG_VERSION is then 16.
+                if self.CHECK_GITHUB is False:
+                    self.CHECK_GITHUB = True
+                    if not config.has_section("Git"):
                         config.add_section("Git")
-                        config.set("Git", "check_github", str(self.CHECK_GITHUB))
+                    config.set("Git", "check_github", "True")
                     logger.info(
-                        "[CONFIG] CHECK_GITHUB defaulted on (config v16). "
+                        "[CONFIG] Enabling CHECK_GITHUB (default-on policy). "
                         "Comicarr contacts GitHub every 6 hours for release checks; "
-                        "set check_github = False in config.ini to opt out."
+                        "set check_github = False under [Git] in config.ini to opt out."
                     )
+                # Retire AUTO_UPDATE and CHECK_GITHUB_ON_STARTUP from the ini.
+                if config.has_option("General", "auto_update"):
+                    config.remove_option("General", "auto_update")
+                if config.has_option("Git", "check_github_on_startup"):
+                    config.remove_option("Git", "check_github_on_startup")
             self.OLDCONFIG_VERSION = str(self.CONFIG_VERSION)
             self.CONFIG_VERSION = self.newconfig
             config.set("General", "CONFIG_VERSION", str(self.newconfig))

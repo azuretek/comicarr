@@ -717,6 +717,33 @@ ai_chat_attachments = Table(
 )
 
 # ---------------------------------------------------------------------------
+# activity_events
+# ---------------------------------------------------------------------------
+# Append-only Activity Center narrative rows (Activity Center ADR).
+# Derived live state stays on acquisition_runs / acquisition_run_items /
+# pipeline_journal; this table only stores timestamped history the ledgers
+# cannot express. Writers, APIs, and retention land in later issues.
+activity_events = Table(
+    "activity_events",
+    metadata,
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column("created_at", String(40), nullable=False),
+    Column("activity", String(32), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("subject_type", String(32), nullable=False),
+    Column("subject_id", String(255), nullable=False),
+    Column("subject_label", Text, nullable=False),
+    Column("reason_code", String(64)),
+    Column("reason_detail", Text),
+    Column("provider", String(64)),
+    Column("run_id", String(64)),
+    Column("release_key", String(255)),
+    Column("parent_series_id", String(255)),
+    Column("scope_type", String(32)),
+    Column("scope_id", String(255)),
+)
+
+# ---------------------------------------------------------------------------
 # pipeline_journal
 # ---------------------------------------------------------------------------
 # Durable, forward-only transition record for the snatch -> download ->
@@ -738,7 +765,7 @@ pipeline_journal = Table(
     Column("stage_rank", Integer, nullable=False),  # derived from stage; drives the monotonic guard
     Column("payload_json", Text),  # reconstruct the SNATCHED_QUEUE/PP_QUEUE item
     Column("fail_reason", Text),  # nullable
-    Column("updated_date", Text, nullable=False),
+    Column("updated_date", MYSQL_KEY_TEXT, nullable=False),
     # Reserved-nullable (R9) — unpopulated now:
     Column("status", Text),
     Column("retry_count", Integer),
@@ -1065,10 +1092,28 @@ Index("failed_issueid", failed.c.IssueID)
 Index("upcoming_issuedate", upcoming.c.IssueDate)
 Index("upcoming_issueid", upcoming.c.IssueID)
 Index("pipeline_journal_stage", pipeline_journal.c.stage)
+Index("pipeline_journal_stage_updated", pipeline_journal.c.stage, pipeline_journal.c.updated_date)
+Index("activity_events_created_at", activity_events.c.created_at)
+Index("activity_events_parent_series_id", activity_events.c.parent_series_id)
+Index(
+    "activity_events_subject",
+    activity_events.c.subject_type,
+    activity_events.c.subject_id,
+)
 Index("issues_acquisition_intent", issues.c.AcquisitionIntent)
 Index("annuals_acquisition_intent", annuals.c.AcquisitionIntent)
 Index("acquisition_runs_state", acquisition_runs.c.completion_state)
+Index(
+    "acquisition_runs_state_completed",
+    acquisition_runs.c.completion_state,
+    acquisition_runs.c.completed_at,
+)
 Index("acquisition_run_items_run_state", acquisition_run_items.c.run_id, acquisition_run_items.c.state)
+Index(
+    "acquisition_run_items_state_completed",
+    acquisition_run_items.c.state,
+    acquisition_run_items.c.completed_at,
+)
 Index(
     "acquisition_run_items_entity",
     acquisition_run_items.c.command_kind,
@@ -1086,6 +1131,7 @@ Index(
     acquisition_maintenance_leases.c.epoch,
 )
 Index("acquisition_maintenance_events_epoch", acquisition_maintenance_events.c.epoch)
+Index("acquisition_maintenance_events_created", acquisition_maintenance_events.c.created_at)
 Index("acq_repair_runs_state", acquisition_repair_runs.c.state)
 Index("acq_repair_manifest_run", acquisition_repair_manifests.c.run_id)
 Index(
@@ -1155,6 +1201,7 @@ TABLE_MAP = {
     "ai_chat_threads": ai_chat_threads,
     "ai_chat_messages": ai_chat_messages,
     "ai_chat_attachments": ai_chat_attachments,
+    "activity_events": activity_events,
     "pipeline_journal": pipeline_journal,
     "acquisition_schema_versions": acquisition_schema_versions,
     "acquisition_runs": acquisition_runs,
