@@ -3,7 +3,6 @@ import { createColumnHelper } from "@tanstack/react-table";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import StatusBadge from "@/components/StatusBadge";
 import { DataTableSortHeader } from "@/components/data-table/DataTableSortHeader";
 import { CoverCell } from "@/components/data-table/cells/CoverCell";
 import {
@@ -11,6 +10,7 @@ import {
   toggleAllSelected,
 } from "@/components/data-table/useTableState";
 import { useUnqueueIssue } from "@/hooks/useSeries";
+import { formatWantedAcquisitionAnnotation } from "@/lib/wantedAnnotation";
 import type { WantedIssue } from "@/types";
 
 const columnHelper = createColumnHelper<WantedIssue>();
@@ -106,9 +106,37 @@ export function useWantedColumns() {
           return <span className="text-sm">{date}</span>;
         },
       }),
-      columnHelper.accessor("Status", {
+      columnHelper.display({
+        id: "acquisition",
         header: "Status",
-        cell: ({ getValue }) => <StatusBadge status={getValue()} />,
+        // Membership is always Wanted on this page; Status shows the live-
+        // sticky acquisition annotation from the latest search run item (#490).
+        cell: ({ row }) => {
+          const label = formatWantedAcquisitionAnnotation(
+            row.original.acquisition,
+          );
+          const state = row.original.acquisition?.state?.toLowerCase() ?? null;
+          const isLive = state === "accepted" || state === "running";
+          const isTrouble =
+            state === "no_match" ||
+            state === "failed" ||
+            state === "blocked" ||
+            state === "quarantined";
+          return (
+            <span
+              className={
+                isLive
+                  ? "text-sm text-foreground"
+                  : isTrouble
+                    ? "text-sm text-muted-foreground"
+                    : "text-sm text-muted-foreground/70"
+              }
+              data-acquisition-state={state ?? "never"}
+            >
+              {label}
+            </span>
+          );
+        },
         enableSorting: false,
       }),
       columnHelper.display({

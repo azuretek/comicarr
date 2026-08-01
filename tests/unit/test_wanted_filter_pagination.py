@@ -172,10 +172,16 @@ def test_get_wanted_service_forwards_search(monkeypatch):
         }
 
     monkeypatch.setattr(series_service.series_queries, "get_wanted_issues", fake_get_wanted_issues)
+    monkeypatch.setattr(
+        series_service.series_queries,
+        "get_latest_search_items_by_entity_ids",
+        lambda entity_ids: {},
+    )
     result = series_service.get_wanted(SimpleNamespace(config=None), limit=50, offset=0, search="Saga")
     assert captured == {"limit": 50, "offset": 0, "search": "Saga"}
     assert result["pagination"]["total"] == 1
     assert result["issues"][0]["IssueID"] == "1"
+    assert result["issues"][0]["acquisition"] is None
 
 
 def test_wanted_route_forwards_q_as_search(monkeypatch):

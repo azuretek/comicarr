@@ -7,7 +7,7 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-"""Add indexes that support settled ledger-retention eligibility and age predicates.
+"""Add ledger retention eligibility indexes.
 
 Revision ID: 0004_ledger_retention_indexes
 Revises: 0003_library_chat
@@ -22,15 +22,15 @@ down_revision = "0003_library_chat"
 branch_labels = None
 depends_on = None
 
-# (index_name, table_name, columns) — order matches #478 inventory.
+# Names match main (#492). Columns match #478 inventory.
 _RETENTION_INDEXES = (
     (
-        "acquisition_run_items_state_completed_at",
+        "acquisition_run_items_state_completed",
         "acquisition_run_items",
         ["state", "completed_at"],
     ),
     (
-        "acquisition_runs_completion_completed_at",
+        "acquisition_runs_state_completed",
         "acquisition_runs",
         ["completion_state", "completed_at"],
     ),
@@ -40,7 +40,7 @@ _RETENTION_INDEXES = (
         ["stage", "updated_date"],
     ),
     (
-        "acquisition_maintenance_events_created_at",
+        "acquisition_maintenance_events_created",
         "acquisition_maintenance_events",
         ["created_at"],
     ),

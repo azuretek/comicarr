@@ -266,10 +266,10 @@ def test_head_includes_ledger_retention_indexes(tmp_path):
 
     inspector = inspect(engine)
     expected = {
-        "acquisition_run_items": "acquisition_run_items_state_completed_at",
-        "acquisition_runs": "acquisition_runs_completion_completed_at",
+        "acquisition_run_items": "acquisition_run_items_state_completed",
+        "acquisition_runs": "acquisition_runs_state_completed",
         "pipeline_journal": "pipeline_journal_stage_updated",
-        "acquisition_maintenance_events": "acquisition_maintenance_events_created_at",
+        "acquisition_maintenance_events": "acquisition_maintenance_events_created",
     }
     for table_name, index_name in expected.items():
         names = {index["name"] for index in inspector.get_indexes(table_name)}
@@ -285,10 +285,10 @@ def test_upgrade_from_library_chat_creates_missing_retention_indexes(tmp_path):
     engine = create_engine("sqlite:///%s" % (tmp_path / "pre-retention.db"))
     metadata.create_all(engine)
     retention_indexes = (
-        "acquisition_run_items_state_completed_at",
-        "acquisition_runs_completion_completed_at",
+        "acquisition_run_items_state_completed",
+        "acquisition_runs_state_completed",
         "pipeline_journal_stage_updated",
-        "acquisition_maintenance_events_created_at",
+        "acquisition_maintenance_events_created",
     )
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
@@ -300,10 +300,10 @@ def test_upgrade_from_library_chat_creates_missing_retention_indexes(tmp_path):
     assert upgrade_database(engine) == "0004_ledger_retention_indexes"
     inspector = inspect(engine)
     for table_name, index_name in (
-        ("acquisition_run_items", "acquisition_run_items_state_completed_at"),
-        ("acquisition_runs", "acquisition_runs_completion_completed_at"),
+        ("acquisition_run_items", "acquisition_run_items_state_completed"),
+        ("acquisition_runs", "acquisition_runs_state_completed"),
         ("pipeline_journal", "pipeline_journal_stage_updated"),
-        ("acquisition_maintenance_events", "acquisition_maintenance_events_created_at"),
+        ("acquisition_maintenance_events", "acquisition_maintenance_events_created"),
     ):
         names = {index["name"] for index in inspector.get_indexes(table_name)}
         assert index_name in names

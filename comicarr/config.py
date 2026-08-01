@@ -240,7 +240,7 @@ class Config(object):
                 count = 0
 
             # this is the current version at this particular point in time.
-            self.newconfig = 15
+            self.newconfig = 16
 
             OLDCONFIG_VERSION = 0
             if count == 0:
@@ -454,6 +454,26 @@ class Config(object):
                 # 12-ddl seperation into multiple providers, new keys, update tables
                 # 13-remove dognzb and nzbsu as independent options (throw them under newznabs if present)
                 self.config_update()
+            if self.CONFIG_VERSION < 16:
+                # Issue #470: default release checks on for existing installs that
+                # still carry the old False default. Only rewrite False → True;
+                # an operator who opts out after this bump keeps CHECK_GITHUB off
+                # because CONFIG_VERSION is then 16.
+                if self.CHECK_GITHUB is False:
+                    self.CHECK_GITHUB = True
+                    if not config.has_section("Git"):
+                        config.add_section("Git")
+                    config.set("Git", "check_github", "True")
+                    logger.info(
+                        "[CONFIG] Enabling CHECK_GITHUB (default-on policy). "
+                        "Comicarr contacts GitHub every 6 hours for release checks; "
+                        "set check_github = False under [Git] in config.ini to opt out."
+                    )
+                # Retire AUTO_UPDATE and CHECK_GITHUB_ON_STARTUP from the ini.
+                if config.has_option("General", "auto_update"):
+                    config.remove_option("General", "auto_update")
+                if config.has_option("Git", "check_github_on_startup"):
+                    config.remove_option("Git", "check_github_on_startup")
             self.OLDCONFIG_VERSION = str(self.CONFIG_VERSION)
             self.CONFIG_VERSION = self.newconfig
             config.set("General", "CONFIG_VERSION", str(self.newconfig))
