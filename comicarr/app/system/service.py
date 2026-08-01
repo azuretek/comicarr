@@ -67,6 +67,7 @@ SCHEDULER_JOB_NAMES = {
     "monitor": "Folder Monitor",
     "importinbox": "Import Inbox Scanner",
     "ddl_health": "DDL Health Check",
+    "activity_retention": "Activity Event Retention",
 }
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
@@ -546,6 +547,25 @@ def get_release_notes(ctx, after, through):
     from comicarr.changelog_notes import get_release_notes as _get_notes
 
     return _get_notes(ctx, after=after, through=through)
+
+
+def force_version_check(ctx):
+    """Run one release check, ignoring the automatic-check switch.
+
+    ``CHECK_GITHUB`` off means no unsolicited traffic, not "refuse when asked".
+    Auth is the caller's responsibility (router uses require_session).
+    """
+    import comicarr
+
+    # Deliberately does not consult CHECK_GITHUB — Settings "Check now" must
+    # work while automatic checks are off (Settings → About → Updates).
+    runner = comicarr.versioncheckit.CheckVersion()
+    check_result = runner.run(scheduled_job=False) or {}
+    info = get_version_info(ctx)
+    message = check_result.get("message")
+    if message:
+        info = {**info, "message": message}
+    return info
 
 
 def get_build_identity(ctx):

@@ -13,8 +13,9 @@ const repoRoot = resolve(frontendRoot, "..");
 /** Every user-facing surface that shows the app release version. */
 const VERSION_DISPLAY_CONSUMERS = [
   "src/components/layout/AppSidebar.tsx",
-  "src/pages/LoginPage.tsx",
   "src/components/onboarding/OnboardingDialog.tsx",
+  "src/components/settings/AboutTab.tsx",
+  "src/pages/LoginPage.tsx",
   "src/pages/SettingsPage.tsx",
 ] as const;
 

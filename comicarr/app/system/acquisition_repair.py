@@ -248,11 +248,21 @@ class RepairService:
     # ------------------------------------------------------------------
 
     def _journal_evidence(self, conn, issue_id):
+        # Operator / auto R9 resolution stamps (#483 / #437): a row already
+        # retried, ignored, or imported must not re-propose Failed over Wanted.
+        from comicarr.app.downloads.journal import RESOLVED_STATUSES
+
         rows = list(
             conn.execute(
                 select(pipeline_journal)
                 .where(pipeline_journal.c.issueid == str(issue_id))
                 .where(pipeline_journal.c.stage.in_(tuple(_JOURNAL_EVIDENCE_STAGES)))
+                .where(
+                    or_(
+                        pipeline_journal.c.status.is_(None),
+                        pipeline_journal.c.status.notin_(tuple(RESOLVED_STATUSES)),
+                    )
+                )
                 .order_by(pipeline_journal.c.updated_date.desc(), pipeline_journal.c.stage_rank.desc())
             ).mappings()
         )

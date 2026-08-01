@@ -169,6 +169,299 @@ def process_issue(comicid, folder, issueid=None):
 
 
 # ---------------------------------------------------------------------------
+# Needs-attention band (R9 resolution actions — #483)
+# ---------------------------------------------------------------------------
+
+_FAILED_ACTIONS = frozenset({"retry", "ignore"})
+_MANUAL_REVIEW_ACTIONS = frozenset({"import", "search_again", "ignore"})
+_BAND_ACTIONS = _FAILED_ACTIONS | _MANUAL_REVIEW_ACTIONS
+
+
+def list_needs_attention(*, issueid=None):
+    """Shared band query over the settled unresolved predicate."""
+    from comicarr.app.downloads import journal
+
+    return {"items": journal.read_needs_attention(issueid=issueid)}
+
+
+def _band_row_or_error(release_key):
+    from comicarr.app.downloads import journal
+
+    if release_key in (None, "") or not str(release_key).strip():
+        return None, {
+            "success": False,
+            "status": "failed",
+            "error": "Missing release_key",
+            "status_code": 400,
+        }
+    row = journal.read_one(str(release_key).strip())
+    if row is None:
+        return None, {
+            "success": False,
+            "status": "failed",
+            "error": "Journal row not found",
+            "status_code": 404,
+        }
+    stage = row.get("stage")
+    status = row.get("status")
+    if stage not in journal.BAND_STAGES:
+        return None, {
+            "success": False,
+            "status": "failed",
+            "error": "Row is not on the needs-attention band",
+            "status_code": 409,
+        }
+    if status in journal.RESOLVED_STATUSES:
+        return None, {
+            "success": False,
+            "status": "failed",
+            "error": "Row is already resolved",
+            "status_code": 409,
+        }
+    return row, None
+
+
+def _issue_id_from_row(row):
+    issueid = row.get("issueid")
+    if issueid not in (None, ""):
+        return str(issueid)
+    payload = None
+    try:
+        from comicarr.app.downloads import journal
+
+        payload = journal.load_payload(row.get("payload_json"))
+    except Exception as e:
+        logger.fdebug("[NEEDS-ATTENTION] payload decode for issueid failed: %s" % e)
+        payload = None
+    if isinstance(payload, dict):
+        for key in ("issueid", "IssueID"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _payload_dict(row):
+    from comicarr.app.downloads import journal
+
+    payload = journal.load_payload(row.get("payload_json"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_retry_or_search_again(ctx, row, release_key, *, action, audit_identity):
+    from comicarr.app.downloads import journal
+    from comicarr.app.search import service as search_service
+    from comicarr.app.series import queries as series_queries
+
+    issue_id = _issue_id_from_row(row)
+    if not issue_id:
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Journal row has no issueid",
+            "status_code": 400,
+        }
+
+    # Precheck before side effects: blocked search must leave the band row alone.
+    precheck = search_service._search_route_health(ctx)
+    if not precheck.get("success"):
+        return {
+            "success": False,
+            "status": "blocked",
+            "error": precheck.get("error") or precheck.get("message"),
+            "message": precheck.get("message"),
+            "status_code": 409,
+        }
+
+    # Want first so the worker sees Status=Wanted, then enqueue, then stamp
+    # off-band only after a successful queue so a failed enqueue leaves the
+    # row on the band for another try.
+    series_queries.queue_issue(issue_id, audit_identity)
+    trigger = "band_retry" if action == "retry" else "band_search_again"
+    search_result = search_service.search_issue(ctx, issue_id, trigger=trigger)
+    if not search_result.get("success"):
+        return {
+            "success": False,
+            "status": search_result.get("status") or "failed",
+            "error": search_result.get("error") or search_result.get("message"),
+            "message": search_result.get("message"),
+            "release_key": release_key,
+            "issue_id": issue_id,
+            "stamped": False,
+            "status_code": 409 if search_result.get("status") == "blocked" else 500,
+        }
+
+    stamped = journal.stamp_resolution(release_key, journal.STATUS_RETRIED, increment_retry=True)
+    return {
+        "success": True,
+        "status": "retried",
+        "action": action,
+        "release_key": release_key,
+        "issue_id": issue_id,
+        "run_id": search_result.get("run_id"),
+        "stamped": stamped,
+        "message": "Issue re-wanted and search queued",
+    }
+
+
+def _resolve_ignore(row, release_key, *, audit_identity):
+    from comicarr.app.downloads import journal
+    from comicarr.app.series import queries as series_queries
+
+    issue_id = _issue_id_from_row(row)
+    if not issue_id:
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Journal row has no issueid",
+            "status_code": 400,
+        }
+    series_queries.ignore_issue(issue_id, audit_identity)
+    stamped = journal.stamp_resolution(release_key, journal.STATUS_IGNORED)
+    return {
+        "success": True,
+        "status": "ignored",
+        "action": "ignore",
+        "release_key": release_key,
+        "issue_id": issue_id,
+        "stamped": stamped,
+        "message": "Issue ignored",
+    }
+
+
+def _resolve_import(row, release_key, *, nzb_name=None, nzb_folder=None):
+    from comicarr.app.downloads import journal
+
+    payload = _payload_dict(row)
+    name = nzb_name or payload.get("nzb_name") or payload.get("nzbname") or row.get("nzbname")
+    folder = nzb_folder or payload.get("nzb_folder")
+    if not name or not folder:
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Missing nzb_name or nzb_folder for import",
+            "status_code": 400,
+        }
+
+    # Do NOT attach journal_release_key: force_process / PP_QUEUE is the same
+    # unjournaled path as POST /api/downloads/process. Propagating the band's
+    # terminal release_key would make the PP claim lose (stage already terminal)
+    # and queue a silent no-op import.
+    item = {
+        "nzb_name": name,
+        "nzb_folder": folder,
+        "issueid": row.get("issueid") or payload.get("issueid"),
+        "comicid": payload.get("comicid"),
+        "ddl": bool(payload.get("ddl")),
+        "oneoff": bool(payload.get("oneoff")),
+    }
+    try:
+        validated = validate_postprocess_item(item)
+    except PostProcessCommandError as e:
+        return {
+            "success": False,
+            "status": "failed",
+            "error": str(e),
+            "message": str(e),
+            "status_code": 400,
+        }
+
+    result = force_process(
+        nzb_name=validated["nzb_name"],
+        nzb_folder=validated["nzb_folder"],
+        issueid=validated.get("issueid"),
+        comicid=validated.get("comicid"),
+        ddl=validated.get("ddl") or False,
+        oneoff=validated.get("oneoff") or False,
+    )
+    if not result.get("success"):
+        return {
+            "success": False,
+            "status": "failed",
+            "error": result.get("error") or "Post-process queue failed",
+            "status_code": 500,
+        }
+
+    stamped = journal.stamp_resolution(release_key, journal.STATUS_IMPORTED)
+    return {
+        "success": True,
+        "status": "imported",
+        "action": "import",
+        "release_key": release_key,
+        "stamped": stamped,
+        "message": result.get("message") or "Import queued",
+    }
+
+
+def resolve_needs_attention(
+    ctx,
+    release_key,
+    action,
+    *,
+    audit_identity,
+    nzb_name=None,
+    nzb_folder=None,
+):
+    """Apply one operator band exit without rewriting journal stage.
+
+    ``failed``: retry | ignore
+    ``manual_review``: import | search_again | ignore
+    """
+    from comicarr.app.downloads import journal
+
+    if not audit_identity or not str(audit_identity).strip():
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "audit identity required",
+            "status_code": 400,
+        }
+
+    action_name = str(action or "").strip().lower()
+    if action_name not in _BAND_ACTIONS:
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Unknown action",
+            "status_code": 400,
+        }
+
+    row, err = _band_row_or_error(release_key)
+    if err is not None:
+        return err
+
+    stage = row.get("stage")
+    if stage == journal.FAILED and action_name not in _FAILED_ACTIONS:
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Action %s is not valid for failed rows" % action_name,
+            "status_code": 409,
+        }
+    if stage == journal.MANUAL_REVIEW and action_name not in _MANUAL_REVIEW_ACTIONS:
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Action %s is not valid for manual_review rows" % action_name,
+            "status_code": 409,
+        }
+
+    key = str(release_key).strip()
+    if action_name in {"retry", "search_again"}:
+        return _resolve_retry_or_search_again(ctx, row, key, action=action_name, audit_identity=audit_identity)
+    if action_name == "ignore":
+        return _resolve_ignore(row, key, audit_identity=audit_identity)
+    if action_name == "import":
+        return _resolve_import(row, key, nzb_name=nzb_name, nzb_folder=nzb_folder)
+    return {
+        "success": False,
+        "status": "failed",
+        "error": "Unknown action",
+        "status_code": 400,
+    }
+
+
+# ---------------------------------------------------------------------------
 # DDL queue management
 # ---------------------------------------------------------------------------
 

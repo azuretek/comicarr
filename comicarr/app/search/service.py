@@ -183,10 +183,8 @@ def add_manga(ctx, manga_id):
         return {"success": False, "error": "Error adding manga: %s" % str(e)}
 
 
-def force_search(ctx):
-    """Trigger a full search for all wanted issues with a durable outcome."""
-    from comicarr import search
-    from comicarr.app.acquisition.runs import RunLedger
+def _search_route_health(ctx):
+    """Shared get_search_health precheck for force_search and search_issue."""
     from comicarr.app.search.health import blocking_route_reason, get_search_health
 
     health = get_search_health(
@@ -204,6 +202,63 @@ def force_search(ctx):
             "status": "blocked",
             "error": blocking_route_reason(routes),
             "message": "Search blocked: no complete acquisition route is ready",
+            "routes": routes,
+        }
+    return {"success": True, "routes": routes, "health": health}
+
+
+def search_issue(ctx, issue_id, *, trigger="issue_retry"):
+    """Scoped single-issue search with the same route precheck as force_search.
+
+    Used by needs-attention band retry / search-again (#483). Does not rewrite
+    journal stage; callers stamp R9 resolution separately.
+    """
+    from comicarr.app.search.commands import enqueue_search_command
+
+    if issue_id in (None, "") or not str(issue_id).strip():
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Missing issue_id",
+            "message": "Missing issue_id",
+        }
+
+    precheck = _search_route_health(ctx)
+    if not precheck.get("success"):
+        return {
+            "success": False,
+            "status": "blocked",
+            "error": precheck.get("error"),
+            "message": precheck.get("message"),
+        }
+
+    command = enqueue_search_command(
+        {"issueid": str(issue_id).strip()},
+        trigger=trigger,
+        scope_type="issue",
+        scope_id=str(issue_id).strip(),
+    )
+    return {
+        "success": True,
+        "status": "accepted",
+        "run_id": command.run_id,
+        "issue_id": str(issue_id).strip(),
+        "message": "Search queued for issue %s" % issue_id,
+    }
+
+
+def force_search(ctx):
+    """Trigger a full search for all wanted issues with a durable outcome."""
+    from comicarr import search
+    from comicarr.app.acquisition.runs import RunLedger
+
+    precheck = _search_route_health(ctx)
+    if not precheck.get("success"):
+        return {
+            "success": False,
+            "status": "blocked",
+            "error": precheck.get("error"),
+            "message": precheck.get("message"),
         }
 
     run_id = str(uuid.uuid4())

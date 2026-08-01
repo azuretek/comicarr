@@ -46,6 +46,8 @@ export interface ReadableConfig {
   mal_enabled?: boolean;
   log_dir?: string;
   log_level?: number;
+  check_github?: boolean;
+  announce_releases?: boolean;
   comic_dir?: string;
   manga_dir?: string;
   manga_destination_dir?: string;
@@ -165,6 +167,8 @@ export interface WritableConfig {
   mal_enabled?: boolean;
   mal_client_id?: string;
   log_level?: number;
+  check_github?: boolean;
+  announce_releases?: boolean;
   comic_dir?: string;
   imp_move?: boolean;
   imp_rename?: boolean;

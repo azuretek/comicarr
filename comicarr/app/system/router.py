@@ -304,6 +304,16 @@ def get_release_notes(
     return system_service.get_release_notes(ctx, after=after, through=through)
 
 
+@router.post("/system/version/check", dependencies=[Depends(require_session)])
+def check_version_now(ctx: AppContext = Depends(get_context)):
+    """Force a single release check (ignores automatic-check off).
+
+    Used by Settings → About → Updates "Check now". Off for automatic checks
+    means no unsolicited traffic, not refusal of an operator-initiated check.
+    """
+    return system_service.force_version_check(ctx)
+
+
 @router.get("/system/logs", dependencies=[Depends(require_session)])
 def get_logs(ctx: AppContext = Depends(get_context)):
     """Return recent log entries."""

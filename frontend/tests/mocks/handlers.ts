@@ -379,6 +379,17 @@ export const handlers = [
     return HttpResponse.json({ sections: [] });
   }),
 
+  http.post("/api/system/version/check", () => {
+    return HttpResponse.json({
+      current_version: "1.0.0",
+      latest_version: "1.0.0",
+      release_version: "1.0.0",
+      update_state: "current",
+      update_reason: null,
+      message: "You are on the latest release",
+    });
+  }),
+
   http.get("/api/system/diagnostics", () => {
     return HttpResponse.json({
       db_empty: false,

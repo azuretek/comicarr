@@ -7,7 +7,7 @@ import {
 } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { isUpdateBehind, useSystemVersion } from "@/hooks/useSystemVersion";
+import { isUpdateBehind, useVersionInfo } from "@/hooks/useVersion";
 import { useReleaseNotes } from "@/hooks/useReleaseNotes";
 import { APP_VERSION, formatAppVersion } from "@/lib/version";
 import { getUpdateGuidance, releaseTagUrl } from "@/lib/updateGuidance";
@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 export default function VersionChip() {
   const [open, setOpen] = useState(false);
   const [showGuidance, setShowGuidance] = useState(false);
-  const { status, data } = useSystemVersion(true);
+  const { status, data } = useVersionInfo();
   const behind = isUpdateBehind(status, data);
   const localLabel = formatAppVersion(false);
   const latest = data?.latest_version ?? null;

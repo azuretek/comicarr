@@ -1,0 +1,438 @@
+#  Copyright (C) 2025–2026 Comicarr contributors
+#
+#  This file is part of Comicarr.
+#
+#  Comicarr is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+
+"""Tests for Activity Center timeline, band, and open-work read APIs (#485).
+
+Pagination choice (documented for clients): the API pages *events* ordered by
+created_at, not pre-grouped stories. Client-side story grouping (25 stories)
+remains a UI concern per the Activity Center ADR.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import insert
+
+import comicarr
+from comicarr import db
+from comicarr.tables import (
+    acquisition_run_items,
+    activity_events,
+    annuals,
+    issues,
+    metadata,
+    pipeline_journal,
+)
+
+
+@pytest.fixture
+def activity_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(comicarr, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(comicarr, "CONFIG", SimpleNamespace())
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    db.shutdown_engine()
+    engine = db.get_engine()
+    metadata.create_all(engine)
+    yield engine
+    db.shutdown_engine()
+
+
+def _event(**overrides):
+    base = {
+        "created_at": "2026-07-10 12:00:00",
+        "activity": "import",
+        "status": "succeeded",
+        "subject_type": "issue",
+        "subject_id": "iss-1",
+        "subject_label": "Saga #1",
+    }
+    base.update(overrides)
+    return base
+
+
+def _journal(**overrides):
+    base = {
+        "release_key": "rk-1",
+        "issueid": "iss-1",
+        "provider": "DDL",
+        "stage": "failed",
+        "stage_rank": 60,
+        "updated_date": "2026-07-10 12:00:00",
+        "status": None,
+        "fail_reason": "download_failed",
+    }
+    base.update(overrides)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Timeline
+# ---------------------------------------------------------------------------
+
+
+def test_timeline_returns_empty_page(activity_db):
+    from comicarr.app.activity import queries
+
+    page = queries.list_timeline_events(limit=25, offset=0)
+
+    assert page["results"] == []
+    assert page["total"] == 0
+    assert page["limit"] == 25
+    assert page["offset"] == 0
+    assert page["has_more"] is False
+
+
+def test_timeline_orders_newest_first_and_paginates(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(activity_events),
+            [
+                _event(created_at="2026-07-10 10:00:00", subject_id="a", subject_label="A"),
+                _event(created_at="2026-07-10 12:00:00", subject_id="b", subject_label="B"),
+                _event(created_at="2026-07-10 11:00:00", subject_id="c", subject_label="C"),
+            ],
+        )
+
+    page = queries.list_timeline_events(limit=2, offset=0)
+    assert [row["subject_id"] for row in page["results"]] == ["b", "c"]
+    assert page["total"] == 3
+    assert page["has_more"] is True
+
+    page2 = queries.list_timeline_events(limit=2, offset=2)
+    assert [row["subject_id"] for row in page2["results"]] == ["a"]
+    assert page2["has_more"] is False
+
+
+def test_timeline_clamps_limit_to_pagination_bounds(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(activity_events),
+            [
+                _event(subject_id=str(i), subject_label="E%s" % i, created_at="2026-07-10 12:%02d:00" % i)
+                for i in range(5)
+            ],
+        )
+
+    # Below minimum and above maximum are clamped (service/query seam).
+    page_low = queries.list_timeline_events(limit=0, offset=0)
+    assert page_low["limit"] == queries.TIMELINE_LIMIT_MIN
+    assert len(page_low["results"]) == queries.TIMELINE_LIMIT_MIN
+
+    page_high = queries.list_timeline_events(limit=10_000, offset=0)
+    assert page_high["limit"] == queries.TIMELINE_LIMIT_MAX
+    assert len(page_high["results"]) == 5
+
+
+def test_timeline_issue_and_annual_scope_exact_subject_match(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(activity_events),
+            [
+                _event(subject_type="issue", subject_id="iss-1", subject_label="Target issue"),
+                _event(subject_type="issue", subject_id="iss-2", subject_label="Other issue"),
+                _event(subject_type="annual", subject_id="iss-1", subject_label="Same id annual"),
+                _event(subject_type="annual", subject_id="ann-9", subject_label="Target annual"),
+            ],
+        )
+
+    issue_page = queries.list_timeline_events(scope_type="issue", scope_id="iss-1")
+    assert [row["subject_label"] for row in issue_page["results"]] == ["Target issue"]
+
+    annual_page = queries.list_timeline_events(scope_type="annual", scope_id="ann-9")
+    assert [row["subject_label"] for row in annual_page["results"]] == ["Target annual"]
+
+
+def test_timeline_series_scope_rollup(activity_db):
+    """Series scope: parent_series_id + series subject + series-scoped runs."""
+    from comicarr.app.activity import queries
+
+    # Multi-row insert requires identical keys across parameter groups.
+    rows = [
+        _event(
+            subject_type="issue",
+            subject_id="iss-1",
+            subject_label="Child issue",
+            parent_series_id="ser-1",
+            scope_type=None,
+            scope_id=None,
+        ),
+        _event(
+            subject_type="series",
+            subject_id="ser-1",
+            subject_label="Series subject",
+            parent_series_id=None,
+            scope_type=None,
+            scope_id=None,
+        ),
+        _event(
+            subject_type="run",
+            subject_id="run-1",
+            subject_label="Scoped run",
+            parent_series_id=None,
+            scope_type="series",
+            scope_id="ser-1",
+        ),
+        _event(
+            subject_type="issue",
+            subject_id="iss-99",
+            subject_label="Other series",
+            parent_series_id="ser-2",
+            scope_type=None,
+            scope_id=None,
+        ),
+        _event(
+            subject_type="run",
+            subject_id="run-2",
+            subject_label="Other scoped run",
+            parent_series_id=None,
+            scope_type="series",
+            scope_id="ser-2",
+        ),
+    ]
+    with activity_db.begin() as conn:
+        conn.execute(insert(activity_events), rows)
+
+    page = queries.list_timeline_events(scope_type="series", scope_id="ser-1")
+    labels = {row["subject_label"] for row in page["results"]}
+    assert labels == {"Child issue", "Series subject", "Scoped run"}
+
+
+def test_timeline_rejects_incomplete_scope(activity_db):
+    from comicarr.app.activity import queries
+
+    with pytest.raises(ValueError, match="scope"):
+        queries.list_timeline_events(scope_type="series", scope_id=None)
+
+    with pytest.raises(ValueError, match="scope"):
+        queries.list_timeline_events(scope_type=None, scope_id="ser-1")
+
+    with pytest.raises(ValueError, match="scope"):
+        queries.list_timeline_events(scope_type="arc", scope_id="1")
+
+
+# ---------------------------------------------------------------------------
+# Needs-attention band
+# ---------------------------------------------------------------------------
+
+
+def test_band_uses_r9_unresolved_predicate(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(release_key="open-failed", stage="failed", status=None),
+                _journal(release_key="open-review", stage="manual_review", status=None, issueid="iss-2"),
+                _journal(release_key="retried", stage="failed", status="retried", issueid="iss-3"),
+                _journal(release_key="ignored", stage="failed", status="ignored", issueid="iss-4"),
+                _journal(release_key="imported", stage="manual_review", status="imported", issueid="iss-5"),
+                _journal(
+                    release_key="still-open",
+                    stage="snatched",
+                    stage_rank=10,
+                    status=None,
+                    issueid="iss-6",
+                ),
+            ],
+        )
+
+    rows = queries.list_attention_band()
+    keys = {row["release_key"] for row in rows}
+    assert keys == {"open-failed", "open-review"}
+    # Same updated_date → stable tie-break on release_key desc
+    assert [row["release_key"] for row in rows] == ["open-review", "open-failed"]
+
+
+def test_band_issue_scope_intersects(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(release_key="match", issueid="iss-1", stage="failed"),
+                _journal(release_key="other", issueid="iss-2", stage="failed"),
+            ],
+        )
+
+    rows = queries.list_attention_band(scope_type="issue", scope_id="iss-1")
+    assert [row["release_key"] for row in rows] == ["match"]
+
+
+def test_band_series_scope_via_issue_and_annual_membership(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(insert(issues), [{"IssueID": "iss-1", "ComicID": "ser-1", "ComicName": "Saga"}])
+        conn.execute(insert(annuals), [{"IssueID": "ann-1", "ComicID": "ser-1", "ComicName": "Saga Annual"}])
+        conn.execute(insert(issues), [{"IssueID": "iss-2", "ComicID": "ser-2", "ComicName": "Other"}])
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(release_key="issue-row", issueid="iss-1", stage="failed"),
+                _journal(release_key="annual-row", issueid="ann-1", stage="manual_review"),
+                _journal(release_key="other-series", issueid="iss-2", stage="failed"),
+            ],
+        )
+
+    rows = queries.list_attention_band(scope_type="series", scope_id="ser-1")
+    assert {row["release_key"] for row in rows} == {"issue-row", "annual-row"}
+
+
+# ---------------------------------------------------------------------------
+# Open-work counts (authority rule)
+# ---------------------------------------------------------------------------
+
+
+def test_open_work_counts_from_ledgers_not_narrative(activity_db):
+    """Authority rule: never aggregate activity_events for counts."""
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        # Narrative noise — must not affect counts
+        conn.execute(
+            insert(activity_events),
+            [
+                _event(activity="search", status="started", subject_type="run", subject_id="r1"),
+                _event(activity="grab", status="failed", subject_type="issue", subject_id="iss-1"),
+            ],
+        )
+        conn.execute(
+            insert(acquisition_run_items),
+            [
+                {
+                    "run_id": "run-1",
+                    "command_kind": "search_issue",
+                    "entity_type": "issue",
+                    "entity_id": "iss-1",
+                    "state": "accepted",
+                    "dispatch_state": "pending",
+                    "queue_priority": "routine",
+                    "attempt_count": 0,
+                    "created_at": "2026-07-10 10:00:00",
+                    "updated_at": "2026-07-10 10:00:00",
+                },
+                {
+                    "run_id": "run-1",
+                    "command_kind": "search_issue",
+                    "entity_type": "issue",
+                    "entity_id": "iss-2",
+                    "state": "running",
+                    "dispatch_state": "accepted",
+                    "queue_priority": "routine",
+                    "attempt_count": 1,
+                    "created_at": "2026-07-10 10:00:00",
+                    "updated_at": "2026-07-10 10:01:00",
+                },
+                {
+                    "run_id": "run-1",
+                    "command_kind": "search_issue",
+                    "entity_type": "issue",
+                    "entity_id": "iss-3",
+                    "state": "succeeded",
+                    "dispatch_state": "accepted",
+                    "queue_priority": "routine",
+                    "attempt_count": 1,
+                    "created_at": "2026-07-10 10:00:00",
+                    "updated_at": "2026-07-10 10:02:00",
+                    "completed_at": "2026-07-10 10:02:00",
+                },
+            ],
+        )
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(
+                    release_key="open-pp",
+                    stage="post_processing",
+                    stage_rank=30,
+                    status=None,
+                    issueid="iss-10",
+                ),
+                _journal(
+                    release_key="done",
+                    stage="post_processed",
+                    stage_rank=50,
+                    status=None,
+                    issueid="iss-11",
+                ),
+                _journal(release_key="need-attn", stage="failed", status=None, issueid="iss-12"),
+                _journal(
+                    release_key="resolved",
+                    stage="failed",
+                    status="ignored",
+                    issueid="iss-13",
+                ),
+            ],
+        )
+
+    counts = queries.get_open_work_counts()
+    # 2 in-flight run items + 1 open journal stage
+    assert counts["in_flight"] == 3
+    assert counts["attention"] == 1
+    assert "activity_events" not in counts
+
+
+def test_open_work_idle_when_ledgers_empty(activity_db):
+    from comicarr.app.activity import queries
+
+    counts = queries.get_open_work_counts()
+    assert counts == {"in_flight": 0, "attention": 0}
+
+
+# ---------------------------------------------------------------------------
+# Service / router surface
+# ---------------------------------------------------------------------------
+
+
+def test_service_timeline_and_status_shapes(activity_db):
+    from comicarr.app.activity import service
+
+    with activity_db.begin() as conn:
+        conn.execute(insert(activity_events), [_event()])
+        conn.execute(
+            insert(pipeline_journal),
+            [_journal(release_key="band-1", stage="failed", status=None)],
+        )
+
+    timeline = service.get_timeline(limit=10, offset=0)
+    assert "results" in timeline
+    assert timeline["total"] == 1
+    assert timeline["results"][0]["event_id"] is not None
+
+    band = service.get_attention_band()
+    assert len(band["results"]) == 1
+    assert band["results"][0]["release_key"] == "band-1"
+
+    status = service.get_status()
+    assert status["in_flight"] == 0
+    assert status["attention"] == 1
+
+
+def test_router_registers_session_protected_routes():
+    """Auth class matches other operator APIs (require_session dependency)."""
+    from comicarr.app.activity.router import router
+    from comicarr.app.core.security import require_session
+
+    paths = {route.path for route in router.routes}
+    assert "/api/activity/timeline" in paths
+    assert "/api/activity/band" in paths
+    assert "/api/activity/status" in paths
+
+    for route in router.routes:
+        deps = getattr(route, "dependencies", None) or []
+        callables = {getattr(d, "dependency", None) for d in deps}
+        assert require_session in callables, "route %s missing require_session" % route.path

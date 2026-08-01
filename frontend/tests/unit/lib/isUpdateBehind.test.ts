@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isUpdateBehind } from "@/hooks/useSystemVersion";
+import { isUpdateBehind } from "@/hooks/useVersion";
 
 describe("isUpdateBehind", () => {
   it("is true only on successful poll with update_state behind", () => {

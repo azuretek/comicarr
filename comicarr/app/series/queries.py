@@ -223,6 +223,18 @@ def unqueue_issue(issue_id, audit_identity):
     )
 
 
+def ignore_issue(issue_id, audit_identity):
+    """Mark an issue as Ignored (operator permanent decline; not Skipped)."""
+    from comicarr.app.acquisition.models import AcquisitionIntent
+    from comicarr.app.acquisition.policy import explicit_intent_values
+
+    db.upsert(
+        "issues",
+        explicit_intent_values(AcquisitionIntent.IGNORED, audit_identity),
+        {"IssueID": issue_id},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Wanted queries
 # ---------------------------------------------------------------------------

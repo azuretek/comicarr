@@ -59,6 +59,7 @@ _GITHUB_REQUEST_TIMEOUT = (10, 10)
 
 # Constant owner/repo — update checks never read GIT_USER (issue #470 / #456).
 _GITHUB_RELEASES_LATEST = "https://api.github.com/repos/frankieramirez/comicarr/releases/latest"
+_GITHUB_RELEASE_TAG_URL = "https://github.com/frankieramirez/comicarr/releases/tag/v%s"
 
 UPDATE_STATE_BEHIND = "behind"
 UPDATE_STATE_CURRENT = "current"
@@ -67,6 +68,8 @@ UPDATE_STATE_UNKNOWN = "unknown"
 REASON_NEVER_CHECKED = "never_checked"
 REASON_UNREACHABLE = "unreachable"
 REASON_RATE_LIMITED = "rate_limited"
+
+RELEASE_ANNOUNCE_EVENT = "Update available"
 
 
 def _set_version_state(**fields):
@@ -464,6 +467,143 @@ def _classify_release_state(local_version, remote_version):
     return UPDATE_STATE_CURRENT
 
 
+def release_announce_message(current_version, latest_version):
+    """One template for all eleven notifiers: version arrow + release URL only."""
+    body = "%s → %s\n%s" % (
+        current_version,
+        latest_version,
+        _GITHUB_RELEASE_TAG_URL % latest_version,
+    )
+    return RELEASE_ANNOUNCE_EVENT, body
+
+
+def should_announce_release(announce_on, update_state, latest_version, last_announced_version):
+    """Whether this check should fan out a release announcement.
+
+    Contract (#453): global announce toggle × behind × dedup by remote latest.
+    Empty ``last_announced_version`` always qualifies when behind and opted in.
+    """
+    if not announce_on:
+        return False
+    if update_state != UPDATE_STATE_BEHIND:
+        return False
+    if not latest_version:
+        return False
+    last = (last_announced_version or "").strip()
+    if last and last == str(latest_version).strip():
+        return False
+    return True
+
+
+def _record_announced_version(latest_version):
+    """Persist dedup key after fan-out attempt so flaky notifiers cannot re-spam."""
+    try:
+        comicarr.CONFIG.LAST_ANNOUNCED_VERSION = latest_version
+        comicarr.CONFIG.writeconfig(values={"last_announced_version": latest_version})
+    except Exception as e:
+        logger.warn("[RELEASE_ANNOUNCE] Could not persist LAST_ANNOUNCED_VERSION=%s: %s" % (latest_version, e))
+
+
+def _fan_out_release_announce(event, body, current_version, latest_version):
+    """Send the release template through every ENABLED notifier (no snatch flags)."""
+    from comicarr import notifiers
+
+    module = "[RELEASE_ANNOUNCE]"
+    # Mattermost's non-test path requires metadata for its embed; content is in body.
+    mattermost_meta = {
+        "series": "Comicarr",
+        "issue": str(latest_version),
+        "year": str(current_version) if current_version is not None else "",
+    }
+
+    def _try(label, send):
+        try:
+            send()
+        except Exception as e:
+            logger.warn("%s %s notify failed: %s" % (module, label, e))
+
+    if comicarr.CONFIG.PROWL_ENABLED:
+        logger.info("%s Sending Prowl notification" % module)
+        _try("Prowl", lambda: notifiers.PROWL().notify(body, event, module=module))
+
+    if comicarr.CONFIG.PUSHOVER_ENABLED:
+        logger.info("%s Sending Pushover notification" % module)
+        _try("Pushover", lambda: notifiers.PUSHOVER().notify(event, message=body, module=module))
+
+    if comicarr.CONFIG.BOXCAR_ENABLED:
+        logger.info("%s Sending Boxcar notification" % module)
+        _try("Boxcar", lambda: notifiers.BOXCAR().notify(prline=event, prline2=body, module=module))
+
+    if comicarr.CONFIG.PUSHBULLET_ENABLED:
+        logger.info("%s Sending Pushbullet notification" % module)
+        _try(
+            "Pushbullet",
+            lambda: notifiers.PUSHBULLET().notify(prline=event, prline2=body, module=module),
+        )
+
+    if comicarr.CONFIG.TELEGRAM_ENABLED:
+        logger.info("%s Sending Telegram notification" % module)
+        _try("Telegram", lambda: notifiers.TELEGRAM().notify("%s - %s" % (event, body)))
+
+    if comicarr.CONFIG.SLACK_ENABLED:
+        logger.info("%s Sending Slack notification" % module)
+        _try("Slack", lambda: notifiers.SLACK().notify(event, body, module=module))
+
+    if comicarr.CONFIG.MATTERMOST_ENABLED:
+        logger.info("%s Sending Mattermost notification" % module)
+        _try(
+            "Mattermost",
+            lambda: notifiers.MATTERMOST().notify(event, body, metadata=mattermost_meta, module=module),
+        )
+
+    if comicarr.CONFIG.DISCORD_ENABLED:
+        logger.info("%s Sending Discord notification" % module)
+        # payload["content"] still carries the full body; legacy embed fields
+        # may mis-parse non-issue text and are best-effort here.
+        _try("Discord", lambda: notifiers.DISCORD().notify(event, body, module=module))
+
+    if comicarr.CONFIG.EMAIL_ENABLED:
+        logger.info("%s Sending email notification" % module)
+        _try(
+            "Email",
+            lambda: notifiers.EMAIL().notify(body, "Comicarr notification - %s" % event, module=module),
+        )
+
+    if comicarr.CONFIG.GOTIFY_ENABLED:
+        logger.info("%s Sending Gotify notification" % module)
+        _try("Gotify", lambda: notifiers.GOTIFY().notify(event, body, module=module))
+
+    if comicarr.CONFIG.MATRIX_ENABLED:
+        logger.info("%s Sending Matrix notification" % module)
+        _try("Matrix", lambda: notifiers.MATRIX().notify(event, body, module=module))
+
+
+def announce_release(current_version, latest_version):
+    """Fan out one release announcement, then record the remote latest as announced.
+
+    Write timing is after the attempt (success or partial failure) so a single
+    flaky notifier cannot re-spam every check interval (#453 / #475).
+    """
+    event, body = release_announce_message(current_version, latest_version)
+    logger.info(
+        "[RELEASE_ANNOUNCE] Announcing release %s → %s to enabled notifiers" % (current_version, latest_version)
+    )
+    try:
+        _fan_out_release_announce(event, body, current_version, latest_version)
+    except Exception as e:
+        logger.warn("[RELEASE_ANNOUNCE] Fan-out raised: %s" % e)
+    _record_announced_version(latest_version)
+
+
+def maybe_announce_release(update_state, latest_version, current_version):
+    """Hook after a release check: announce when opted in, behind, and not yet told."""
+    announce_on = bool(getattr(comicarr.CONFIG, "ANNOUNCE_RELEASES", False))
+    last_announced = getattr(comicarr.CONFIG, "LAST_ANNOUNCED_VERSION", None)
+    if not should_announce_release(announce_on, update_state, latest_version, last_announced):
+        return
+    announce_release(current_version=current_version, latest_version=latest_version)
+
+
 def _apply_update_state(update_state, update_reason=None, latest_version=None, message=None):
     """Persist update state for GET /api/system/version and return the check payload."""
     fields = {"update_state": update_state, "update_reason": update_reason}
@@ -581,12 +721,19 @@ def checkGithub(current_version=None):
     logger.info("[CHECK_GITHUB] %s" % chk_message)
 
     # No GLOBAL_MESSAGES / check_update producer — badge will poll (later ticket).
-    return _apply_update_state(
+    result = _apply_update_state(
         update_state,
         update_reason=None,
         latest_version=latest_version,
         message=chk_message,
     )
+    # Outbound announce after state is computed (#475). All install types.
+    maybe_announce_release(
+        update_state=result["update_state"],
+        latest_version=result["latest_version"],
+        current_version=result["release_version"],
+    )
+    return result
 
 
 def update():
