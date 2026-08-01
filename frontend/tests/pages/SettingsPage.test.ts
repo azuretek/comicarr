@@ -54,7 +54,6 @@ describe("prepareConfigSaveData", () => {
       discord_webhook_url: "https://discord.com/api/webhooks/new",
     });
   });
-
 });
 
 describe("SettingsPage", () => {
@@ -112,5 +111,82 @@ describe("SettingsPage", () => {
     await user.click(screen.getAllByRole("button", { name: "About" })[0]);
     expect(await screen.findByText(formatAppVersion(false))).toBeTruthy();
     expect(screen.queryByText("0.19.13")).toBeNull();
+  });
+
+  it("shows the Updates group with toggles, diagnostics, and Check now", async () => {
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({
+          check_github: true,
+          announce_releases: false,
+          config_path: "/config/config.ini",
+          data_dir: "/data",
+          python_version: "3.12.0",
+        }),
+      ),
+      http.get("/api/system/version", () =>
+        HttpResponse.json({
+          release_version: "0.21.0",
+          latest_version: "0.22.0",
+          update_state: "behind",
+          update_reason: null,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+
+    render(createElement(SettingsPage));
+    expect(await screen.findByText("Settings")).toBeTruthy();
+    await user.click(screen.getAllByRole("button", { name: "About" })[0]);
+
+    expect(await screen.findByText("Updates")).toBeTruthy();
+    expect(screen.getByText("Check for updates")).toBeTruthy();
+    expect(screen.getByText("Announce releases to notifiers")).toBeTruthy();
+    expect(
+      await screen.findByText("Update available: 0.21.0 → 0.22.0"),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Check now" })).toBeTruthy();
+    // Order: Updates before What's new before build rows.
+    const updates = screen.getByText("Updates");
+    const whatsNew = screen.getByText("What's new");
+    const build = screen.getByText("Build / environment");
+    expect(
+      updates.compareDocumentPosition(whatsNew) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      whatsNew.compareDocumentPosition(build) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // AUTO_UPDATE must not appear.
+    expect(screen.queryByText(/auto.?update/i)).toBeNull();
+    // No GitHub/git wording in the operator-facing labels/help in this group.
+    expect(screen.queryByText(/GitHub/i)).toBeNull();
+  });
+
+  it("shows unknown update reason in operator language", async () => {
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({
+          check_github: false,
+          announce_releases: false,
+        }),
+      ),
+      http.get("/api/system/version", () =>
+        HttpResponse.json({
+          update_state: "unknown",
+          update_reason: "unreachable",
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+
+    render(createElement(SettingsPage));
+    expect(await screen.findByText("Settings")).toBeTruthy();
+    await user.click(screen.getAllByRole("button", { name: "About" })[0]);
+
+    expect(
+      await screen.findByText("Could not reach the release source"),
+    ).toBeTruthy();
   });
 });
