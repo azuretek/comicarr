@@ -249,14 +249,18 @@ def _do_manual_metatag(issueid, comicid=None, group=False):
                 [issueid],
             )
             if not issuedata:
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "failure",
-                    "comicname": None,
-                    "seriesyear": None,
-                    "comicid": comicid,
-                    "tables": "both",
-                    "message": "Unable to locate corresponding issueid: %s" % issueid,
-                }
+                try:
+                    from comicarr.app.activity.producers import emit_tag_activity
+
+                    emit_tag_activity(
+                        "failed",
+                        issueid=issueid,
+                        comicid=comicid,
+                        reason_code="issue_not_found",
+                        reason_detail="Unable to locate corresponding issueid: %s" % issueid,
+                    )
+                except Exception as e:
+                    logger.fdebug("[ACTIVITY] tag.failed emit skipped: %s" % e)
                 return
 
         comversion = issuedata["ComicVersion"]
@@ -290,14 +294,18 @@ def _do_manual_metatag(issueid, comicid=None, group=False):
                 "%s %s does not exist in the given location. Cannot metatag this filename due to this."
                 % (module, filename)
             )
-            comicarr.GLOBAL_MESSAGES = {
-                "status": "failure",
-                "comicname": None,
-                "seriesyear": None,
-                "comicid": comicid,
-                "tables": "both",
-                "message": "Unable to locate corresponding filename: %s" % filename,
-            }
+            try:
+                from comicarr.app.activity.producers import emit_tag_activity
+
+                emit_tag_activity(
+                    "failed",
+                    issueid=issueid,
+                    comicid=comicid,
+                    reason_code="file_not_found",
+                    reason_detail="Unable to locate corresponding filename: %s" % filename,
+                )
+            except Exception as e:
+                logger.fdebug("[ACTIVITY] tag.failed emit skipped: %s" % e)
             return
 
         comicid = issuedata["ComicID"]
@@ -348,28 +356,39 @@ def _do_manual_metatag(issueid, comicid=None, group=False):
     dst_filename = None
     if metaresponse == "fail":
         logger.fdebug(module + " Unable to write metadata successfully - check comicarr.log file.")
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "failure",
-            "comicname": comicname,
-            "seriesyear": seriesyear,
-            "comicid": comicid,
-            "tables": "both",
-            "message": "Unable to write metadata - there were errors. Check the log files",
-        }
+        try:
+            from comicarr.app.activity.producers import emit_tag_activity
+
+            emit_tag_activity(
+                "failed",
+                issueid=issueid,
+                comicid=comicid,
+                comicname=comicname,
+                seriesyear=seriesyear,
+                reason_code="metadata_write_failed",
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] tag.failed emit skipped: %s" % e)
         return
     elif metaresponse == "unrar error":
         logger.error(
             module
             + " This is a corrupt archive - whether CRC errors or it is incomplete. Marking as BAD, and retrying a different copy."
         )
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "failure",
-            "comicname": comicname,
-            "seriesyear": seriesyear,
-            "comicid": comicid,
-            "tables": "both",
-            "message": "%s is a corrupt archive." % filename,
-        }
+        try:
+            from comicarr.app.activity.producers import emit_tag_activity
+
+            emit_tag_activity(
+                "failed",
+                issueid=issueid,
+                comicid=comicid,
+                comicname=comicname,
+                seriesyear=seriesyear,
+                reason_code="bad_archive",
+                reason_detail="%s is a corrupt archive." % filename,
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] tag.failed emit skipped: %s" % e)
         return
     else:
         dst_filename = os.path.split(metaresponse)[1]
@@ -432,26 +451,37 @@ def _do_manual_metatag(issueid, comicid=None, group=False):
                     except OSError:
                         pass
 
-    if all([group is False, fail is False]):
-        updater.forceRescan(comicid)
+    # Always narrate per-issue tag outcomes (group batch rollups deleted; #430 §3.2).
+    if fail is False:
         if group is False:
-            comicarr.GLOBAL_MESSAGES = {
-                "status": "success",
-                "comicname": comicname,
-                "seriesyear": seriesyear,
-                "comicid": comicid,
-                "tables": "both",
-                "message": "Successfully meta-tagged %s" % dst_filename,
-            }
-    elif all([group is False, fail is True]):
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "failure",
-            "comicname": comicname,
-            "seriesyear": seriesyear,
-            "comicid": comicid,
-            "tables": "both",
-            "message": "Metatagging was not successful for %s" % dst_filename,
-        }
+            updater.forceRescan(comicid)
+        try:
+            from comicarr.app.activity.producers import emit_tag_activity
+
+            emit_tag_activity(
+                "succeeded",
+                issueid=issueid,
+                comicid=comicid,
+                comicname=comicname,
+                seriesyear=seriesyear,
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] tag.succeeded emit skipped: %s" % e)
+    else:
+        try:
+            from comicarr.app.activity.producers import emit_tag_activity
+
+            emit_tag_activity(
+                "failed",
+                issueid=issueid,
+                comicid=comicid,
+                comicname=comicname,
+                seriesyear=seriesyear,
+                reason_code="metatag_copy_failed",
+                reason_detail="Metatagging was not successful for %s" % dst_filename,
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] tag.failed emit skipped: %s" % e)
 
 
 def _thread_bulk_meta(comicinfo, issueinfo):
@@ -463,18 +493,11 @@ def _thread_bulk_meta(comicinfo, issueinfo):
         "[SERIES-METATAGGER][%s (%s)] Finished (re)tagging of metadata for selected issues."
         % (comicinfo["ComicName"], comicinfo["ComicYear"])
     )
-    issueline = "%s issues" % len(issueinfo)
-    if len(issueinfo) == 1:
-        issueline = "1 issue"
-    comicarr.GLOBAL_MESSAGES = {
-        "status": "success",
-        "comicname": comicinfo["ComicName"],
-        "seriesyear": comicinfo["ComicYear"],
-        "comicid": comicinfo["ComicID"],
-        "tables": "both",
-        "message": "Finished (re)tagging of %s of %s (%s)"
-        % (issueline, comicinfo["ComicName"], comicinfo["ComicYear"]),
-    }
+    # Batch rollup deleted (#430 §3.2 / #484): per-issue tag.* rows already emit.
+    logger.info(
+        "[SERIES-METATAGGER] bulk complete for %s (%s) — %s issues"
+        % (comicinfo["ComicName"], comicinfo["ComicYear"], len(issueinfo))
+    )
 
 
 def _do_bulk_metatag(ComicID, IssueIDs, threaded=False, registry=None):
@@ -521,14 +544,20 @@ def _do_bulk_metatag(ComicID, IssueIDs, threaded=False, registry=None):
         logger.warn(
             "[SERIES-METATAGGER][%s (%s)] %s" % (comicinfo["ComicName"], comicinfo["ComicYear"], warningMessage)
         )
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "failure",
-            "comicname": cinfo["ComicName"],
-            "seriesyear": cinfo["ComicYear"],
-            "comicid": ComicID,
-            "tables": "both",
-            "message": warningMessage,
-        }
+        try:
+            from comicarr.app.activity.producers import emit_tag_activity
+
+            emit_tag_activity(
+                "failed",
+                comicid=ComicID,
+                comicname=cinfo["ComicName"],
+                seriesyear=cinfo["ComicYear"],
+                reason_code="cv_batch_limit",
+                reason_detail=warningMessage,
+                subject_level="series",
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] tag.failed @series emit skipped: %s" % e)
         return
 
     issueinfo = []
@@ -557,18 +586,7 @@ def _thread_group_meta(comicinfo, issueinfo):
         "[SERIES-METATAGGER][%s (%s)] Finished complete series (re)tagging of metadata."
         % (comicinfo["ComicName"], comicinfo["ComicYear"])
     )
-    issueline = "%s issues" % len(issueinfo)
-    if len(issueinfo) == 1:
-        issueline = "1 issue"
-    comicarr.GLOBAL_MESSAGES = {
-        "status": "success",
-        "comicname": comicinfo["ComicName"],
-        "seriesyear": comicinfo["ComicYear"],
-        "comicid": comicinfo["ComicID"],
-        "tables": "both",
-        "message": "Finished complete series (re)tagging of %s of %s (%s)"
-        % (issueline, comicinfo["ComicName"], comicinfo["ComicYear"]),
-    }
+    # Batch rollup deleted (#430 §3.2 / #484): per-issue tag.* rows already emit.
 
 
 def _do_group_metatag(ComicID, threaded=False, registry=None):
@@ -606,14 +624,20 @@ def _do_group_metatag(ComicID, threaded=False, registry=None):
         logger.warn(
             "[SERIES-METATAGGER][%s (%s)] %s" % (comicinfo["ComicName"], comicinfo["ComicYear"], warningMessage)
         )
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "failure",
-            "comicname": cinfo["ComicName"],
-            "seriesyear": cinfo["ComicYear"],
-            "comicid": ComicID,
-            "tables": "both",
-            "message": warningMessage,
-        }
+        try:
+            from comicarr.app.activity.producers import emit_tag_activity
+
+            emit_tag_activity(
+                "failed",
+                comicid=ComicID,
+                comicname=cinfo["ComicName"],
+                seriesyear=cinfo["ComicYear"],
+                reason_code="cv_batch_limit",
+                reason_detail=warningMessage,
+                subject_level="series",
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] tag.failed @series emit skipped: %s" % e)
         return
 
     issueinfo = []

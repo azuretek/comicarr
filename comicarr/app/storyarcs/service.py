@@ -616,22 +616,20 @@ def _add_story_arc(
     _arc_watchlist(storyarcid)
     if arcrefresh:
         logger.info("%s Successfully Refreshed %s" % (module, storyarcname))
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "success",
-            "event": "storyarc_added",
-            "storyarcname": storyarcname,
-            "storyarcid": storyarcid,
-            "message": "Successfully refreshed %s" % storyarcname,
-        }
+        try:
+            from comicarr.app.activity.producers import emit_arc_activity
+
+            emit_arc_activity("refresh", "succeeded", storyarcid, storyarcname)
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] refresh.succeeded @arc emit skipped: %s" % e)
     else:
         logger.info("%s Successfully Added %s" % (module, storyarcname))
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "success",
-            "event": "storyarc_added",
-            "storyarcname": storyarcname,
-            "storyarcid": storyarcid,
-            "message": "Successfully added %s" % storyarcname,
-        }
+        try:
+            from comicarr.app.activity.producers import emit_arc_activity
+
+            emit_arc_activity("add", "succeeded", storyarcid, storyarcname)
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] add.succeeded @arc emit skipped: %s" % e)
 
 
 # ---------------------------------------------------------------------------

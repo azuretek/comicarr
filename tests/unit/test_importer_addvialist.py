@@ -25,15 +25,13 @@ def _run_single_item(series_queue, issue_queue, item):
     """Process one queue item then exit the addvialist loop."""
     series_queue.put(item)
     series_queue.put("exit")
-    captured_messages = None
 
     with patch("comicarr.importer.addComictoDB") as mock_add:
         with patch("comicarr.importer.time.sleep"):
             with patch.object(comicarr, "ADD_LIST", queue.Queue()):
                 addvialist(series_queue, issue_queue)
-                captured_messages = comicarr.GLOBAL_MESSAGES
 
-    return mock_add, captured_messages
+    return mock_add
 
 
 class TestAddvialistSeriesyear:
@@ -42,7 +40,7 @@ class TestAddvialistSeriesyear:
         issue_queue = queue.Queue()
         item = {"comicid": "12345", "comicname": None}
 
-        mock_add, _messages = _run_single_item(series_queue, issue_queue, item)
+        mock_add = _run_single_item(series_queue, issue_queue, item)
 
         mock_add.assert_called_once_with("12345")
 
@@ -51,19 +49,20 @@ class TestAddvialistSeriesyear:
         issue_queue = queue.Queue()
         item = {"comicid": "12345", "comicname": "Spider-Man"}
 
-        mock_add, _messages = _run_single_item(series_queue, issue_queue, item)
+        mock_add = _run_single_item(series_queue, issue_queue, item)
 
         mock_add.assert_called_once_with("12345")
 
     def test_comicname_with_seriesyear(self):
+        """In-flight mass-add no longer writes GLOBAL_MESSAGES (#484); seriesyear is passed through."""
         series_queue = queue.Queue()
         issue_queue = queue.Queue()
         item = {"comicid": "12345", "comicname": "Spider-Man", "seriesyear": "2020"}
 
-        mock_add, messages = _run_single_item(series_queue, issue_queue, item)
+        mock_add = _run_single_item(series_queue, issue_queue, item)
 
         mock_add.assert_called_once_with("12345")
-        assert messages["seriesyear"] == "2020"
+        assert item["seriesyear"] == "2020"
 
 
 class TestAddComicPayloads:

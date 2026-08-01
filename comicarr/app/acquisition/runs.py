@@ -16,6 +16,7 @@ from sqlalchemy import func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from comicarr.app.acquisition.models import DispatchState, ItemOutcome, RunState
+from comicarr.app.common.redaction import redact_sensitive_text
 from comicarr.db import get_engine
 from comicarr.tables import acquisition_run_items, acquisition_runs
 
@@ -55,6 +56,40 @@ def _utcnow():
 
 def _value(value):
     return value.value if hasattr(value, "value") else str(value)
+
+
+def _redact_reason(reason):
+    """Persist operator-visible reasons through the canonical redactor (#430 A2)."""
+    if reason in (None, ""):
+        return None
+    return redact_sensitive_text(str(reason))[:1000]
+
+
+def is_retry_pending(item):
+    """True when an item is awaiting another attempt (retry guard, #430 A1).
+
+    Discriminator: state is ACCEPTED and attempt_count > 0. ``next_attempt_at``
+    is never written; this is the only honest "retry pending" signal.
+    """
+    if not item:
+        return False
+    try:
+        attempts = int(item.get("attempt_count") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    return item.get("state") == ItemOutcome.ACCEPTED.value and attempts > 0
+
+
+def _emit_run_completion_safe(run):
+    """Best-effort search run bracket; never raises into the ledger path."""
+    try:
+        from comicarr.app.activity.producers import emit_run_completion
+
+        emit_run_completion(run)
+    except Exception as e:
+        from comicarr import logger
+
+        logger.fdebug("[ACTIVITY] run completion emit skipped: %s" % e)
 
 
 def _row_dict(row):
@@ -307,7 +342,9 @@ class RunLedger:
                     completed_at=now,
                 )
             )
-        return self.get_run(run_id)
+        run = self.get_run(run_id)
+        _emit_run_completion_safe(run)
+        return run
 
     def claim_item(self, run_id, entity_type, entity_id):
         item = self.get_item(run_id, entity_type, entity_id)
@@ -330,26 +367,40 @@ class RunLedger:
             )
         return result.rowcount == 1
 
-    def record_requeue(self, run_id, entity_type, entity_id, reason, next_attempt_at=None):
+    def record_requeue(self, run_id, entity_type, entity_id, reason, next_attempt_at=None, *, replay=False):
+        """Re-accept a non-terminal item after a fault (or crash-replay).
+
+        ``replay=True`` marks crash-recovery requeues (worker restart). Any
+        future narrative producer **must** skip when the returned item has
+        ``replay=True`` so restarts are not reported as retries (#430 A4).
+        The flag is not a DB column — it is returned on the item dict only.
+        Degraded/retrying never narrates today; the flag still makes the
+        call-site decision greppable and enforceable.
+        """
         item = self.get_item(run_id, entity_type, entity_id)
         if item is None:
             raise KeyError("unknown acquisition item")
         current = ItemOutcome(item["state"])
         if current.terminal:
             raise ValueError("terminal acquisition items cannot be requeued implicitly")
+        safe_reason = _redact_reason(reason)
         with self.engine.begin() as conn:
             conn.execute(
                 update(acquisition_run_items)
                 .where(acquisition_run_items.c.item_id == item["item_id"])
                 .values(
                     state=ItemOutcome.ACCEPTED.value,
-                    reason=str(reason)[:1000] if reason else None,
+                    reason=safe_reason,
                     next_attempt_at=next_attempt_at,
                     updated_at=_utcnow(),
                 )
             )
         self.reconcile(run_id)
-        return self.get_item(run_id, entity_type, entity_id)
+        updated = self.get_item(run_id, entity_type, entity_id)
+        if updated is not None:
+            # Transient call-site contract — not persisted (#430 A4).
+            updated["replay"] = bool(replay)
+        return updated
 
     def record_outcome(self, run_id, entity_type, entity_id, outcome, reason=None):
         item = self.get_item(run_id, entity_type, entity_id)
@@ -363,6 +414,7 @@ class RunLedger:
             raise ValueError("terminal acquisition outcome cannot be replaced")
         if current is not outcome:
             now = _utcnow()
+            safe_reason = _redact_reason(reason)
             with self.engine.begin() as conn:
                 conn.execute(
                     update(acquisition_run_items)
@@ -370,7 +422,7 @@ class RunLedger:
                     .where(acquisition_run_items.c.state.in_([ItemOutcome.ACCEPTED.value, ItemOutcome.RUNNING.value]))
                     .values(
                         state=outcome.value,
-                        reason=str(reason)[:1000] if reason else None,
+                        reason=safe_reason,
                         next_attempt_at=None,
                         updated_at=now,
                         completed_at=now,
@@ -435,6 +487,8 @@ class RunLedger:
 
     def reconcile(self, run_id):
         self._require_run(run_id)
+        previous = self.get_run(run_id)
+        previous_completion = str(previous.get("completion_state") or "") if previous else ""
         with self.engine.begin() as conn:
             counts = dict(
                 tuple(row)
@@ -483,4 +537,12 @@ class RunLedger:
                     completed_at=completed_at,
                 )
             )
-        return self.get_run(run_id)
+        run = self.get_run(run_id)
+        # Narrate completion once when the run first becomes terminal (#484).
+        # In-flight progress stays derived (no search.started @ run here).
+        new_completion = str(run.get("completion_state") or "") if run else ""
+        was_open = previous_completion in ("", "pending", "running")
+        is_closed = new_completion not in ("", "pending", "running")
+        if was_open and is_closed:
+            _emit_run_completion_safe(run)
+        return run

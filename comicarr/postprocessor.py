@@ -3520,7 +3520,6 @@ class PostProcessor(object):
                     self.Process_next(comicid, issueid, issuenumOG, ml, stat)
                     dupthis = None
 
-            m_event = None
             if self.failed_files == 0:
                 if all([self.comicid is not None, self.issueid is None]):
                     try:
@@ -3580,12 +3579,7 @@ class PostProcessor(object):
                     else:
                         logger.info("%s Manual post-processing completed for %s issues." % (module, i))
                         global_line = "Manual post-processing completed for %s issues" % (i)
-                    m_event = "scheduler_message"
-                    dspcname = None
-                    dspcyear = None
             else:
-                dspcname = None
-                dspcyear = None
                 if self.comicid is not None:
                     logger.info(
                         "%s post-processing of pack completed for %s issues [FAILED: %s]"
@@ -3602,19 +3596,9 @@ class PostProcessor(object):
                     )
                     global_line = "Successfully post-processed %s issues [FAILED: %s]" % (i, self.failed_files)
 
-            d_line = {
-                "status": "success",
-                "comicid": self.comicid,
-                "comicname": dspcname,
-                "seriesyear": dspcyear,
-                "tables": "both",
-                "message": global_line,
-            }
-
-            if m_event is not None:
-                d_line["event"] = m_event
-
-            comicarr.GLOBAL_MESSAGES = d_line
+            # Batch rollup deleted (#430 §3.2 / #484): per-item import.* rows
+            # already emit from journal post_processed / related stages.
+            logger.fdebug("%s %s" % (module, global_line))
 
             if comicarr.APILOCK.locked():
                 comicarr.APILOCK.release()

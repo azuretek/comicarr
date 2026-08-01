@@ -107,46 +107,21 @@ def addvialist(seriesQueue, issueWantQueue):
             if item == "exit":
                 break
             seriesyear = item.get("seriesyear")
+            # In-flight mass-add progress is log-only (#427 / #484): completion
+            # narrates as add.succeeded when addComictoDB finishes.
             if item["comicname"] is not None:
                 if seriesyear is not None:
                     logger.info(
                         "[MASS-ADD][1/%s] Now adding %s (%s) [%s] "
                         % (seriesQueue.qsize() + 1, item["comicname"], seriesyear, item["comicid"])
                     )
-                    comicarr.GLOBAL_MESSAGES = {
-                        "status": "success",
-                        "event": "addbyid",
-                        "comicname": item["comicname"],
-                        "seriesyear": seriesyear,
-                        "comicid": item["comicid"],
-                        "tables": "None",
-                        "message": "Now adding %s (%s)" % (urllib.parse.unquote_plus(item["comicname"]), seriesyear),
-                    }
                 else:
                     logger.info(
                         "[MASS-ADD][1/%s] Now adding %s [%s] "
                         % (seriesQueue.qsize() + 1, item["comicname"], item["comicid"])
                     )
-                    comicarr.GLOBAL_MESSAGES = {
-                        "status": "success",
-                        "event": "addbyid",
-                        "comicname": item["comicname"],
-                        "seriesyear": seriesyear,
-                        "comicid": item["comicid"],
-                        "tables": "None",
-                        "message": "Now adding %s" % (urllib.parse.unquote_plus(item["comicname"])),
-                    }
             else:
                 logger.info("[MASS-ADD][1/%s] Now adding ComicID: %s " % (seriesQueue.qsize() + 1, item["comicid"]))
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "success",
-                    "event": "addbyid",
-                    "comicname": item["comicname"],
-                    "seriesyear": seriesyear,
-                    "comicid": item["comicid"],
-                    "tables": "None",
-                    "message": "Now adding via ComicID %s" % (item["comicid"]),
-                }
 
             if "suppress_addall" in item.keys():
                 addComictoDB(item["comicid"], suppress_addall=item["suppress_addall"])
@@ -747,15 +722,7 @@ def addComictoDB(
 
     db.upsert("comics", newValueDict, controlValueDict)
 
-    comicarr.GLOBAL_MESSAGES = {
-        "status": "mid-message-event",
-        "event": "addbyid",
-        "comicname": comic["ComicName"],
-        "seriesyear": SeriesYear,
-        "comicid": comicid,
-        "tables": "None",
-        "message": "mid-message-event",
-    }
+    # mid-message-event progress ping deleted (#430 / #484) — not narrated.
 
     # comicsort here...
     # run the re-sortorder here in order to properly display the page
@@ -1039,14 +1006,18 @@ def addComictoDB(
         return
 
     if calledfrom == "addbyid":
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "success",
-            "comicname": comic["ComicName"],
-            "seriesyear": SeriesYear,
-            "comicid": comicid,
-            "tables": "both",
-            "message": "Successfully added %s (%s)!" % (comic["ComicName"], SeriesYear),
-        }
+        try:
+            from comicarr.app.activity.producers import emit_series_activity
+
+            emit_series_activity(
+                "add",
+                "succeeded",
+                comicid,
+                comicname=comic["ComicName"],
+                seriesyear=SeriesYear,
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] add.succeeded emit skipped: %s" % e)
         logger.info(
             "Sucessfully added %s (%s) to the watchlist by directly using the ComicVine ID"
             % (comic["ComicName"], SeriesYear)
@@ -1056,14 +1027,18 @@ def addComictoDB(
         logger.info("Sucessfully added %s (%s) to the watchlist" % (comic["ComicName"], SeriesYear))
         return {"status": "complete", "comicname": comic["ComicName"], "year": SeriesYear}
     else:
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "success",
-            "comicname": comic["ComicName"],
-            "seriesyear": SeriesYear,
-            "comicid": comicid,
-            "tables": "both",
-            "message": "Successfully added %s (%s)!" % (comic["ComicName"], SeriesYear),
-        }
+        try:
+            from comicarr.app.activity.producers import emit_series_activity
+
+            emit_series_activity(
+                "add",
+                "succeeded",
+                comicid,
+                comicname=comic["ComicName"],
+                seriesyear=SeriesYear,
+            )
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] add.succeeded emit skipped: %s" % e)
         logger.info("Sucessfully added %s (%s) to the watchlist" % (comic["ComicName"], SeriesYear))
         return {"status": "complete"}
 
@@ -3232,7 +3207,7 @@ def replay_refresh_obligations(*, ledger=None, start_worker=True, maintenance=No
             ledger.record_outcome(run_id, "series", entity_id, ItemOutcome.QUARANTINED, reason=str(e))
             continue
         if item["state"] == ItemOutcome.RUNNING.value:
-            ledger.record_requeue(run_id, "series", entity_id, reason="worker restart")
+            ledger.record_requeue(run_id, "series", entity_id, reason="worker restart", replay=True)
         queue_items.append({**payload, "run_id": run_id})
         replayed_run_ids.add(run_id)
     _handoff_refresh_items(queue_items, start_worker=start_worker, maintenance=maintenance)

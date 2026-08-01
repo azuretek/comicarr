@@ -10,8 +10,9 @@
 """Activity Center domain — narrative timeline, attention band, open-work reads,
 age-based retention, and the sole write facade for activity_events.
 
-Query-backed HTTP reads (#485); daily 90-day purge (#489); write facade (#479).
-Producers call :func:`comicarr.app.activity.events.record_activity` (and
+Query-backed HTTP reads (#485); daily 90-day purge (#489); write facade (#479);
+production producers (#484) live in :mod:`comicarr.app.activity.producers` and
+call :func:`comicarr.app.activity.events.record_activity` (and
 :func:`publish_activity` after a shared-conn commit). Do not insert into
 ``activity_events`` or publish the ``activity`` SSE envelope elsewhere.
 """

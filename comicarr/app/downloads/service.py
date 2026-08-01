@@ -1215,12 +1215,12 @@ def reverse_the_pack_snatch(pack_id, comicid):
         db.upsert("issues", {"Status": "Skipped"}, {"IssueID": x})
     if reverselist:
         logger.info("[REVERSE UNO] Reversal completed for %s issues" % len(reverselist))
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "success",
-            "comicid": comicid,
-            "tables": "both",
-            "message": "Successfully changed status of %s issues to %s" % (len(reverselist), "Skipped"),
-        }
+        try:
+            from comicarr.app.activity.producers import emit_grab_cancelled_series
+
+            emit_grab_cancelled_series(comicid, count=len(reverselist))
+        except Exception as e:
+            logger.fdebug("[ACTIVITY] grab.cancelled @series emit skipped: %s" % e)
 
 
 def _finalize_ddl_download(item, ddzstat, release_key):
@@ -1377,10 +1377,18 @@ def ddl_downloader(queue):
                     )
                     existing = journal.read_one(rkey)
                     if existing and not journal.is_terminal(existing.get("stage")):
+                        # fail_reason is token-only; exception text is not
+                        # concatenated (#430 A5). Sanitised detail rides the
+                        # payload for diagnostics / narrative reason_detail.
+                        from comicarr.app.common.redaction import redact_sensitive_text
+
+                        fail_detail = redact_sensitive_text(str(e))[:1000]
+                        journal_payload = dict(item) if isinstance(item, dict) else {}
+                        journal_payload["fail_detail"] = fail_detail
                         journal.mark_failed(
                             rkey,
-                            fail_reason="ddl-worker-rejected: %s" % e,
-                            payload=item if isinstance(item, dict) else None,
+                            fail_reason="ddl-worker-rejected",
+                            payload=journal_payload,
                             issueid=issueid,
                             provider="DDL",
                             downloader_type="ddl",
