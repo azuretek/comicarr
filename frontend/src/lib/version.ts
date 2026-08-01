@@ -4,10 +4,10 @@ import { version } from "../../package.json";
  * Authoritative app release version for every user-facing UI surface.
  *
  * Consumers (must import only from this module):
- * - AppSidebar badge
+ * - VersionChip (sidebar header pill)
  * - LoginPage badge
  * - OnboardingDialog welcome label
- * - SettingsPage header + About row
+ * - SettingsPage header + AboutTab
  *
  * Sourced from frontend/package.json. Changesets + scripts/release/sync-version
  * keep this in lockstep with root package.json and pyproject.toml (backend
