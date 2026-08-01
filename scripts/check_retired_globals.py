@@ -44,14 +44,25 @@ RETIRED_GLOBALS = {
 # global on purpose, so docs/ is deliberately not scanned.
 SCAN_ROOTS = ("comicarr", "frontend/src", "frontend/tests", "tests", "scripts")
 
+SCAN_FILES = ("Comicarr.py",)
+
 SCAN_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs")
 
 SKIP_DIRS = {"node_modules", "__pycache__", ".venv", "dist", "build"}
+
+# A guard that bans a *word* would tax prose forever: an explanatory comment
+# about why the global is gone is exactly what a future reader needs. Only code
+# can rebuild the coupling, so comment-only lines are skipped.
+COMMENT_PREFIXES = ("#", "//", "/*", "*", '"""', "'''")
 
 SELF = Path(__file__).resolve()
 
 
 def _iter_source_files():
+    for name in SCAN_FILES:
+        path = ROOT / name
+        if path.is_file():
+            yield path
     for root in SCAN_ROOTS:
         base = ROOT / root
         if not base.is_dir():
@@ -66,6 +77,10 @@ def _iter_source_files():
             yield path
 
 
+def _is_comment(line: str) -> bool:
+    return line.lstrip().startswith(COMMENT_PREFIXES)
+
+
 def main() -> int:
     violations: list[str] = []
 
@@ -75,6 +90,8 @@ def main() -> int:
         except (OSError, UnicodeDecodeError):
             continue
         for lineno, line in enumerate(lines, start=1):
+            if _is_comment(line):
+                continue
             for name in RETIRED_GLOBALS:
                 if name in line:
                     rel = path.relative_to(ROOT).as_posix()

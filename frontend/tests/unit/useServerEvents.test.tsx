@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
-import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
+import { act, cleanup, renderHook } from "../test-utils";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { MockEventSource } from "../mocks/eventSource";
-import { createTestQueryClient } from "../test-utils";
-import { ACTIVITY_STATUS_QUERY_KEY } from "@/hooks/useActivityStatus";
+import { ACTIVITY_STATUS_QUERY_KEY } from "@/lib/activityKeys";
 import { ACTIVITY_COALESCE_MS } from "@/lib/activityLive";
 import type { TimelineEvent } from "@/components/activity/timeline/types";
 
@@ -30,6 +29,26 @@ function narrative(partial: Partial<TimelineEvent> = {}): TimelineEvent {
     subject_label: "Saga #12",
     ...partial,
   };
+}
+
+/**
+ * Like the shared test client, but queries survive without observers — these
+ * tests seed the status cache directly, and `gcTime: 0` would collect it
+ * before the hook ever reads it back.
+ */
+function createClient(): QueryClient {
+  return new QueryClient({
+    defaultOptions: {
+      queries: {
+        retry: false,
+        gcTime: Infinity,
+        staleTime: 0,
+        refetchOnWindowFocus: false,
+        refetchOnMount: false,
+        refetchOnReconnect: false,
+      },
+    },
+  });
 }
 
 let queryClient: QueryClient;
@@ -59,13 +78,16 @@ beforeEach(() => {
   vi.stubGlobal("EventSource", MockEventSource);
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
   addToast.mockClear();
-  queryClient = createTestQueryClient();
+  queryClient = createClient();
   invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  // Unmount while the clock is still fake so the hook's cleanup can clear its
+  // own reconnect and coalesce timers.
+  cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("listener surface", () => {
@@ -122,10 +144,11 @@ describe("coalesced invalidation", () => {
       "activity/timeline",
       "activity/band",
       "activity/status",
+      "wanted",
     ]);
   });
 
-  it("folds series collateral into the same pass, deduplicated", () => {
+  it("folds collateral into the same pass, deduplicated", () => {
     mount();
     act(() => MockEventSource.latest.open());
     invalidateSpy.mockClear();
@@ -152,7 +175,21 @@ describe("coalesced invalidation", () => {
       "activity/status",
       "series",
       "series/42",
+      "wanted",
     ]);
+  });
+
+  it("keeps the Wanted annotation fresh from issue narration", () => {
+    mount();
+    act(() => MockEventSource.latest.open());
+    invalidateSpy.mockClear();
+
+    act(() => {
+      MockEventSource.latest.emit("activity", narrative());
+      vi.advanceTimersByTime(ACTIVITY_COALESCE_MS);
+    });
+
+    expect(invalidatedKeys()).toContain("wanted");
   });
 
   it("ignores a malformed frame entirely", () => {
@@ -243,6 +280,7 @@ describe("enter-trouble toast latch", () => {
     expect(addToast).toHaveBeenCalledTimes(1);
 
     act(() => {
+      vi.advanceTimersByTime(1);
       queryClient.setQueryData(ACTIVITY_STATUS_QUERY_KEY, {
         in_flight: 0,
         attention: 0,
@@ -258,12 +296,39 @@ describe("enter-trouble toast latch", () => {
     expect(addToast).toHaveBeenCalledTimes(2);
   });
 
+  it("survives its own invalidation reading a stale zero", () => {
+    // The status count cached before the burst is still 0 while the refetch
+    // it just triggered is in flight. That stale zero must not re-arm.
+    queryClient.setQueryData(ACTIVITY_STATUS_QUERY_KEY, {
+      in_flight: 0,
+      attention: 0,
+    });
+    mount();
+    act(() => MockEventSource.latest.open());
+
+    act(() => {
+      MockEventSource.latest.emit("activity", narrative({ status: "failed" }));
+      vi.advanceTimersByTime(ACTIVITY_COALESCE_MS);
+    });
+    expect(addToast).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      MockEventSource.latest.emit(
+        "activity",
+        narrative({ event_id: 5, status: "needs_attention" }),
+      );
+      vi.advanceTimersByTime(ACTIVITY_COALESCE_MS);
+    });
+    expect(addToast).toHaveBeenCalledTimes(1);
+  });
+
   it("stays latched while attention is still visible", () => {
     mount();
     act(() => MockEventSource.latest.open());
 
     act(() => {
       MockEventSource.latest.emit("activity", narrative({ status: "failed" }));
+      vi.advanceTimersByTime(1);
       queryClient.setQueryData(ACTIVITY_STATUS_QUERY_KEY, {
         in_flight: 1,
         attention: 2,

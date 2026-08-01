@@ -7,26 +7,14 @@ import AppStatusBar from "@/components/layout/AppStatusBar";
 import type { ServerEventsHealth } from "@/contexts/ServerEventsContext";
 
 const { health } = vi.hoisted(() => ({
-  health: {
-    current: {
-      isConnected: true,
-      isReconnecting: false,
-      connectionLost: false,
-      live: "connected",
-    } as ServerEventsHealth,
-  },
+  health: { current: { live: "connected" } as ServerEventsHealth },
 }));
 vi.mock("@/contexts/ServerEventsContext", () => ({
   useServerEventsHealth: () => health.current,
 }));
 
 afterEach(() => {
-  health.current = {
-    isConnected: true,
-    isReconnecting: false,
-    connectionLost: false,
-    live: "connected",
-  };
+  health.current = { live: "connected" };
 });
 
 describe("AppStatusBar", () => {
@@ -97,12 +85,7 @@ describe("AppStatusBar", () => {
   });
 
   it("shows unreachable after a prolonged live-channel loss", async () => {
-    health.current = {
-      isConnected: false,
-      isReconnecting: true,
-      connectionLost: true,
-      live: "lost",
-    };
+    health.current = { live: "lost" };
 
     renderMinimal(<AppStatusBar />);
 
@@ -115,12 +98,7 @@ describe("AppStatusBar", () => {
   });
 
   it("stays quiet while the live channel is merely reconnecting", async () => {
-    health.current = {
-      isConnected: false,
-      isReconnecting: true,
-      connectionLost: false,
-      live: "reconnecting",
-    };
+    health.current = { live: "reconnecting" };
 
     renderMinimal(<AppStatusBar />);
 

@@ -12,26 +12,10 @@
 import { severityOf } from "@/components/activity/timeline/types";
 import type { TimelineEvent } from "@/components/activity/timeline/types";
 import { sentenceFor } from "@/components/activity/timeline/sentences";
+import type { ComicAddedDetail } from "@/types/events";
 
 /** Trailing window that collapses an event burst into one invalidation pass. */
 export const ACTIVITY_COALESCE_MS = 250;
-
-/**
- * Health of the live channel as the status chrome reads it. `reconnecting`
- * stays silent — only `lost` (a prolonged outage) is worth reporting.
- */
-export type LiveConnectionState = "connected" | "reconnecting" | "lost";
-
-/**
- * Every key a narrated event stales: the narrative feed plus the derived
- * projections beside it. Invalidated as one batch, never piecemeal — a run
- * that grabs 40 issues must cost one refetch round, not 40.
- */
-export const ACTIVITY_INVALIDATION_KEYS: readonly string[][] = [
-  ["activity", "timeline"],
-  ["activity", "band"],
-  ["activity", "status"],
-];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -73,16 +57,23 @@ export function parseActivityEvent(
 }
 
 /**
- * Extra caches a narration stales beyond the activity surfaces — the surviving
- * half of the retired `addbyid` / `storyarc_added` handlers, now keyed off the
- * one event type instead of their own dead channels.
+ * Extra caches a narration stales beyond the activity surfaces — what the
+ * retired `addbyid` / `storyarc_added` / generic `message` handlers used to
+ * own, now keyed off the one event type instead of their own dead channels.
+ *
+ * Wanted is included for issue-scoped narration because its sticky annotation
+ * is read from the same acquisition ledger the event just moved (ADR §2), and
+ * its query has no poll of its own to fall back on.
  */
 export function collateralKeys(event: TimelineEvent): string[][] {
   if (event.subject_type === "series") {
-    return [["series"], ["series", event.subject_id]];
+    return [["series"], ["series", event.subject_id], ["wanted"]];
   }
   if (event.subject_type === "arc") {
     return [["storyArcs"]];
+  }
+  if (event.subject_type === "issue" || event.subject_type === "annual") {
+    return [["wanted"]];
   }
   return [];
 }
@@ -95,12 +86,13 @@ export function collateralKeys(event: TimelineEvent): string[][] {
 export function comicAddedDetail(event: TimelineEvent): string | null {
   if (event.activity !== "add" || event.subject_type !== "series") return null;
   if (event.status !== "succeeded" && event.status !== "failed") return null;
-  return JSON.stringify({
+  const detail: ComicAddedDetail = {
     comicid: event.subject_id,
     comicname: event.subject_label,
     status: event.status === "succeeded" ? "success" : "failure",
     message: sentenceFor(event),
-  });
+  };
+  return JSON.stringify(detail);
 }
 
 export interface TroubleToast {
@@ -114,9 +106,16 @@ export interface TroubleToast {
  */
 export interface TroubleLatch {
   latched: boolean;
+  /**
+   * When the latch closed. Attention counts observed at or before this instant
+   * predate the trouble and cannot clear it — the count the client has cached
+   * mid-burst is still the pre-trouble one, and treating it as proof of
+   * resolution would let the very next event toast again.
+   */
+  since: number;
 }
 
-export const NO_TROUBLE: TroubleLatch = { latched: false };
+export const NO_TROUBLE: TroubleLatch = { latched: false, since: 0 };
 
 /**
  * Fold one narration into the latch. `normal` severity never toasts — it is
@@ -126,6 +125,7 @@ export const NO_TROUBLE: TroubleLatch = { latched: false };
 export function latchOnEvent(
   latch: TroubleLatch,
   event: TimelineEvent,
+  now: number,
 ): { latch: TroubleLatch; toast: TroubleToast | null } {
   if (severityOf(event.status) !== "action_required") {
     return { latch, toast: null };
@@ -134,21 +134,30 @@ export function latchOnEvent(
     return { latch, toast: null };
   }
   return {
-    latch: { latched: true },
+    latch: { latched: true, since: now },
     toast: { title: "Needs attention", description: sentenceFor(event) },
   };
 }
 
 /**
- * Re-arm the latch once the trouble the client can actually see is gone.
+ * Fold an observed attention count into the latch. Open trouble the client can
+ * already see arms it — a new failure is not news to an operator staring at
+ * `⚠ 3 need attention`. A zero re-arms it, but only when that zero was
+ * observed *after* the latch closed; `observedAt` is the query's
+ * `dataUpdatedAt`, so a stale cache read cannot unlock it.
+ *
  * An unknown count (status query still loading or failed) changes nothing —
  * silence is not evidence of resolution.
  */
 export function latchOnAttention(
   latch: TroubleLatch,
   attention: number | undefined,
+  observedAt: number,
 ): TroubleLatch {
   if (attention === undefined) return latch;
-  if (attention > 0) return latch.latched ? latch : { latched: true };
-  return latch.latched ? { latched: false } : latch;
+  if (attention > 0) {
+    return latch.latched ? latch : { latched: true, since: observedAt };
+  }
+  if (!latch.latched || observedAt <= latch.since) return latch;
+  return NO_TROUBLE;
 }

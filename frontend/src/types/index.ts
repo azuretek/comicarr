@@ -68,7 +68,7 @@ export type {
 } from "./auth";
 
 // Event types
-export type { ComicAddedEvent } from "./events";
+export type { ComicAddedDetail, ComicAddedEvent } from "./events";
 
 // Config types
 export type {

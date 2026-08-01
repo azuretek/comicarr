@@ -5,6 +5,10 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
+import {
+  ACTIVITY_BAND_QUERY_KEY,
+  ACTIVITY_TIMELINE_QUERY_KEY,
+} from "@/lib/activityKeys";
 import type {
   BandPage,
   TimelinePage,
@@ -169,7 +173,7 @@ export function useActivityTimeline(options: ActivityScope = {}) {
   const limit = TIMELINE_EVENT_PAGE_SIZE;
 
   return useInfiniteQuery({
-    queryKey: ["activity", "timeline", { limit, scope_type, scope_id }],
+    queryKey: [...ACTIVITY_TIMELINE_QUERY_KEY, { limit, scope_type, scope_id }],
     queryFn: ({ pageParam }) => {
       const params = scopeParams({ scope_type, scope_id });
       params.set("limit", String(limit));
@@ -196,7 +200,7 @@ export function useActivityBand(scope: ActivityScope = {}) {
   const scope_id = scope.scope_id?.trim() || undefined;
 
   return useQuery<BandPage>({
-    queryKey: ["activity", "band", { scope_type, scope_id }],
+    queryKey: [...ACTIVITY_BAND_QUERY_KEY, { scope_type, scope_id }],
     queryFn: () => {
       const params = scopeParams({ scope_type, scope_id });
       const qs = params.toString();
@@ -234,9 +238,9 @@ export function useBandResolution() {
       return result;
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["activity", "band"] });
+      void queryClient.invalidateQueries({ queryKey: ACTIVITY_BAND_QUERY_KEY });
       void queryClient.invalidateQueries({
-        queryKey: ["activity", "timeline"],
+        queryKey: ACTIVITY_TIMELINE_QUERY_KEY,
       });
     },
   });

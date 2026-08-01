@@ -1,11 +1,8 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useServerEvents } from "@/hooks/useServerEvents";
-import type { LiveConnectionState } from "@/lib/activityLive";
+import type { LiveConnectionState } from "@/lib/activityStatus";
 
 export interface ServerEventsHealth {
-  isConnected: boolean;
-  isReconnecting: boolean;
-  connectionLost: boolean;
   live: LiveConnectionState;
 }
 
@@ -23,7 +20,8 @@ export function ServerEventsProvider({
   enabled: boolean;
   children: ReactNode;
 }) {
-  const health = useServerEvents(enabled);
+  const { live } = useServerEvents(enabled);
+  const health = useMemo<ServerEventsHealth>(() => ({ live }), [live]);
   return (
     <ServerEventsContext.Provider value={health}>
       {children}
@@ -36,12 +34,7 @@ export function ServerEventsProvider({
  * no evidence of an outage, and inventing one would put `unreachable` in the
  * status bar of a perfectly healthy app.
  */
-const ASSUME_REACHABLE: ServerEventsHealth = {
-  isConnected: true,
-  isReconnecting: false,
-  connectionLost: false,
-  live: "connected",
-};
+const ASSUME_REACHABLE: ServerEventsHealth = { live: "connected" };
 
 export function useServerEventsHealth(): ServerEventsHealth {
   return useContext(ServerEventsContext) ?? ASSUME_REACHABLE;

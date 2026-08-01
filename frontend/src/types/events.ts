@@ -8,6 +8,18 @@
  * `search_complete`, generic `message`) have no producer and no listener.
  */
 
+/**
+ * Payload of the `comic-added` window event, derived from an `add` @ series
+ * narration. Search cards settle their add button on it, so both the producer
+ * (`lib/activityLive.ts`) and every consumer share this one shape.
+ */
+export interface ComicAddedDetail {
+  comicid: string;
+  comicname: string;
+  status: "success" | "failure";
+  message: string;
+}
+
 /** Custom window event for comic-added */
 export interface ComicAddedEvent extends CustomEvent<string> {
   detail: string;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { ACTIVITY_INVALIDATION_KEYS } from "@/lib/activityKeys";
 import {
   ACTIVITY_COALESCE_MS,
-  ACTIVITY_INVALIDATION_KEYS,
   NO_TROUBLE,
   collateralKeys,
   comicAddedDetail,
@@ -73,7 +73,7 @@ describe("collateralKeys", () => {
       collateralKeys(
         event({ activity: "add", subject_type: "series", subject_id: "4050" }),
       ),
-    ).toEqual([["series"], ["series", "4050"]]);
+    ).toEqual([["series"], ["series", "4050"], ["wanted"]]);
   });
 
   it("stales the story arc cache for an arc narration", () => {
@@ -82,8 +82,17 @@ describe("collateralKeys", () => {
     ).toEqual([["storyArcs"]]);
   });
 
-  it("stales nothing extra for issue-scoped narration", () => {
-    expect(collateralKeys(event())).toEqual([]);
+  it("stales wanted for issue and annual narration", () => {
+    expect(collateralKeys(event())).toEqual([["wanted"]]);
+    expect(collateralKeys(event({ subject_type: "annual" }))).toEqual([
+      ["wanted"],
+    ]);
+  });
+
+  it("stales nothing extra for run brackets", () => {
+    expect(
+      collateralKeys(event({ activity: "search", subject_type: "run" })),
+    ).toEqual([]);
   });
 });
 
@@ -149,7 +158,7 @@ describe("comicAddedDetail", () => {
 
 describe("enter-trouble latch", () => {
   it("toasts on the edge into trouble and stays silent after", () => {
-    const first = latchOnEvent(NO_TROUBLE, event({ status: "failed" }));
+    const first = latchOnEvent(NO_TROUBLE, event({ status: "failed" }), 100);
     expect(first.toast).toEqual({
       title: "Needs attention",
       description: "Couldn't import Saga #12",
@@ -159,6 +168,7 @@ describe("enter-trouble latch", () => {
     const second = latchOnEvent(
       first.latch,
       event({ status: "needs_attention", subject_label: "Saga #13" }),
+      200,
     );
     expect(second.toast).toBeNull();
     expect(second.latch.latched).toBe(true);
@@ -166,25 +176,42 @@ describe("enter-trouble latch", () => {
 
   it("never toasts normal severity, latched or not", () => {
     for (const status of ["started", "succeeded", "no_match", "cancelled"]) {
-      const result = latchOnEvent(NO_TROUBLE, event({ status }));
+      const result = latchOnEvent(NO_TROUBLE, event({ status }), 100);
       expect(result.toast).toBeNull();
       expect(result.latch.latched).toBe(false);
     }
   });
 
   it("re-arms only once the visible attention count reaches zero", () => {
-    const troubled = latchOnEvent(NO_TROUBLE, event({ status: "blocked" }));
-    expect(latchOnAttention(troubled.latch, 3).latched).toBe(true);
+    const troubled = latchOnEvent(NO_TROUBLE, event({ status: "blocked" }), 100);
+    expect(latchOnAttention(troubled.latch, 3, 200).latched).toBe(true);
 
-    const cleared = latchOnAttention(troubled.latch, 0);
+    const cleared = latchOnAttention(troubled.latch, 0, 200);
     expect(cleared.latched).toBe(false);
-    expect(latchOnEvent(cleared, event({ status: "failed" })).toast).not.toBe(
+    expect(
+      latchOnEvent(cleared, event({ status: "failed" }), 300).toast,
+    ).not.toBe(null);
+  });
+
+  it("refuses a zero observed before the trouble it would clear", () => {
+    // The count cached mid-burst still predates the failure. Treating it as
+    // proof of resolution would let the next event in the same burst toast.
+    const troubled = latchOnEvent(NO_TROUBLE, event({ status: "failed" }), 500);
+    expect(latchOnAttention(troubled.latch, 0, 400).latched).toBe(true);
+    expect(latchOnAttention(troubled.latch, 0, 500).latched).toBe(true);
+    expect(latchOnAttention(troubled.latch, 0, 501).latched).toBe(false);
+  });
+
+  it("arms on trouble the operator can already see", () => {
+    const seen = latchOnAttention(NO_TROUBLE, 3, 100);
+    expect(seen.latched).toBe(true);
+    expect(latchOnEvent(seen, event({ status: "failed" }), 200).toast).toBe(
       null,
     );
   });
 
   it("ignores an unknown attention count", () => {
-    const troubled = latchOnEvent(NO_TROUBLE, event({ status: "failed" }));
-    expect(latchOnAttention(troubled.latch, undefined).latched).toBe(true);
+    const troubled = latchOnEvent(NO_TROUBLE, event({ status: "failed" }), 100);
+    expect(latchOnAttention(troubled.latch, undefined, 999).latched).toBe(true);
   });
 });

@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/components/ui/toast";
+import type { ActivityStatusResponse } from "@/hooks/useActivityStatus";
 import {
+  ACTIVITY_INVALIDATION_KEYS,
   ACTIVITY_STATUS_QUERY_KEY,
-  type ActivityStatusResponse,
-} from "@/hooks/useActivityStatus";
+} from "@/lib/activityKeys";
+import type { LiveConnectionState } from "@/lib/activityStatus";
 import {
   ACTIVITY_COALESCE_MS,
-  ACTIVITY_INVALIDATION_KEYS,
   NO_TROUBLE,
   collateralKeys,
   comicAddedDetail,
   latchOnAttention,
   latchOnEvent,
   parseActivityEvent,
-  type LiveConnectionState,
   type TroubleLatch,
 } from "@/lib/activityLive";
 
@@ -68,10 +68,14 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
   useEffect(() => {
     if (!enabled) return;
     const syncLatch = () => {
-      const status = queryClient.getQueryData<ActivityStatusResponse>(
+      const state = queryClient.getQueryState<ActivityStatusResponse>(
         ACTIVITY_STATUS_QUERY_KEY,
       );
-      latchRef.current = latchOnAttention(latchRef.current, status?.attention);
+      latchRef.current = latchOnAttention(
+        latchRef.current,
+        state?.data?.attention,
+        state?.dataUpdatedAt ?? 0,
+      );
     };
     syncLatch();
     return queryClient.getQueryCache().subscribe(syncLatch);
@@ -218,7 +222,11 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
           window.dispatchEvent(new CustomEvent("comic-added", { detail }));
         }
 
-        const { latch, toast } = latchOnEvent(latchRef.current, event);
+        const { latch, toast } = latchOnEvent(
+          latchRef.current,
+          event,
+          Date.now(),
+        );
         latchRef.current = latch;
         if (toast) {
           addToast({
@@ -248,7 +256,7 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
         console.log("[SSE] Server restarting");
 
         addToast({
-          type: "error",
+          type: "info",
           title: "Server Restarting",
           description: "Comicarr is restarting. Reconnecting automatically…",
         });
@@ -315,11 +323,13 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
     };
   }, [enabled, queryClient, addToast]);
 
+  // Nothing has proved unreachable until a retry is actually in flight, so a
+  // socket that has never opened reads as connected rather than alarming.
   const live: LiveConnectionState = connectionLost
     ? "lost"
-    : isConnected
-      ? "connected"
-      : "reconnecting";
+    : !isConnected && isReconnecting
+      ? "reconnecting"
+      : "connected";
 
   return { isConnected, isReconnecting, connectionLost, live };
 }

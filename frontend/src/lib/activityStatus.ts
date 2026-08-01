@@ -3,9 +3,13 @@
  * Pure composition — no React, no I/O.
  */
 
-import type { LiveConnectionState } from "@/lib/activityLive";
-
 export type ActivityApiState = "online" | "offline" | "checking";
+
+/**
+ * Health of the live channel as this status line reads it. `reconnecting`
+ * stays silent — only `lost` (a prolonged outage) is worth reporting.
+ */
+export type LiveConnectionState = "connected" | "reconnecting" | "lost";
 
 export interface ActivityStatusSnapshot {
   /** GET /api/dashboard → stats.total_series; null when unavailable */
