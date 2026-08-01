@@ -722,7 +722,8 @@ ai_chat_attachments = Table(
 # Append-only Activity Center narrative rows (Activity Center ADR).
 # Derived live state stays on acquisition_runs / acquisition_run_items /
 # pipeline_journal; this table only stores timestamped history the ledgers
-# cannot express. Writers, APIs, and retention land in later issues.
+# cannot express. Retention: comicarr.app.activity.retention (90-day age purge).
+# Writers and APIs land in later issues.
 activity_events = Table(
     "activity_events",
     metadata,
