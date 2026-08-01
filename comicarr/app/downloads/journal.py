@@ -36,7 +36,7 @@ import json
 import re
 import time
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from comicarr import db, logger
@@ -75,6 +75,21 @@ TERMINAL_STAGES = (POST_PROCESSED, MANUAL_REVIEW, FAILED)
 
 # Open stages: rows replay must consider as still-in-flight obligations.
 OPEN_STAGES = (RESERVED, SNATCHED, DOWNLOADED, POST_PROCESSING, MOVED)
+
+# Stages that populate the needs-attention band (Timeline work queue).
+BAND_STAGES = (FAILED, MANUAL_REVIEW)
+
+# R9 resolution stamps — written by operator actions (and FAILED_AUTO retry)
+# without rewriting stage / stage_rank. Rows with these statuses leave the band.
+STATUS_RETRIED = "retried"
+STATUS_IGNORED = "ignored"
+STATUS_IMPORTED = "imported"
+RESOLVED_STATUSES = (STATUS_RETRIED, STATUS_IGNORED, STATUS_IMPORTED)
+
+# Fresh re-snatch stages that may supersede a terminal `failed` row under the
+# same release_key (same issue|provider). DDL handoff writes RESERVED first;
+# NZB/torrent snatch (updater.foundsearch) writes SNATCHED directly.
+_RESNATCH_STAGES = (RESERVED, SNATCHED)
 
 # Synthetic one-off IssueIDs are an unpersisted CONFIG.HIGHCOUNT counter that
 # starts at 900000 (see comicarr/updater.py:1214-1220). Such an IssueID is not
@@ -393,24 +408,33 @@ def _now():
 
 
 def _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
-    """RE-SNATCH special case: a fresh `snatched` write observed against a
-    terminal `failed` row is a NEW in-flight obligation that legitimately
-    supersedes the closed failed attempt — reset the row to snatched.
+    """RE-SNATCH special case: a fresh RESERVED or SNATCHED write observed
+    against a terminal `failed` row is a NEW in-flight obligation that
+    legitimately supersedes the closed failed attempt — reset the row.
 
     WHY this does NOT weaken the monotonic stale-replay guard: replay never
-    issues a fresh `snatched` transition (the snatch seam updater.foundsearch
-    does, only from a real new grab; replay re-enqueues `still` non-terminal
-    items, never a `snatched` write). So a `snatched` write seen against a
-    `failed` row is always a genuine new snatch obligation, never a stale
-    replay — resetting is correct here and the monotonic guard is left fully
-    intact for every other stage (only `failed`->`snatched` is special-cased).
+    issues a fresh RESERVED/SNATCHED transition (the snatch seam and DDL
+    handoff do, only from a real new grab; replay re-enqueues still
+    non-terminal items, never a first-stage write). So a re-snatch stage
+    seen against a `failed` row is always a genuine new obligation, never a
+    stale replay — resetting is correct here and the monotonic guard is left
+    fully intact for every other stage.
+
+    SNATCHED is included because the NZB/torrent snatch path
+    (updater.foundsearch) writes SNATCHED directly against
+    ``issueid|provider`` without an intervening RESERVED. Without that gate,
+    a same-provider operator/auto retry returns ``won=False`` and narrates
+    nothing (#483 / #437 amendment).
+
+    This helper remains the re-snatch path only — operator band exits stamp
+    R9 status without calling it (#437 / #483).
 
     Returns True iff THIS call won the reset. The UPDATE is gated with
-    `WHERE stage = FAILED` (the current terminal) so two concurrent snatched
-    writers racing one failed row yield exactly one True — the loser's gated
-    UPDATE matches 0 rows and it falls back to the monotonic no-op.
+    `WHERE stage = FAILED` so two concurrent re-snatch writers racing one
+    failed row yield exactly one True — the loser's gated UPDATE matches 0
+    rows and it falls back to the monotonic no-op.
     """
-    if stage != RESERVED:
+    if stage not in _RESNATCH_STAGES:
         return False
 
     reset = conn.execute(
@@ -441,7 +465,9 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
     existing_payload = (
         sanitize_payload(load_payload(existing_row._mapping.get("payload_json"))) if existing_row is not None else None
     )
-    new_attempt = existing_row is not None and existing_row._mapping.get("stage") == FAILED and stage == RESERVED
+    new_attempt = (
+        existing_row is not None and existing_row._mapping.get("stage") == FAILED and stage in _RESNATCH_STAGES
+    )
     if new_attempt:
         # A new attempt must not inherit the previous client's acceptance id,
         # route or hash. Retain only stable release identity/context; otherwise
@@ -591,8 +617,8 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
             return False
 
     # Row exists and is at/ahead of new_rank. The ONE legal exception to the
-    # monotonic no-op: a fresh `snatched` write against a terminal `failed`
-    # row is a RE-SNATCH that supersedes the closed failed attempt.
+    # monotonic no-op: a fresh RESERVED/SNATCHED write against a terminal
+    # `failed` row is a RE-SNATCH that supersedes the closed failed attempt.
     if existing[0] == FAILED and _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
         return True
 
@@ -743,3 +769,98 @@ def read_one(release_key):
     """Cheap point lookup of a single journal row by release_key (used by the
     U6 replay snapshot-then-recheck), or None."""
     return db.select_one(select(pipeline_journal).where(pipeline_journal.c.release_key == release_key))
+
+
+def read_needs_attention(*, issueid=None):
+    """Settled needs-attention band query (#437 / #457 / #483).
+
+    ``stage IN (failed, manual_review)`` and unresolved R9 status
+    (``status`` null or not in ``{retried, ignored, imported}``).
+    Newest ``updated_date`` first. Optional ``issueid`` scopes the band.
+    """
+    stmt = (
+        select(pipeline_journal)
+        .where(pipeline_journal.c.stage.in_(BAND_STAGES))
+        .where(
+            or_(
+                pipeline_journal.c.status.is_(None),
+                pipeline_journal.c.status.notin_(RESOLVED_STATUSES),
+            )
+        )
+        .order_by(pipeline_journal.c.updated_date.desc())
+    )
+    if issueid not in (None, ""):
+        stmt = stmt.where(pipeline_journal.c.issueid == str(issueid))
+    return db.select_all(stmt)
+
+
+def stamp_resolution(release_key, status, *, increment_retry=False, conn=None):
+    """Stamp an R9 resolution status without rewriting stage / stage_rank.
+
+    Legal only on band stages (``failed`` / ``manual_review``) that are not
+    already resolved. Returns True iff this call wrote the stamp.
+    """
+    if status not in RESOLVED_STATUSES:
+        raise ValueError("[JOURNAL] unknown resolution status %r" % (status,))
+    if release_key in (None, ""):
+        return False
+
+    when = _now()
+
+    def _write(active_conn):
+        row = active_conn.execute(
+            select(pipeline_journal).where(pipeline_journal.c.release_key == release_key)
+        ).fetchone()
+        if row is None:
+            return False
+        mapping = row._mapping
+        if mapping.get("stage") not in BAND_STAGES:
+            return False
+        if mapping.get("status") in RESOLVED_STATUSES:
+            return False
+        values = {"status": status, "updated_date": when}
+        if increment_retry:
+            current = mapping.get("retry_count")
+            try:
+                values["retry_count"] = int(current or 0) + 1
+            except (TypeError, ValueError):
+                values["retry_count"] = 1
+        result = active_conn.execute(
+            update(pipeline_journal)
+            .where(pipeline_journal.c.release_key == release_key)
+            .where(pipeline_journal.c.stage.in_(BAND_STAGES))
+            .where(
+                or_(
+                    pipeline_journal.c.status.is_(None),
+                    pipeline_journal.c.status.notin_(RESOLVED_STATUSES),
+                )
+            )
+            .values(**values)
+        )
+        return bool(result.rowcount)
+
+    if conn is not None:
+        return _write(conn)
+
+    attempt = 0
+    while attempt < 5:
+        try:
+            with db.get_engine().begin() as own_conn:
+                return _write(own_conn)
+        except OperationalError as e:
+            err_msg = str(e)
+            if "locked" in err_msg or "unable to open" in err_msg:
+                logger.warn(
+                    "[JOURNAL] Database locked during stamp_resolution "
+                    "(release_key=%s status=%s), retry %d: %s" % (release_key, status, attempt + 1, e)
+                )
+                attempt += 1
+                time.sleep(1)
+            else:
+                raise
+    logger.error("[JOURNAL] stamp_resolution FAILED after 5 retries (release_key=%s status=%s)" % (release_key, status))
+    raise OperationalError(
+        "Journal stamp_resolution on %s -> %s failed after 5 retries" % (release_key, status),
+        None,
+        None,
+    )

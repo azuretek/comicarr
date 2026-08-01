@@ -36,6 +36,8 @@ FAIL_REASON_NO_AUTO_HANDLING = "download_failed_no_auto_handling"
 
 # R9 resolution stamp: auto re-search enqueued (or operator retry). Keeps the
 # failed journal row off the needs-attention band without rewriting stage.
+# Keep the literal here so failed.py stays free of journal import at module load;
+# journal.STATUS_RETRIED is the shared name for band/query code.
 STATUS_RETRIED = "retried"
 
 
