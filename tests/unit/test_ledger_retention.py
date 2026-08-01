@@ -7,11 +7,12 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-"""Unit tests for the daily ledger retention sweep (#480).
+"""Unit tests for the daily ledger retention sweep (#480 / #481).
 
-Full policy matrix and ops notes land in #481; this file pins the public
-entrypoint, eligibility floors, hybrid/age math, delete order, and batching
-at the `run_ledger_retention` seam.
+Seams under test:
+- ``run_ledger_retention`` public entrypoint (eligibility, hybrid/age math,
+  delete order, batching, no VACUUM)
+- Module constants match the #464 parameter table
 """
 
 import datetime
@@ -172,7 +173,14 @@ def test_constants_match_parameter_table():
     assert retention.AI_KEEP_NEWEST == 10_000
 
 
-def test_never_deletes_nonterminal_items_or_incomplete_runs():
+def test_never_deletes_accepted_or_running_items(monkeypatch):
+    """Recovery floor: nonterminal item states are immortal (#463 / #481).
+
+    Keep floor is zeroed so age alone would delete terminals; accepted/running
+    must still survive (eligibility, not newest-N).
+    """
+    monkeypatch.setattr(retention, "ITEMS_KEEP_NEWEST", 0)
+    monkeypatch.setattr(retention, "RUNS_KEEP_NEWEST", 0)
     _insert_run("live", RunState.RUNNING.value, completed_at=None, updated_at=_iso(200))
     _insert_item("live", ItemOutcome.ACCEPTED.value, completed_at=None, updated_at=_iso(200), entity_id="a")
     _insert_item("live", ItemOutcome.RUNNING.value, completed_at=None, updated_at=_iso(200), entity_id="b")
@@ -181,10 +189,48 @@ def test_never_deletes_nonterminal_items_or_incomplete_runs():
     summary = retention.run_ledger_retention(now=FIXED_NOW)
 
     assert summary is not None
-    assert _item_states() == sorted(
-        [ItemOutcome.ACCEPTED.value, ItemOutcome.RUNNING.value, ItemOutcome.SUCCEEDED.value]
-    )
+    assert summary["acquisition_run_items"] == 1
+    assert _item_states() == sorted([ItemOutcome.ACCEPTED.value, ItemOutcome.RUNNING.value])
     assert _run_ids() == ["live"]
+
+
+def test_never_deletes_incomplete_runs_or_runs_with_remaining_items(monkeypatch):
+    """Incomplete runs and any run that still has items stay forever (#463)."""
+    monkeypatch.setattr(retention, "ITEMS_KEEP_NEWEST", 0)
+    monkeypatch.setattr(retention, "RUNS_KEEP_NEWEST", 0)
+
+    # Incomplete: no completed_at, even if ancient.
+    _insert_run("pending-old", RunState.PENDING.value, completed_at=None, updated_at=_iso(400))
+    _insert_run("running-old", RunState.RUNNING.value, completed_at=None, updated_at=_iso(400))
+
+    # Completed but still has a terminal item kept only because we leave it
+    # after lowering keep floor to 0… actually with floor 0 the item ages out.
+    # Keep an accepted item so the completed run cannot empty itself.
+    _insert_run("done-with-live", RunState.COMPLETED.value, completed_at=_iso(400), updated_at=_iso(400))
+    _insert_item(
+        "done-with-live",
+        ItemOutcome.ACCEPTED.value,
+        completed_at=None,
+        updated_at=_iso(400),
+        entity_id="still-live",
+    )
+    # Completed with only an old terminal item: item is eligible and will purge,
+    # then the empty completed run may purge — separate test covers that path.
+    _insert_run("done-with-terminal", RunState.COMPLETED.value, completed_at=_iso(10), updated_at=_iso(10))
+    _insert_item(
+        "done-with-terminal",
+        ItemOutcome.SUCCEEDED.value,
+        completed_at=_iso(10),
+        updated_at=_iso(10),
+        entity_id="kept-young",
+    )
+
+    summary = retention.run_ledger_retention(now=FIXED_NOW)
+
+    assert summary is not None
+    assert set(_run_ids()) == {"pending-old", "running-old", "done-with-live", "done-with-terminal"}
+    assert ItemOutcome.ACCEPTED.value in _item_states()
+    assert ItemOutcome.SUCCEEDED.value in _item_states()
 
 
 def test_empty_finished_failed_run_is_eligible(monkeypatch):
@@ -241,45 +287,109 @@ def test_deletes_old_terminal_items_then_empty_completed_runs(monkeypatch):
 
 
 def test_never_deletes_open_or_unresolved_journal_rows():
+    """Open stages and unresolved failed/manual_review are immortal (#463)."""
     _insert_journal("open-snatched", journal.SNATCHED, _journal_ts(400))
+    _insert_journal("open-downloaded", journal.DOWNLOADED, _journal_ts(400))
     _insert_journal("failed-open", journal.FAILED, _journal_ts(400), status=None)
-    _insert_journal("review-open", journal.MANUAL_REVIEW, _journal_ts(400), status=journal.MANUAL_REVIEW)
+    _insert_journal("review-open", journal.MANUAL_REVIEW, _journal_ts(400), status=None)
+    _insert_journal("review-band-status", journal.MANUAL_REVIEW, _journal_ts(400), status=journal.MANUAL_REVIEW)
     _insert_journal("pp-old", journal.POST_PROCESSED, _journal_ts(400))
     _insert_journal("failed-resolved", journal.FAILED, _journal_ts(400), status=journal.STATUS_IGNORED)
+    _insert_journal("review-resolved", journal.MANUAL_REVIEW, _journal_ts(400), status=journal.STATUS_IMPORTED)
     _insert_journal("pp-recent", journal.POST_PROCESSED, _journal_ts(30))
 
     summary = retention.run_ledger_retention(now=FIXED_NOW)
 
-    assert summary["pipeline_journal"] == 2
-    assert _journal_keys() == sorted(["open-snatched", "failed-open", "review-open", "pp-recent"])
+    # Three eligible old terminals deleted (pp-old, failed-resolved, review-resolved).
+    assert summary["pipeline_journal"] == 3
+    assert _journal_keys() == sorted(
+        [
+            "open-snatched",
+            "open-downloaded",
+            "failed-open",
+            "review-open",
+            "review-band-status",
+            "pp-recent",
+        ]
+    )
 
 
-def test_hybrid_keep_newest_floor_even_when_old():
-    # keep_newest=2 for this assertion via monkeypatch of the constant.
+def test_journal_age_only_keeps_eligible_under_365_days(monkeypatch):
+    """Journal has no newest-N floor: only age past 365d on eligible terminals."""
+    # Even with keep floors zeroed on other tables, journal ignores count floors.
+    monkeypatch.setattr(retention, "ITEMS_KEEP_NEWEST", 0)
+    monkeypatch.setattr(retention, "RUNS_KEEP_NEWEST", 0)
+
+    _insert_journal("pp-364", journal.POST_PROCESSED, _journal_ts(364))
+    _insert_journal("pp-366", journal.POST_PROCESSED, _journal_ts(366))
+    _insert_journal("failed-resolved-100", journal.FAILED, _journal_ts(100), status=journal.STATUS_RETRIED)
+
+    summary = retention.run_ledger_retention(now=FIXED_NOW)
+
+    assert summary["pipeline_journal"] == 1
+    assert _journal_keys() == sorted(["pp-364", "failed-resolved-100"])
+
+
+def test_hybrid_keep_newest_floor_even_when_old(monkeypatch):
     # Five old terminal items; newest 2 (by age desc, pk desc) must remain.
-    original = retention.ITEMS_KEEP_NEWEST
-    retention.ITEMS_KEEP_NEWEST = 2
-    try:
-        _insert_run("batch", RunState.COMPLETED.value, completed_at=_iso(200), updated_at=_iso(200))
-        ids = []
-        for day in (200, 190, 180, 170, 160):
-            ids.append(
-                _insert_item(
-                    "batch",
-                    ItemOutcome.SUCCEEDED.value,
-                    completed_at=_iso(day),
-                    updated_at=_iso(day),
-                    entity_id="i-%s" % day,
-                )
+    monkeypatch.setattr(retention, "ITEMS_KEEP_NEWEST", 2)
+    _insert_run("batch", RunState.COMPLETED.value, completed_at=_iso(200), updated_at=_iso(200))
+    ids = []
+    for day in (200, 190, 180, 170, 160):
+        ids.append(
+            _insert_item(
+                "batch",
+                ItemOutcome.SUCCEEDED.value,
+                completed_at=_iso(day),
+                updated_at=_iso(day),
+                entity_id="i-%s" % day,
             )
-        summary = retention.run_ledger_retention(now=FIXED_NOW)
-        assert summary["acquisition_run_items"] == 3
-        with get_engine().connect() as conn:
-            remaining = sorted(row.item_id for row in conn.execute(select(acquisition_run_items.c.item_id)))
-        # Newest by age: day 160 then 170 (largest completed_at, then pk).
-        assert remaining == sorted(ids[-2:])
-    finally:
-        retention.ITEMS_KEEP_NEWEST = original
+        )
+    summary = retention.run_ledger_retention(now=FIXED_NOW)
+    assert summary["acquisition_run_items"] == 3
+    with get_engine().connect() as conn:
+        remaining = sorted(row.item_id for row in conn.execute(select(acquisition_run_items.c.item_id)))
+    # Newest by age: day 160 then 170 (largest completed_at, then pk).
+    assert remaining == sorted(ids[-2:])
+
+
+def test_hybrid_keeps_young_rows_even_outside_newest_n(monkeypatch):
+    """Hybrid: younger-than-horizon rows survive even when keep_newest is 0."""
+    monkeypatch.setattr(retention, "ITEMS_KEEP_NEWEST", 0)
+    monkeypatch.setattr(retention, "RUNS_KEEP_NEWEST", 0)
+    monkeypatch.setattr(retention, "MAINTENANCE_KEEP_NEWEST", 0)
+    monkeypatch.setattr(retention, "AI_KEEP_NEWEST", 0)
+
+    _insert_run("old", RunState.COMPLETED.value, completed_at=_iso(100), updated_at=_iso(100))
+    _insert_item(
+        "old",
+        ItemOutcome.SUCCEEDED.value,
+        completed_at=_iso(100),
+        updated_at=_iso(100),
+        entity_id="old-i",
+    )
+    _insert_run("young", RunState.COMPLETED.value, completed_at=_iso(5), updated_at=_iso(5))
+    _insert_item(
+        "young",
+        ItemOutcome.SUCCEEDED.value,
+        completed_at=_iso(5),
+        updated_at=_iso(5),
+        entity_id="young-i",
+    )
+    _insert_maintenance(_iso(100), reason="old-m")
+    _insert_maintenance(_iso(5), reason="young-m")
+    _insert_ai(_iso(100), action="old-ai")
+    _insert_ai(_iso(5), action="young-ai")
+
+    summary = retention.run_ledger_retention(now=FIXED_NOW)
+
+    assert summary["acquisition_run_items"] == 1
+    assert summary["acquisition_runs"] == 1
+    assert summary["acquisition_maintenance_events"] == 1
+    assert summary["ai_activity_log"] == 1
+    assert _run_ids() == ["young"]
+    assert _count(acquisition_maintenance_events) == 1
+    assert _count(ai_activity_log) == 1
 
 
 def test_maintenance_and_ai_are_fully_eligible_under_hybrid(monkeypatch):
@@ -330,7 +440,7 @@ def test_soft_fail_logs_and_does_not_raise(monkeypatch, caplog):
     assert result is None
 
 
-def test_delete_order_items_before_runs(monkeypatch):
+def test_delete_order_items_runs_journal_maintenance_ai(monkeypatch):
     order = []
 
     def wrap(name, original):
@@ -368,3 +478,53 @@ def test_delete_order_items_before_runs(monkeypatch):
 
     retention.run_ledger_retention(now=FIXED_NOW)
     assert order == ["items", "runs", "journal", "maintenance", "ai"]
+
+
+def test_sweep_does_not_invoke_vacuum(monkeypatch):
+    """VACUUM is out-of-band ops only — never a product feature of the sweep."""
+    vacuum_calls = []
+
+    class _TrackingConn:
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, *args, **kwargs):
+            statement = str(args[0]) if args else ""
+            if "vacuum" in statement.lower():
+                vacuum_calls.append(statement)
+            return self._real.execute(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    real_begin = get_engine().begin
+
+    class _TrackingBegin:
+        def __enter__(self):
+            self._cm = real_begin()
+            self._conn = _TrackingConn(self._cm.__enter__())
+            return self._conn
+
+        def __exit__(self, *exc):
+            return self._cm.__exit__(*exc)
+
+    monkeypatch.setattr(retention, "ITEMS_KEEP_NEWEST", 0)
+    monkeypatch.setattr(retention, "RUNS_KEEP_NEWEST", 0)
+    monkeypatch.setattr(get_engine(), "begin", lambda: _TrackingBegin())
+
+    _insert_run("v", RunState.COMPLETED.value, completed_at=_iso(120), updated_at=_iso(120))
+    _insert_item(
+        "v",
+        ItemOutcome.SUCCEEDED.value,
+        completed_at=_iso(120),
+        updated_at=_iso(120),
+        entity_id="v1",
+    )
+    retention.run_ledger_retention(now=FIXED_NOW)
+    assert vacuum_calls == []
+
+    # Source-level guard: module must not reference VACUUM.
+    import inspect
+
+    source = inspect.getsource(retention)
+    assert "vacuum" not in source.lower()
