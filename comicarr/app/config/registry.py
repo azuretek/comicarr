@@ -268,7 +268,12 @@ _KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("GIT_USER", str, "Git", "frankieramirez"),
     ConfigKey("GIT_TOKEN", str, "Git", None),
     ConfigKey("GIT_BRANCH", str, "Git", None),
-    ConfigKey("CHECK_GITHUB", bool, "Git", True),
+    # Operator-facing: Settings → About → Updates "Check for updates".
+    # Controls automatic checks only; force-check ignores this switch.
+    ConfigKey("CHECK_GITHUB", bool, "Git", True, readable=True, writable=True),
+    # Operator-facing: Settings → About → Updates "Announce releases to notifiers".
+    # Fan-out lives in a follow-on ticket; the key must be Settings-writable here.
+    ConfigKey("ANNOUNCE_RELEASES", bool, "Git", False, readable=True, writable=True),
     ConfigKey("ENFORCE_PERMS", bool, "Perms", False),
     ConfigKey("CHMOD_DIR", str, "Perms", "0777"),
     ConfigKey("CHMOD_FILE", str, "Perms", "0660"),

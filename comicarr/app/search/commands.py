@@ -91,6 +91,9 @@ def queue_priority_for_trigger(trigger: str, *, manual: bool = False) -> str:
         "search_all_missing",
         "issue_wanted",
         "storyarc_wanted",
+        "band_retry",
+        "band_search_again",
+        "issue_retry",
     }:
         return INTERACTIVE
     return ROUTINE
