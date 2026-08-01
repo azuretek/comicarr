@@ -8,8 +8,26 @@
 #  (at your option) any later version.
 
 """Activity Center domain — narrative timeline, attention band, open-work reads,
-and age-based retention of activity_events.
+age-based retention, and the sole write facade for activity_events.
 
-Query-backed HTTP reads (#485); daily 90-day purge (#489). Write facade,
-producers, and UI land in sibling issues.
+Query-backed HTTP reads (#485); daily 90-day purge (#489); write facade (#479).
+Producers call :func:`comicarr.app.activity.events.record_activity` (and
+:func:`publish_activity` after a shared-conn commit). Do not insert into
+``activity_events`` or publish the ``activity`` SSE envelope elsewhere.
 """
+
+from comicarr.app.activity.events import (
+    LEGAL_CELLS,
+    is_legal_cell,
+    publish_activity,
+    record_activity,
+    severity_for,
+)
+
+__all__ = [
+    "LEGAL_CELLS",
+    "is_legal_cell",
+    "publish_activity",
+    "record_activity",
+    "severity_for",
+]
