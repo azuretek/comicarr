@@ -70,12 +70,13 @@ class TestDbUpdateMangaShortCircuit:
         monkeypatch.setattr(updater.db, "get_engine", lambda: engine)
         monkeypatch.setattr(comicarr, "IMPORTLOCK", False, raising=False)
         monkeypatch.setattr(comicarr, "CONFIG", SimpleNamespace(CV_ONLY=True, CV_ONETIMER=1), raising=False)
-        monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", {}, raising=False)
 
         mock_add = MagicMock(return_value={"status": "complete", "comicid": "mal-161890", "content_type": "manga"})
         mock_rescan = MagicMock()
+        mock_emit = MagicMock(return_value={"event_id": 1})
         monkeypatch.setattr(comicarr.importer, "addComictoDB", mock_add)
         monkeypatch.setattr(updater, "forceRescan", mock_rescan)
+        monkeypatch.setattr("comicarr.app.activity.producers.emit_series_activity", mock_emit)
 
         updater.dbUpdate(["mal-161890"], calledfrom="refresh")
 
@@ -83,7 +84,8 @@ class TestDbUpdateMangaShortCircuit:
         # then re-matches files via forceRescan -- never the CV delete-and-reload path.
         mock_add.assert_called_once_with("mal-161890", "no")
         mock_rescan.assert_called_once_with("mal-161890")
-        assert comicarr.GLOBAL_MESSAGES["status"] == "success"
+        mock_emit.assert_called()
+        assert mock_emit.call_args[0][:2] == ("refresh", "succeeded")
 
 
 class TestForceRescanNullIssueDate:
@@ -444,15 +446,17 @@ class TestMangaRefreshForceRescanErrors:
         monkeypatch.setattr(updater.db, "get_engine", lambda: engine)
         monkeypatch.setattr(comicarr, "IMPORTLOCK", False, raising=False)
         monkeypatch.setattr(comicarr, "CONFIG", SimpleNamespace(CV_ONLY=True, CV_ONETIMER=1), raising=False)
-        monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", {}, raising=False)
         monkeypatch.setattr(
             comicarr.importer,
             "addComictoDB",
             MagicMock(return_value={"status": "complete", "comicid": "mal-161890"}),
         )
         monkeypatch.setattr(updater, "forceRescan", MagicMock(side_effect=RuntimeError("disk gone")))
+        mock_emit = MagicMock(return_value={"event_id": 1})
+        monkeypatch.setattr("comicarr.app.activity.producers.emit_series_activity", mock_emit)
 
         updater.dbUpdate(["mal-161890"], calledfrom="refresh")
 
-        assert comicarr.GLOBAL_MESSAGES["status"] == "failure"
-        assert "rescanning" in comicarr.GLOBAL_MESSAGES["message"].lower()
+        mock_emit.assert_called()
+        assert mock_emit.call_args[0][:2] == ("refresh", "failed")
+        assert mock_emit.call_args.kwargs.get("reason_code") == "rescan_failed"

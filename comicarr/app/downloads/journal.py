@@ -268,6 +268,9 @@ _PAYLOAD_KEYS = frozenset(
         "oneoff",
         "journal_release_key",
         "download_info",
+        # Sanitised diagnostic text for fail_reason detail / narrative
+        # reason_detail (#430 A5). Never a credential; redacted at write sites.
+        "fail_detail",
     }
 )
 _DOWNLOAD_INFO_KEYS = frozenset({"provider", "id", "nzo_id", "NZBID", "hash", "nzbname", "clientmode"})
@@ -633,6 +636,70 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
     return False
 
 
+def _prior_context(conn, release_key):
+    """Return (stage_rank, issueid, provider) for an existing journal row, or Nones."""
+    row = conn.execute(
+        select(
+            pipeline_journal.c.stage_rank,
+            pipeline_journal.c.issueid,
+            pipeline_journal.c.provider,
+        ).where(pipeline_journal.c.release_key == release_key)
+    ).fetchone()
+    if row is None:
+        return None, None, None
+    m = row._mapping
+    return m.get("stage_rank"), m.get("issueid"), m.get("provider")
+
+
+def _emit_activity_for_won_transition(
+    stage,
+    release_key,
+    fields,
+    payload,
+    *,
+    prior_rank,
+    prior_issueid,
+    prior_provider,
+    conn=None,
+):
+    """Best-effort narrative emit after a won journal advance (#484).
+
+    Returns the activity payload (or None). Never raises into the journal path
+    — a narrative failure must not undo a durable stage transition. When
+    ``conn`` is supplied the insert co-commits; the caller publishes after
+    their commit (or the facade-owned path publishes after its begin() exits).
+    """
+    try:
+        from comicarr.app.activity.producers import emit_for_journal_stage
+
+        issueid = fields.get("issueid") if fields else None
+        if issueid in (None, ""):
+            issueid = prior_issueid
+        if issueid in (None, "") and isinstance(payload, dict):
+            issueid = payload.get("issueid")
+        provider = fields.get("provider") if fields else None
+        if provider in (None, ""):
+            provider = prior_provider
+        if provider in (None, "") and isinstance(payload, dict):
+            provider = payload.get("provider")
+        fail_reason = fields.get("fail_reason") if fields else None
+
+        return emit_for_journal_stage(
+            stage,
+            release_key=release_key,
+            issueid=issueid,
+            provider=provider,
+            fail_reason=fail_reason,
+            payload=payload,
+            prior_stage_rank=prior_rank,
+            conn=conn,
+            won=True,
+        )
+    except Exception as e:
+        logger.fdebug("[JOURNAL] activity emit skipped for release_key=%s stage=%s: %s" % (release_key, stage, e))
+        return None
+
+
 def record_transition(release_key, stage, payload=None, conn=None, **fields):
     """Forward-only conditional advance for one release_key.
 
@@ -645,6 +712,10 @@ def record_transition(release_key, stage, payload=None, conn=None, **fields):
     or beyond `stage` (a regression, a terminal row, or a concurrent winner).
     The U4 PP-consumer atomic claim relies on exactly one concurrent
     downloaded -> post_processing caller getting True.
+
+    When this call wins, the matching Activity Center cell is co-committed
+    (or written in the same own-transaction) and published after durability
+    on the facade-owned path (#484 / ADR §7).
 
     `conn`: optional caller-supplied Connection. When given, the write joins
     the caller's transaction (so it rolls back with it) — used by the DDL/PP
@@ -665,19 +736,54 @@ def record_transition(release_key, stage, payload=None, conn=None, **fields):
 
     # Caller-supplied connection: participate in the caller's transaction.
     if conn is not None:
+        prior_rank, prior_issueid, prior_provider = _prior_context(conn, release_key)
         won = _apply_transition(conn, release_key, stage, new_rank, fields, payload, when)
         if won:
             logger.fdebug("[JOURNAL] advanced release_key=%s -> stage=%s (caller txn)" % (release_key, stage))
+            # Co-commit narrative; SSE publish is left to the transaction owner
+            # (or the next query-backed refetch — best-effort contract).
+            _emit_activity_for_won_transition(
+                stage,
+                release_key,
+                fields,
+                payload,
+                prior_rank=prior_rank,
+                prior_issueid=prior_issueid,
+                prior_provider=prior_provider,
+                conn=conn,
+            )
         return won
 
     # Own transaction with bounded retry-then-raise (mirrors db.upsert).
     attempt = 0
     while attempt < 5:
         try:
+            activity_payload = None
             with db.get_engine().begin() as own_conn:
+                prior_rank, prior_issueid, prior_provider = _prior_context(own_conn, release_key)
                 won = _apply_transition(own_conn, release_key, stage, new_rank, fields, payload, when)
+                if won:
+                    # Co-commit activity inside the same transaction so the
+                    # narrative row is durable with the stage advance.
+                    activity_payload = _emit_activity_for_won_transition(
+                        stage,
+                        release_key,
+                        fields,
+                        payload,
+                        prior_rank=prior_rank,
+                        prior_issueid=prior_issueid,
+                        prior_provider=prior_provider,
+                        conn=own_conn,
+                    )
             if won:
                 logger.fdebug("[JOURNAL] advanced release_key=%s -> stage=%s" % (release_key, stage))
+                if activity_payload:
+                    try:
+                        from comicarr.app.activity.events import publish_activity
+
+                        publish_activity(activity_payload)
+                    except Exception as e:
+                        logger.fdebug("[JOURNAL] activity publish skipped: %s" % e)
             return won
         except OperationalError as e:
             err_msg = str(e)

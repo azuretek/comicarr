@@ -354,7 +354,7 @@ def replay_search_obligations(*, work_queue=None, ledger=None, maintenance=None)
             ledger.record_outcome(run_id, item["entity_type"], entity_id, ItemOutcome.QUARANTINED, reason=str(e))
             continue
         if item["state"] == ItemOutcome.RUNNING.value:
-            ledger.record_requeue(run_id, item["entity_type"], entity_id, reason="worker restart")
+            ledger.record_requeue(run_id, item["entity_type"], entity_id, reason="worker restart", replay=True)
         _put_with_maintenance_lease(command, work_queue, maintenance)
         ledger.record_item_dispatch(run_id, item["entity_type"], entity_id, DispatchState.ACCEPTED)
         ledger.record_dispatch(run_id, DispatchState.ACCEPTED)

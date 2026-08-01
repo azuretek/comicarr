@@ -372,20 +372,9 @@ class FailedProcessor(object):
                 issueid=issueid,
                 nzbname=nzbname,
             )
-            failed_msg = "%s (%s) #%s failed to download. Retrying the search but ignoring the bad result." % (
-                issuenzb["ComicName"],
-                issuenzb["ComicYear"],
-                issuenzb["Issue_Number"],
-            )
             logger.info(module + " Sending back to search to see if we can find something that will not fail.")
-            comicarr.GLOBAL_MESSAGES = {
-                "status": "failure",
-                "comicname": issuenzb["ComicName"],
-                "seriesyear": issuenzb["ComicYear"],
-                "comicid": comicid,
-                "tables": "tables",
-                "message": failed_msg,
-            }
+            # Narrative download.failed is emitted from journal.mark_failed when
+            # the terminalize won (#484); reason_code = FAIL_REASON_RESEARCHING.
             self._log("Sending back to search to see if we can find something better that will not fail.")
             self.valreturn.append(
                 {
@@ -408,19 +397,8 @@ class FailedProcessor(object):
                 issueid=issueid,
                 nzbname=nzbname,
             )
-            failed_msg = "%s (%s) #%s failed to download." % (
-                issuenzb["ComicName"],
-                issuenzb["ComicYear"],
-                issuenzb["Issue_Number"],
-            )
-            comicarr.GLOBAL_MESSAGES = {
-                "status": "failure",
-                "comicname": issuenzb["ComicName"],
-                "seriesyear": issuenzb["ComicYear"],
-                "comicid": comicid,
-                "tables": "tables",
-                "message": failed_msg,
-            }
+            # Narrative download.failed is emitted from journal.mark_failed when
+            # the terminalize won (#484); reason_code = FAIL_REASON_NO_AUTO_HANDLING.
             logger.info(
                 module + " Stopping search here as automatic handling of failed downloads is not enabled *hint*"
             )

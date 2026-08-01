@@ -113,19 +113,13 @@ def addvialist(queue, ledger=None, maintenance=None):
             )
             with lease_context as lease:
                 time.sleep(3)
+                # In-flight mass-refresh progress is log-only (#427 / #484);
+                # completion narrates as refresh.succeeded from dbUpdate.
                 if r_mode == "updateissuedata":
                     logger.info(
                         "[MASS-REFRESH][WEEKLY-UPDATER] Now updating series data for %s (%s) [%s] "
                         % (comicname, display_year, comicid)
                     )
-                    comicarr.GLOBAL_MESSAGES = {
-                        "status": "success",
-                        "comicname": comicname,
-                        "seriesyear": seriesyear,
-                        "comicid": comicid,
-                        "tables": "both",
-                        "message": "Now refreshing %s (%s)" % (comicname, display_year),
-                    }
                     worker_maintenance.assert_lease_current(lease)
                     comicarr.importer.updateissuedata(
                         comicid,
@@ -138,14 +132,6 @@ def addvialist(queue, ledger=None, maintenance=None):
                         "[MASS-REFRESH][WEEKLY-UPDATER][AnnualID:%s] Now updating series data for %s (%s) [%s] "
                         % (values["manual_comicid"], comicname, display_year, comicid)
                     )
-                    comicarr.GLOBAL_MESSAGES = {
-                        "status": "success",
-                        "comicname": comicname,
-                        "seriesyear": seriesyear,
-                        "comicid": comicid,
-                        "tables": "both",
-                        "message": "Now refreshing %s (%s)" % (comicname, display_year),
-                    }
                     worker_maintenance.assert_lease_current(lease)
                     comicarr.importer.manualAnnual(
                         values["manual_comicid"],
@@ -160,14 +146,6 @@ def addvialist(queue, ledger=None, maintenance=None):
                         "[MASS-REFRESH][1/%s] Now refreshing %s (%s) [%s] "
                         % (queue.qsize() + 1, comicname, display_year, comicid)
                     )
-                    comicarr.GLOBAL_MESSAGES = {
-                        "status": "success",
-                        "comicname": comicname,
-                        "seriesyear": seriesyear,
-                        "comicid": comicid,
-                        "tables": "both",
-                        "message": "Now refreshing %s (%s)" % (comicname, display_year),
-                    }
                     worker_maintenance.assert_lease_current(lease)
                     dbUpdate([comicid], calledfrom="refresh")
             if command_ledger and run_id:
@@ -363,27 +341,39 @@ def dbUpdate(ComicIDList=None, calledfrom=None, sched=False):
                 logger.warn(
                     "There was an error when refreshing this series - Make sure directories are writable/exist, and check the logs for any errors/problems."
                 )
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "failure",
-                    "comicname": ComicName,
-                    "seriesyear": dspyear,
-                    "comicid": ComicID,
-                    "tables": "both",
-                    "message": "Failure refreshing %s (%s)" % (ComicName, dspyear),
-                }
+                try:
+                    from comicarr.app.activity.producers import emit_series_activity
+
+                    emit_series_activity(
+                        "refresh",
+                        "failed",
+                        ComicID,
+                        comicname=ComicName,
+                        seriesyear=dspyear,
+                        reason_code="refresh_failed",
+                    )
+                except Exception as emit_err:
+                    logger.fdebug("[ACTIVITY] refresh.failed emit skipped: %s" % emit_err)
                 return
             try:
                 forceRescan(ComicID)
             except Exception as e:
                 logger.error("[MANGA-REFRESH] forceRescan failed for %s: %s" % (ComicID, e))
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "failure",
-                    "comicname": ComicName,
-                    "seriesyear": dspyear,
-                    "comicid": ComicID,
-                    "tables": "both",
-                    "message": "Failure rescanning %s (%s) after refresh" % (ComicName, dspyear),
-                }
+                try:
+                    from comicarr.app.activity.producers import emit_series_activity
+                    from comicarr.app.common.redaction import redact_sensitive_text
+
+                    emit_series_activity(
+                        "refresh",
+                        "failed",
+                        ComicID,
+                        comicname=ComicName,
+                        seriesyear=dspyear,
+                        reason_code="rescan_failed",
+                        reason_detail=redact_sensitive_text(str(e))[:1000],
+                    )
+                except Exception as emit_err:
+                    logger.fdebug("[ACTIVITY] refresh.failed emit skipped: %s" % emit_err)
                 return
         elif not comicarr.CONFIG.CV_ONLY or ComicID[:1] == "G":
             # "exceptions" table is not in tables.py -- use text()
@@ -488,14 +478,19 @@ def dbUpdate(ComicIDList=None, calledfrom=None, sched=False):
                         logger.warn(
                             "There was an error when refreshing this series - Make sure directories are writable/exist, and check the logs for any errors/problems."
                         )
-                        comicarr.GLOBAL_MESSAGES = {
-                            "status": "failure",
-                            "comicname": ComicName,
-                            "seriesyear": dspyear,
-                            "comicid": ComicID,
-                            "tables": "both",
-                            "message": "Failure refreshing %s (%s)" % (ComicName, dspyear),
-                        }
+                        try:
+                            from comicarr.app.activity.producers import emit_series_activity
+
+                            emit_series_activity(
+                                "refresh",
+                                "failed",
+                                ComicID,
+                                comicname=ComicName,
+                                seriesyear=dspyear,
+                                reason_code="refresh_failed",
+                            )
+                        except Exception as emit_err:
+                            logger.fdebug("[ACTIVITY] refresh.failed emit skipped: %s" % emit_err)
                         return
 
                     issues_new = db.select_all(select(issues).where(issues.c.ComicID == ComicID))
@@ -809,14 +804,18 @@ def dbUpdate(ComicIDList=None, calledfrom=None, sched=False):
             time.sleep(15)  # pause for 15 secs so dont hammer CV and get 500 error
         else:
             if calledfrom == "refresh":
-                comicarr.GLOBAL_MESSAGES = {
-                    "status": "success",
-                    "comicname": ComicName,
-                    "seriesyear": dspyear,
-                    "comicid": ComicID,
-                    "tables": "both",
-                    "message": "Successfully refreshed %s (%s)" % (ComicName, dspyear),
-                }
+                try:
+                    from comicarr.app.activity.producers import emit_series_activity
+
+                    emit_series_activity(
+                        "refresh",
+                        "succeeded",
+                        ComicID,
+                        comicname=ComicName,
+                        seriesyear=dspyear,
+                    )
+                except Exception as emit_err:
+                    logger.fdebug("[ACTIVITY] refresh.succeeded emit skipped: %s" % emit_err)
             break
 
     # helpers.job_management(write=True, job='DB Updater', last_run_completed=helpers.utctimestamp(), status='Waiting')
@@ -1397,12 +1396,10 @@ def foundsearch(
 
     logger.fdebug(module + " comicid: " + str(ComicID))
     logger.fdebug(module + " issueid: " + str(IssueID))
-    seriesyear = None
     if mode != "pullwant":
         if mode != "story_arc":
             comic = db.select_one(select(comics).where(comics.c.ComicID == ComicID))
             ComicName = comic["ComicName"]
-            seriesyear = comic["ComicYear"]
             if mode == "want_ann":
                 issue = db.select_one(select(annuals).where(annuals.c.IssueID == IssueID))
                 if ComicName != issue["ReleaseComicName"] + " Annual":
@@ -1528,19 +1525,9 @@ def foundsearch(
 
             db.upsert("oneoffhistory", newValue, ctlVal)
 
-        global_line = "Successfully snatched %s #%s" % (ComicName, IssueNum)
-        if IssueNum is None:
-            global_line = "Successfully snatched %s" % (ComicName)
-
         logger.info("%s Updated the status (Snatched) complete for %s Issue: %s" % (module, ComicName, IssueNum))
-        comicarr.GLOBAL_MESSAGES = {
-            "status": "success",
-            "comicname": ComicName,
-            "seriesyear": seriesyear,
-            "comicid": ComicID,
-            "tables": "tables",
-            "message": global_line,
-        }
+        # grab.succeeded is owned by the journal snatched transition (#430 /
+        # #484) — do not double-write GLOBAL_MESSAGES here.
 
         # --- Durable pipeline journal: snatched (U2) ---------------------------
         # STRICTLY LAST on this seam: every db.upsert("snatched"/"nzblog"/...)
