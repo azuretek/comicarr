@@ -54,6 +54,50 @@ class Process(object):
         # (manual/API/ComicRN) — the markers then fall back to re-derivation.
         self.journal_release_key = journal_release_key
 
+    def _terminalize_handling_disabled(self):
+        """Mark the journal failed when failed-download handling is off.
+
+        Prefer the PP claim key; fall back under existing release_key rules
+        from download_info / issue identity.
+        """
+        from comicarr import failed as failed_mod
+
+        info = self.download_info if isinstance(self.download_info, dict) else {}
+        issueid = self.issueid or info.get("issueid")
+        provider = info.get("provider")
+        nzbname = self.nzb_name or info.get("nzbname")
+        h = info.get("hash")
+        rkey = failed_mod.resolve_failed_release_key(
+            journal_release_key=self.journal_release_key,
+            issueid=issueid,
+            provider=provider,
+            nzbname=nzbname,
+            hash=h,
+            discriminant=info or None,
+        )
+        if rkey is None:
+            logger.fdebug(
+                "[PROCESS] journal terminalize skipped — release_key not resolvable "
+                "(issueid=%s provider=%s)" % (issueid, provider)
+            )
+            return False
+        return failed_mod.terminalize_failed_download(
+            rkey,
+            failed_mod.FAIL_REASON_NO_AUTO_HANDLING,
+            status=None,
+            issueid=issueid,
+            provider=provider,
+            nzbname=nzbname,
+            hash=h,
+            payload={
+                "issueid": issueid,
+                "comicid": self.comicid or info.get("comicid"),
+                "provider": provider,
+                "nzbname": nzbname,
+                "failed": True,
+            },
+        )
+
     def post_process(self):
         if self.failed == "0":
             self.failed = False
@@ -103,7 +147,14 @@ class Process(object):
                 nzbid = self.download_info["id"]
                 provider = self.download_info["provider"]
                 FailProcess = comicarr.failed.FailedProcessor(
-                    nzb_name=self.nzb_name, nzb_folder=self.nzb_folder, queue=ppqueue, prov=provider, id=nzbid
+                    nzb_name=self.nzb_name,
+                    nzb_folder=self.nzb_folder,
+                    queue=ppqueue,
+                    prov=provider,
+                    id=nzbid,
+                    issueid=self.issueid,
+                    comicid=self.comicid,
+                    journal_release_key=self.journal_release_key,
                 )
                 FailProcess.Process()
                 failchk = ppqueue.get()
@@ -118,6 +169,10 @@ class Process(object):
                     logger.error("mode is unsupported: " + failchk[0]["mode"])
             else:
                 logger.warn("Failed Download Handling is not enabled. Leaving Failed Download as-is.")
+                # Still terminalize the journal so a stuck open stage is not
+                # counted as in-flight forever (#457 / #482). No further work
+                # is scheduled — leave R9 status null (on band).
+                self._terminalize_handling_disabled()
 
         if retry_outside:
             PostProcess = comicarr.postprocessor.PostProcessor("Manual Run", self.nzb_folder, queue=ppqueue)

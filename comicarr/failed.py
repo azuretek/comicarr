@@ -28,6 +28,101 @@ import comicarr
 from comicarr import db, helpers, logger
 from comicarr.tables import annuals, comics, failed, issues, nzblog
 
+# Producer-contract fail_reason tokens (#430 A6 / #482). Token-only — never
+# concatenate exception text. Band membership is stage + R9 status only; these
+# codes feed narrative reason_code alignment and machine diagnostics.
+FAIL_REASON_RESEARCHING = "download_failed_researching"
+FAIL_REASON_NO_AUTO_HANDLING = "download_failed_no_auto_handling"
+
+# R9 resolution stamp: auto re-search enqueued (or operator retry). Keeps the
+# failed journal row off the needs-attention band without rewriting stage.
+STATUS_RETRIED = "retried"
+
+
+def resolve_failed_release_key(
+    journal_release_key=None,
+    issueid=None,
+    provider=None,
+    nzbname=None,
+    hash=None,
+    discriminant=None,
+):
+    """Prefer a propagated journal_release_key; else derive under existing rules.
+
+    Returns None when no resolvable identity exists so callers skip the journal
+    write rather than invent a colliding key.
+    """
+    if journal_release_key not in (None, ""):
+        return str(journal_release_key)
+
+    from comicarr.app.downloads import journal
+
+    if issueid is None and provider in (None, "") and nzbname in (None, "") and hash in (None, ""):
+        return None
+    return journal.release_key(
+        issueid,
+        provider,
+        nzbname=nzbname,
+        hash=hash,
+        discriminant=discriminant,
+    )
+
+
+def terminalize_failed_download(
+    release_key,
+    fail_reason,
+    *,
+    status=None,
+    issueid=None,
+    provider=None,
+    nzbname=None,
+    hash=None,
+    payload=None,
+    conn=None,
+    **fields,
+):
+    """Advance pipeline_journal to terminal `failed` for a failed-download seam.
+
+    When ``status`` is provided (e.g. STATUS_RETRIED after FAILED_AUTO enqueue),
+    it is stamped in the same ``mark_failed`` write so band membership and the
+    stage transition stay transactionally honest. Returns the ``won`` signal
+    from ``journal.mark_failed`` (False when the key is missing or the row was
+    already terminal).
+    """
+    if release_key in (None, ""):
+        return False
+    if fail_reason in (None, ""):
+        logger.warn("[FAILED-DOWNLOAD] terminalize skipped: empty fail_reason for release_key=%s" % release_key)
+        return False
+
+    from comicarr.app.downloads import journal
+
+    write_fields = dict(fields)
+    if issueid not in (None, ""):
+        write_fields.setdefault("issueid", issueid)
+    if provider not in (None, ""):
+        write_fields.setdefault("provider", provider)
+    if nzbname not in (None, ""):
+        write_fields.setdefault("nzbname", nzbname)
+    if hash not in (None, ""):
+        write_fields.setdefault("hash", hash)
+    if status is not None:
+        write_fields["status"] = status
+
+    won = journal.mark_failed(
+        release_key,
+        fail_reason,
+        payload=payload,
+        conn=conn,
+        **write_fields,
+    )
+    if won:
+        logger.fdebug(
+            "[FAILED-DOWNLOAD] journal terminalized release_key=%s fail_reason=%s status=%s"
+            % (release_key, fail_reason, status)
+        )
+    return won
+
 
 class FailedProcessor(object):
     """Handles Failed downloads that are passed from SABnzbd thus far"""
@@ -42,10 +137,13 @@ class FailedProcessor(object):
         prov=None,
         queue=None,
         oneoffinfo=None,
+        journal_release_key=None,
     ):
         """
         nzb_name : Full name of the nzb file that has returned as a fail.
         nzb_folder: Full path to the folder of the failed download.
+        journal_release_key: Canonical pipeline_journal key when already known
+            (PP claim / download_info). Preferred over re-derivation.
         """
         self.nzb_name = nzb_name
         self.nzb_folder = nzb_folder
@@ -72,6 +170,7 @@ class FailedProcessor(object):
         if queue:
             self.queue = queue
         self.valreturn = []
+        self.journal_release_key = journal_release_key
 
     def _log(self, message, level=logger):  # .message):
         """
@@ -157,7 +256,7 @@ class FailedProcessor(object):
         if all([self.id == nzbiss["ID"], self.prov == nzbiss["PROVIDER"]]):
             logger.info(
                 "ID %s for provider %s already exists as a Failed item. Continuing the search..."
-                % (nzbiss["ID"], nzbiss["Provider"])
+                % (nzbiss["ID"], nzbiss["PROVIDER"])
             )
 
         if self.prov is None:
@@ -259,7 +358,18 @@ class FailedProcessor(object):
         logger.info(module + " Successfully marked as Failed.")
         self._log("Successfully marked as Failed.")
 
+        # Complete the journal ledger at this seam (#457 / #482). Prefer the
+        # propagated claim key; fall back under existing release_key rules.
+        self.issueid = issueid
         if comicarr.CONFIG.FAILED_AUTO:
+            # mark_failed + R9 status=retried in one write: auto re-search is
+            # enqueued (mode=retry) so the row must stay off the attention band.
+            self._terminalize_journal(
+                FAIL_REASON_RESEARCHING,
+                status=STATUS_RETRIED,
+                issueid=issueid,
+                nzbname=nzbname,
+            )
             failed_msg = "%s (%s) #%s failed to download. Retrying the search but ignoring the bad result." % (
                 issuenzb["ComicName"],
                 issuenzb["ComicYear"],
@@ -289,6 +399,13 @@ class FailedProcessor(object):
 
             return self.queue.put(self.valreturn)
         else:
+            # No further system work — leave R9 status null so the band sees it.
+            self._terminalize_journal(
+                FAIL_REASON_NO_AUTO_HANDLING,
+                status=None,
+                issueid=issueid,
+                nzbname=nzbname,
+            )
             failed_msg = "%s (%s) #%s failed to download." % (
                 issuenzb["ComicName"],
                 issuenzb["ComicYear"],
@@ -368,6 +485,38 @@ class FailedProcessor(object):
                 )
                 return "nope"
 
+    def _resolved_release_key(self, issueid=None, nzbname=None):
+        return resolve_failed_release_key(
+            journal_release_key=self.journal_release_key,
+            issueid=issueid if issueid is not None else self.issueid,
+            provider=self.prov,
+            nzbname=nzbname if nzbname is not None else self.nzb_name,
+            hash=self.id if self.prov and str(self.prov).lower() in {"32p", "wwt", "dem"} else None,
+        )
+
+    def _terminalize_journal(self, fail_reason, *, status=None, issueid=None, nzbname=None):
+        rkey = self._resolved_release_key(issueid=issueid, nzbname=nzbname)
+        if rkey is None:
+            logger.fdebug(
+                "[FAILED-DOWNLOAD] journal terminalize skipped — release_key not resolvable "
+                "(issueid=%s provider=%s)" % (issueid or self.issueid, self.prov)
+            )
+            return False
+        return terminalize_failed_download(
+            rkey,
+            fail_reason,
+            status=status,
+            issueid=issueid if issueid is not None else self.issueid,
+            provider=self.prov,
+            nzbname=nzbname if nzbname is not None else self.nzb_name,
+            payload={
+                "issueid": issueid if issueid is not None else self.issueid,
+                "comicid": self.comicid,
+                "provider": self.prov,
+                "nzbname": nzbname if nzbname is not None else self.nzb_name,
+            },
+        )
+
     def markFailed(self):
         # use this to forcibly mark a single issue as being Failed (ie. if a search result is sent to a client, but the result
         # ends up passing in a 404 or something that makes it so that the download can't be initiated).
@@ -418,5 +567,9 @@ class FailedProcessor(object):
             "DateFailed": helpers.now(),
         }
         db.upsert("failed", Vals, ctrlVal)
+
+        # Terminalize when key is resolvable. No FAILED_AUTO enqueue here —
+        # leave R9 status null so unresolved failures stay on the band.
+        self._terminalize_journal(FAIL_REASON_NO_AUTO_HANDLING, status=None)
 
         logger.info(module + " Successfully marked as Failed.")
