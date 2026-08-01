@@ -765,6 +765,7 @@ pipeline_journal = Table(
     Column("stage_rank", Integer, nullable=False),  # derived from stage; drives the monotonic guard
     Column("payload_json", Text),  # reconstruct the SNATCHED_QUEUE/PP_QUEUE item
     Column("fail_reason", Text),  # nullable
+    # MYSQL_KEY_TEXT: retention index (stage, updated_date) must stay portable.
     Column("updated_date", MYSQL_KEY_TEXT, nullable=False),
     # Reserved-nullable (R9) — unpopulated now:
     Column("status", Text),
@@ -1092,6 +1093,7 @@ Index("failed_issueid", failed.c.IssueID)
 Index("upcoming_issuedate", upcoming.c.IssueDate)
 Index("upcoming_issueid", upcoming.c.IssueID)
 Index("pipeline_journal_stage", pipeline_journal.c.stage)
+# Retention eligibility + age predicates (see #478). Keep pipeline_journal_stage.
 Index("pipeline_journal_stage_updated", pipeline_journal.c.stage, pipeline_journal.c.updated_date)
 Index("activity_events_created_at", activity_events.c.created_at)
 Index("activity_events_parent_series_id", activity_events.c.parent_series_id)

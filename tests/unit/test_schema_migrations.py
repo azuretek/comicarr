@@ -343,6 +343,58 @@ def test_upgrade_database_builds_a_fresh_database_to_the_single_head(tmp_path):
     assert set(metadata.tables).issubset(set(inspect(engine).get_table_names()))
 
 
+def test_head_includes_ledger_retention_indexes(tmp_path):
+    """#478: four retention indexes land at head; pipeline_journal_stage stays."""
+
+    engine = create_engine("sqlite:///%s" % (tmp_path / "retention-indexes.db"))
+    assert upgrade_database(engine) == "0004_ledger_retention_indexes"
+
+    inspector = inspect(engine)
+    expected = {
+        "acquisition_run_items": "acquisition_run_items_state_completed",
+        "acquisition_runs": "acquisition_runs_state_completed",
+        "pipeline_journal": "pipeline_journal_stage_updated",
+        "acquisition_maintenance_events": "acquisition_maintenance_events_created",
+    }
+    for table_name, index_name in expected.items():
+        names = {index["name"] for index in inspector.get_indexes(table_name)}
+        assert index_name in names, "missing %s on %s" % (index_name, table_name)
+
+    journal_indexes = {index["name"] for index in inspector.get_indexes("pipeline_journal")}
+    assert "pipeline_journal_stage" in journal_indexes
+
+
+def test_upgrade_from_library_chat_creates_missing_retention_indexes(tmp_path):
+    """Stamped 0003 DBs that lack the new indexes must gain them on upgrade."""
+
+    engine = create_engine("sqlite:///%s" % (tmp_path / "pre-retention.db"))
+    metadata.create_all(engine)
+    retention_indexes = (
+        "acquisition_run_items_state_completed",
+        "acquisition_runs_state_completed",
+        "pipeline_journal_stage_updated",
+        "acquisition_maintenance_events_created",
+    )
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0003_library_chat')"))
+        for index_name in retention_indexes:
+            conn.execute(text("DROP INDEX IF EXISTS %s" % index_name))
+
+    assert upgrade_database(engine) == "0004_ledger_retention_indexes"
+    inspector = inspect(engine)
+    for table_name, index_name in (
+        ("acquisition_run_items", "acquisition_run_items_state_completed"),
+        ("acquisition_runs", "acquisition_runs_state_completed"),
+        ("pipeline_journal", "pipeline_journal_stage_updated"),
+        ("acquisition_maintenance_events", "acquisition_maintenance_events_created"),
+    ):
+        names = {index["name"] for index in inspector.get_indexes(table_name)}
+        assert index_name in names
+    assert "pipeline_journal_stage" in {index["name"] for index in inspector.get_indexes("pipeline_journal")}
+
+
 def test_upgrade_database_stamps_only_a_verified_legacy_database(tmp_path):
     engine = create_engine("sqlite:///%s" % (tmp_path / "legacy-upgrade.db"))
     metadata.create_all(engine)
