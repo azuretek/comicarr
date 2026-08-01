@@ -272,8 +272,10 @@ _KEYS: tuple[ConfigKey, ...] = (
     # Controls automatic checks only; force-check ignores this switch.
     ConfigKey("CHECK_GITHUB", bool, "Git", True, readable=True, writable=True),
     # Operator-facing: Settings → About → Updates "Announce releases to notifiers".
-    # Fan-out lives in a follow-on ticket; the key must be Settings-writable here.
+    # Global gate × *_ENABLED only (#475 / #453); Settings-writable (#471).
     ConfigKey("ANNOUNCE_RELEASES", bool, "Git", False, readable=True, writable=True),
+    # Install-wide dedup for outbound release announces; not a Settings field.
+    ConfigKey("LAST_ANNOUNCED_VERSION", str, "Git", None),
     ConfigKey("ENFORCE_PERMS", bool, "Perms", False),
     ConfigKey("CHMOD_DIR", str, "Perms", "0777"),
     ConfigKey("CHMOD_FILE", str, "Perms", "0660"),
