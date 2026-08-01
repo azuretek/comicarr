@@ -37,6 +37,7 @@ _RECURRING_JOB_IDS = {
     "importinbox",
     "ddl_health",
     "ledger_retention",
+    "activity_retention",
 }
 
 

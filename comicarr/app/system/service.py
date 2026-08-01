@@ -68,6 +68,7 @@ SCHEDULER_JOB_NAMES = {
     "importinbox": "Import Inbox Scanner",
     "ddl_health": "DDL Health Check",
     "ledger_retention": "Ledger Retention",
+    "activity_retention": "Activity Event Retention",
 }
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"

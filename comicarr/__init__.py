@@ -1088,6 +1088,19 @@ def start(ctx):
                 trigger=IntervalTrigger(days=1, timezone="UTC"),
             )
 
+            # Narrative activity_events age retention (ADR §10 / #489). Always
+            # on: age-only purge, no config key, independent of acquisition gate.
+            from comicarr.app.activity import retention as activity_retention
+
+            _add_recurring_job(
+                func=activity_retention.run,
+                # id must be a string constant (scheduler config AST test).
+                id="activity_retention",
+                name=activity_retention.JOB_NAME,
+                next_run_time=datetime.datetime.utcnow(),
+                trigger=IntervalTrigger(hours=24, minutes=0, timezone="UTC"),
+            )
+
             # A schema failure, persistent repair fence, or explicit operator
             # override suppresses every producer/consumer that can claim or
             # hand off acquisition work. The scheduler itself still starts so
