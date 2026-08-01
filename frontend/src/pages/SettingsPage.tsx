@@ -11,6 +11,7 @@ import { AiTab } from "@/components/settings/AiTab";
 import { NotificationsTab } from "@/components/settings/NotificationsTab";
 import { MediaManagementTab } from "@/components/settings/MediaManagementTab";
 import { AcquisitionHealthTab } from "@/components/settings/AcquisitionHealthTab";
+import { AboutTab } from "@/components/settings/AboutTab";
 import { SaveButton } from "@/components/settings/SaveButton";
 import PageHeader from "@/components/layout/PageHeader";
 import { prepareConfigSaveData } from "@/lib/configSave";
@@ -173,8 +174,17 @@ export default function SettingsPage() {
   // config.version which used to surface git SHAs or stale install metadata.
   const version = `comicarr ${formatAppVersion()}`;
 
-  const configData: ReadableConfig = config ?? {};
-  const tabProps = { config: configData, formData, onChange: handleChange };
+  const configData: Config = config ?? {};
+  const tabProps = {
+    config: configData as ReadableConfig,
+    formData,
+    onChange: handleChange,
+  };
+  const aboutProps = {
+    config: configData,
+    formData,
+    onChange: handleChange,
+  };
   const apiTabProps = {
     ...tabProps,
     regeneratedApiKey,
@@ -255,7 +265,7 @@ export default function SettingsPage() {
               <DownloadClientsTab config={configData} />
             )}
             {section === "ai" && <AiTab {...tabProps} />}
-            {section === "about" && <AboutSection config={config ?? {}} />}
+            {section === "about" && <AboutTab {...aboutProps} />}
           </div>
         </div>
       </div>
@@ -267,41 +277,5 @@ export default function SettingsPage() {
         isSaving={updateConfigMutation.isPending}
       />
     </div>
-  );
-}
-
-function AboutSection({ config }: { config: Config }) {
-  const rows: Array<[string, string]> = [
-    ["version", formatAppVersion(false)],
-    ["config path", config.config_path || "/config/config.ini"],
-    ["data directory", config.data_dir || "—"],
-    ["python", config.python_version || "—"],
-  ];
-
-  return (
-    <section>
-      <div className="mb-4">
-        <div className="text-[13px] font-semibold tracking-tight">About</div>
-        <div className="text-[12px] text-muted-foreground mt-0.5">
-          Build and environment info.
-        </div>
-      </div>
-      <div
-        className="rounded-[6px] border divide-y"
-        style={{ borderColor: "var(--border)" }}
-      >
-        {rows.map(([k, v]) => (
-          <div
-            key={k}
-            className="grid gap-1 sm:gap-0 sm:items-center px-3.5 py-2.5 font-mono text-[11.5px] grid-cols-1 sm:[grid-template-columns:160px_1fr]"
-          >
-            <div className="text-muted-foreground tracking-[0.05em] uppercase text-[10px]">
-              {k}
-            </div>
-            <div className="truncate break-all">{v}</div>
-          </div>
-        ))}
-      </div>
-    </section>
   );
 }

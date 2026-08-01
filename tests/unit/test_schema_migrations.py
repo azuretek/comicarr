@@ -347,7 +347,7 @@ def test_head_includes_ledger_retention_indexes(tmp_path):
     """#478: four retention indexes land at head; pipeline_journal_stage stays."""
 
     engine = create_engine("sqlite:///%s" % (tmp_path / "retention-indexes.db"))
-    assert upgrade_database(engine) == "0004_ledger_retention_indexes"
+    assert upgrade_database(engine) == "0005_activity_events"
 
     inspector = inspect(engine)
     expected = {
@@ -382,7 +382,7 @@ def test_upgrade_from_library_chat_creates_missing_retention_indexes(tmp_path):
         for index_name in retention_indexes:
             conn.execute(text("DROP INDEX IF EXISTS %s" % index_name))
 
-    assert upgrade_database(engine) == "0004_ledger_retention_indexes"
+    assert upgrade_database(engine) == "0005_activity_events"
     inspector = inspect(engine)
     for table_name, index_name in (
         ("acquisition_run_items", "acquisition_run_items_state_completed"),

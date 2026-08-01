@@ -268,11 +268,13 @@ _KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("GIT_USER", str, "Git", "frankieramirez"),
     ConfigKey("GIT_TOKEN", str, "Git", None),
     ConfigKey("GIT_BRANCH", str, "Git", None),
-    ConfigKey("CHECK_GITHUB", bool, "Git", True),
-    # Outbound release announcements (#475 / #453). Global gate × *_ENABLED only.
-    # Settings About → Updates (#471) exposes ANNOUNCE_RELEASES; LAST_ANNOUNCED_VERSION
-    # is install-wide dedup storage and stays out of the Settings API.
+    # Operator-facing: Settings → About → Updates "Check for updates".
+    # Controls automatic checks only; force-check ignores this switch.
+    ConfigKey("CHECK_GITHUB", bool, "Git", True, readable=True, writable=True),
+    # Operator-facing: Settings → About → Updates "Announce releases to notifiers".
+    # Global gate × *_ENABLED only (#475 / #453); Settings-writable (#471).
     ConfigKey("ANNOUNCE_RELEASES", bool, "Git", False, readable=True, writable=True),
+    # Install-wide dedup for outbound release announces; not a Settings field.
     ConfigKey("LAST_ANNOUNCED_VERSION", str, "Git", None),
     ConfigKey("ENFORCE_PERMS", bool, "Perms", False),
     ConfigKey("CHMOD_DIR", str, "Perms", "0777"),

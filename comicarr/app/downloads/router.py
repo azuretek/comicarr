@@ -18,11 +18,11 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from starlette.responses import FileResponse
 
+from comicarr.app.core.context import AppContext, get_context
 from comicarr.app.core.security import require_session
 from comicarr.app.downloads import service as dl_service
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
-
 
 # ---------------------------------------------------------------------------
 # History endpoints
@@ -118,6 +118,81 @@ def process_issue(
     if not result["success"]:
         return JSONResponse(status_code=500, content={"detail": result.get("error")})
     return result
+
+
+# ---------------------------------------------------------------------------
+# Needs-attention band resolution (#483)
+# ---------------------------------------------------------------------------
+
+
+def _resolution_response(result):
+    if result.get("success"):
+        return result
+    return JSONResponse(
+        status_code=int(result.get("status_code") or 400),
+        content=result,
+    )
+
+
+@router.get("/needs-attention", dependencies=[Depends(require_session)])
+def list_needs_attention(
+    issueid: str = Query(None, max_length=100),
+):
+    """List unresolved failed / manual_review journal rows (band predicate)."""
+    return dl_service.list_needs_attention(issueid=issueid)
+
+
+@router.post("/needs-attention/{release_key:path}/retry")
+def needs_attention_retry(
+    release_key: str,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Re-want + scoped search for a failed band row; stamp status=retried."""
+    return _resolution_response(dl_service.resolve_needs_attention(ctx, release_key, "retry", audit_identity=username))
+
+
+@router.post("/needs-attention/{release_key:path}/search-again")
+def needs_attention_search_again(
+    release_key: str,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Re-want + scoped search for a manual_review band row; stamp status=retried."""
+    return _resolution_response(
+        dl_service.resolve_needs_attention(ctx, release_key, "search_again", audit_identity=username)
+    )
+
+
+@router.post("/needs-attention/{release_key:path}/ignore")
+def needs_attention_ignore(
+    release_key: str,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Ignore issue (AcquisitionIntent.IGNORED) and stamp status=ignored."""
+    return _resolution_response(dl_service.resolve_needs_attention(ctx, release_key, "ignore", audit_identity=username))
+
+
+@router.post("/needs-attention/{release_key:path}/import")
+def needs_attention_import(
+    release_key: str,
+    request_body: dict = None,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Route through validated post-process; stamp status=imported only on success."""
+    body = request_body or {}
+    return _resolution_response(
+        dl_service.resolve_needs_attention(
+            ctx,
+            release_key,
+            "import",
+            audit_identity=username,
+            nzb_name=body.get("nzb_name"),
+            nzb_folder=body.get("nzb_folder"),
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
