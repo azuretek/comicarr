@@ -3538,6 +3538,7 @@ def searcher(
                     nzbname=nzbname,
                     prov=nzbprov,
                     oneoffinfo=comicinfo,
+                    journal_release_key=journal_release_key,
                 )
             else:
                 logger.error(
@@ -4104,7 +4105,7 @@ def notify_snatch(sent_to, comicname, comyear, IssueNumber, nzbprov, pack):
     return
 
 
-def FailedMark(IssueID, ComicID, id, nzbname, prov, oneoffinfo=None):
+def FailedMark(IssueID, ComicID, id, nzbname, prov, oneoffinfo=None, journal_release_key=None):
     # Used to pass a failed attempt at sending a download to a client, to the failed
     # handler, and then back again to continue searching.
 
@@ -4117,6 +4118,7 @@ def FailedMark(IssueID, ComicID, id, nzbname, prov, oneoffinfo=None):
         nzb_name=nzbname,
         prov=prov,
         oneoffinfo=oneoffinfo,
+        journal_release_key=journal_release_key,
     )
     FailProcess.markFailed()
 

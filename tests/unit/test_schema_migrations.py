@@ -196,8 +196,8 @@ def test_upgrade_database_accepts_a_known_prior_comicarr_revision(tmp_path):
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
         conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0001_baseline')"))
 
-    assert upgrade_database(engine) == "0003_library_chat"
-    assert current_revision(engine) == "0003_library_chat"
+    assert upgrade_database(engine) == "0004_ledger_retention_indexes"
+    assert current_revision(engine) == "0004_ledger_retention_indexes"
 
 
 def test_upgrade_database_accepts_pre_chat_revision_without_library_chat_tables(tmp_path):
@@ -218,8 +218,8 @@ def test_upgrade_database_accepts_pre_chat_revision_without_library_chat_tables(
 
     assert "ai_chat_threads" not in set(inspect(engine).get_table_names())
     assert classify_database(engine) is DatabaseState.VERSIONED
-    assert upgrade_database(engine) == "0003_library_chat"
-    assert current_revision(engine) == "0003_library_chat"
+    assert upgrade_database(engine) == "0004_ledger_retention_indexes"
+    assert current_revision(engine) == "0004_ledger_retention_indexes"
     assert {"ai_chat_threads", "ai_chat_messages", "ai_chat_attachments"}.issubset(
         set(inspect(engine).get_table_names())
     )
@@ -254,7 +254,7 @@ def test_upgrade_database_builds_a_fresh_database_to_the_single_head(tmp_path):
 
     revision = upgrade_database(engine)
 
-    assert revision == "0003_library_chat"
+    assert revision == "0004_ledger_retention_indexes"
     assert set(metadata.tables).issubset(set(inspect(engine).get_table_names()))
 
 
@@ -264,8 +264,8 @@ def test_upgrade_database_stamps_only_a_verified_legacy_database(tmp_path):
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
 
-    assert upgrade_database(engine) == "0003_library_chat"
-    assert current_revision(engine) == "0003_library_chat"
+    assert upgrade_database(engine) == "0004_ledger_retention_indexes"
+    assert current_revision(engine) == "0004_ledger_retention_indexes"
 
 
 def test_upgrade_database_never_stamps_an_unknown_database(tmp_path):

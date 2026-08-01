@@ -8,8 +8,8 @@
 
 ## Release Impact
 
-- [ ] User-visible app change; changeset added with `npm run changeset`
-- [ ] No app release impact; no changeset needed
+- [ ] User-visible app change; changeset added with `npm run changeset` (operator-facing, outcome-first prose — see CONTRIBUTING.md)
+- [ ] No app release impact; no changeset needed (omit rather than "No user-visible behaviour changes.")
 
 ## Testing
 

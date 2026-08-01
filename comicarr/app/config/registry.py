@@ -114,9 +114,8 @@ class ConfigKey:
 # ---------------------------------------------------------------------------
 
 _KEYS: tuple[ConfigKey, ...] = (
-    ConfigKey("CONFIG_VERSION", int, "General", 15),
+    ConfigKey("CONFIG_VERSION", int, "General", 16),
     ConfigKey("MINIMAL_INI", bool, "General", False),
-    ConfigKey("AUTO_UPDATE", bool, "General", False, readable=True, writable=True),
     ConfigKey("CACHE_DIR", str, "General", None, readable=True),
     ConfigKey("DYNAMIC_UPDATE", int, "General", 0),
     ConfigKey("REFRESH_CACHE", int, "General", 7),
@@ -269,8 +268,7 @@ _KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("GIT_USER", str, "Git", "frankieramirez"),
     ConfigKey("GIT_TOKEN", str, "Git", None),
     ConfigKey("GIT_BRANCH", str, "Git", None),
-    ConfigKey("CHECK_GITHUB", bool, "Git", False),
-    ConfigKey("CHECK_GITHUB_ON_STARTUP", bool, "Git", False),
+    ConfigKey("CHECK_GITHUB", bool, "Git", True),
     ConfigKey("ENFORCE_PERMS", bool, "Perms", False),
     ConfigKey("CHMOD_DIR", str, "Perms", "0777"),
     ConfigKey("CHMOD_FILE", str, "Perms", "0660"),

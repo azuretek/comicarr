@@ -1458,7 +1458,12 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                         conn.execute(delete(ddl_info).where(ddl_info.c.ID == item["id"]))
                     comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
                     comicarr.search.FailedMark(
-                        item["issueid"], item["comicid"], item["id"], ddzstat["filename"], item["site"]
+                        item["issueid"],
+                        item["comicid"],
+                        item["id"],
+                        ddzstat["filename"],
+                        item["site"],
+                        journal_release_key=item.get("journal_release_key"),
                     )
             active_item["value"] = None
         else:

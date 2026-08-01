@@ -4,7 +4,6 @@
 /** Shape of `GET /api/config`. Every field is optional: get_safe_config
  *  omits a key whose value is None rather than sending null. */
 export interface ReadableConfig {
-  auto_update?: boolean;
   cache_dir?: string;
   annuals_on?: boolean;
   launch_browser?: boolean;
@@ -126,7 +125,6 @@ export interface ReadableConfig {
 
 /** Keys `update_config` accepts. */
 export interface WritableConfig {
-  auto_update?: boolean;
   annuals_on?: boolean;
   launch_browser?: boolean;
   search_delay?: number;
