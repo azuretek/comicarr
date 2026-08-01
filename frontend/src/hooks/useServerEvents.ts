@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/components/ui/toast";
+import { ACTIVITY_STATUS_QUERY_KEY } from "@/hooks/useActivityStatus";
 import type {
   AddByIdEventData,
   SchedulerMessageEventData,
@@ -37,6 +38,10 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
     }
 
     let isMounted = true;
+
+    const invalidateActivityStatus = () => {
+      queryClient.invalidateQueries({ queryKey: ACTIVITY_STATUS_QUERY_KEY });
+    };
 
     const setupEventSource = () => {
       if (!isMounted) return;
@@ -194,9 +199,8 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
         try {
           const data: SearchProgressEventData = JSON.parse(e.data);
           console.log("[SSE] search_progress event:", data);
-
-          // Don't show toast for progress events, just log them
-          // Could be used to update a progress bar in the UI later
+          // Do not invalidate activity status here — progress is high-frequency.
+          // search_complete + activity + 30s poll cover open-work refresh.
         } catch (error) {
           console.error("[SSE] Error parsing search_progress event:", error);
         }
@@ -209,6 +213,7 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
         try {
           const data: SearchCompleteEventData = JSON.parse(e.data);
           console.log("[SSE] search_complete event:", data);
+          invalidateActivityStatus();
 
           const resultCount = data.result_count || 0;
           addToast({
@@ -219,6 +224,12 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
         } catch (error) {
           console.error("[SSE] Error parsing search_complete event:", error);
         }
+      });
+
+      // Event: activity — narrative/open-work updates (Activity Center).
+      // Full toast latch lands with the live-updates ticket; status poll works alone.
+      evtSource.addEventListener("activity", () => {
+        invalidateActivityStatus();
       });
 
       // Event: storyarc_added - Story arc add/refresh completion
@@ -298,6 +309,7 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
           if (data.tables === "both") {
             queryClient.invalidateQueries({ queryKey: ["series"] });
             queryClient.invalidateQueries({ queryKey: ["wanted"] });
+            invalidateActivityStatus();
             // Also invalidate specific series detail if we have comicid
             if (data.comicid) {
               queryClient.invalidateQueries({
@@ -306,10 +318,12 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
             }
           } else if (data.tables === "tables") {
             queryClient.invalidateQueries({ queryKey: ["series"] });
+            invalidateActivityStatus();
           } else if (data.tables === "tabs") {
             queryClient.invalidateQueries({ queryKey: ["series"] });
             queryClient.invalidateQueries({ queryKey: ["wanted"] });
             queryClient.invalidateQueries({ queryKey: ["upcoming"] });
+            invalidateActivityStatus();
           }
 
           // Dispatch custom event for ComicCard to handle navigation

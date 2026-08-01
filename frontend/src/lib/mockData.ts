@@ -552,6 +552,10 @@ export function mockApiResponse(
   if (m === "GET" && url === "/api/health") {
     return { status: "ok" };
   }
+  if (m === "GET" && url === "/api/activity/status") {
+    // Quiet-count inputs for AppStatusBar (Variant A). Fixture: light open work.
+    return { in_flight: 2, attention: 0 };
+  }
   if (m === "GET" && url === "/api/dashboard") {
     return dashboardPayload();
   }
