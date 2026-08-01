@@ -169,7 +169,7 @@ export default function WantedPage() {
   const matchCount = isFiltering ? total : null;
 
   return (
-    <div className="page-transition">
+    <div className="page-transition flex h-full min-h-0 flex-col">
       <PageHeader
         title="Wanted"
         meta={
@@ -208,7 +208,7 @@ export default function WantedPage() {
         }
       />
 
-      <div className="px-5 py-2.5 border-b border-border flex items-center gap-3">
+      <div className="shrink-0 px-5 py-2.5 border-b border-border flex items-center gap-3">
         <div className="flex-1 max-w-md">
           <FilterField
             placeholder="Filter wanted issues…"
@@ -226,38 +226,41 @@ export default function WantedPage() {
         )}
       </div>
 
-      {isLoading && (
-        <div className="px-5 py-4 space-y-2">
-          <Skeleton className="h-14" />
-          <Skeleton className="h-14" />
-          <Skeleton className="h-14" />
-        </div>
-      )}
+      {/* Body column — the table owns the scrolling inside it. */}
+      <div className="flex-1 min-h-0 flex flex-col">
+        {isLoading && (
+          <div className="px-5 py-4 space-y-2">
+            <Skeleton className="h-14" />
+            <Skeleton className="h-14" />
+            <Skeleton className="h-14" />
+          </div>
+        )}
 
-      {error && (
-        <div className="px-5 py-4">
-          <ErrorDisplay
-            error={error}
-            title="Unable to load wanted issues"
-            onRetry={() => refetch()}
+        {error && (
+          <div className="px-5 py-4">
+            <ErrorDisplay
+              error={error}
+              title="Unable to load wanted issues"
+              onRetry={() => refetch()}
+            />
+          </div>
+        )}
+
+        {!isLoading && !error && (
+          <WantedTable
+            table={table}
+            pagination={pagination}
+            onNextPage={() => {
+              nextPage();
+              clearSelection();
+            }}
+            onPrevPage={() => {
+              prevPage();
+              clearSelection();
+            }}
           />
-        </div>
-      )}
-
-      {!isLoading && !error && (
-        <WantedTable
-          table={table}
-          pagination={pagination}
-          onNextPage={() => {
-            nextPage();
-            clearSelection();
-          }}
-          onPrevPage={() => {
-            prevPage();
-            clearSelection();
-          }}
-        />
-      )}
+        )}
+      </div>
 
       <BulkActionBar
         selectedCount={selectedIds.length}

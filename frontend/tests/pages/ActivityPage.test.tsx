@@ -276,7 +276,7 @@ describe("ActivityPage", () => {
     });
     await screen.findByText("Absolute Flash");
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
     await waitFor(() => {
       expect(requests.at(-1)?.searchParams.get("offset")).toBe("25");
     });
@@ -288,7 +288,7 @@ describe("ActivityPage", () => {
       expect(last?.searchParams.get("offset")).toBe("0");
     });
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
     await waitFor(() => {
       expect(requests.at(-1)?.searchParams.get("offset")).toBe("25");
     });
@@ -351,14 +351,14 @@ describe("ActivityPage", () => {
       ).toBe(true);
     });
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
     await waitFor(() => {
       expect(
         requests.some((url) => url.searchParams.get("offset") === "25"),
       ).toBe(true);
     });
     expect(await screen.findByText("No matching queue items")).toBeTruthy();
-    expect(screen.queryByText(/Showing \d+ to \d+ of/)).toBeNull();
+    expect(screen.queryByText(/\d+–\d+ of \d+/)).toBeNull();
     expect(
       screen.getByRole("button", { name: "Previous" }).hasAttribute("disabled"),
     ).toBe(false);

@@ -58,7 +58,7 @@ describe("SeriesTable", () => {
       </NuqsAdapter>,
     );
 
-    await user.click(screen.getByRole("button", { name: "next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
 
     expect(screen.getByText("Series 21")).toBeTruthy();
     expect(screen.queryByText("Series 1")).toBeNull();
@@ -212,7 +212,7 @@ describe("SeriesTable", () => {
     );
 
     await user.click(screen.getByRole("checkbox", { name: "Select Series 1" }));
-    await user.click(screen.getByRole("button", { name: "next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
     await settle();
 
     // Series 1 is on the previous page — out of sight but not out of the
@@ -220,7 +220,7 @@ describe("SeriesTable", () => {
     expect(screen.queryByText("Series 1")).toBeNull();
     expect(screen.queryAllByText("1 selected")).not.toHaveLength(0);
 
-    await user.click(screen.getByRole("button", { name: "prev" }));
+    await user.click(screen.getByRole("button", { name: "Previous page" }));
     await settle();
 
     expect(

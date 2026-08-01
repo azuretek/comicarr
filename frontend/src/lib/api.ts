@@ -378,7 +378,7 @@ export async function apiRequest<T = unknown>(
   body?: object | null,
 ): Promise<T> {
   if (isMockEnabled()) {
-    const mocked = mockApiResponse(method, path);
+    const mocked = mockApiResponse(method, path, body);
     if (mocked !== undefined) {
       return mocked as T;
     }

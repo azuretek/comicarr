@@ -316,12 +316,13 @@ export default function SearchResultsTable({
 
   return (
     <div>
-      {/* Header */}
+      {/* Header — sticky inside the page's results scroll region. */}
       <div
-        className="grid items-center gap-3 px-5 py-2 font-mono text-[10px] tracking-[0.08em] uppercase border-b"
+        className="sticky top-0 z-10 grid items-center gap-3 px-5 py-2 font-mono text-[10px] tracking-[0.08em] uppercase border-b"
         style={{
           gridTemplateColumns: GRID,
           borderColor: "var(--border)",
+          background: "var(--background)",
           color: "var(--text-muted)",
         }}
       >

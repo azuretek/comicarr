@@ -36,6 +36,7 @@ import {
   useTableState,
   type TableStore,
 } from "@/components/data-table/useTableState";
+import { DataTableFooter } from "@/components/data-table/DataTableFooter";
 import { useTableUrlStore } from "@/components/data-table/tableUrlStore";
 import { getProgressPercentage, getProgressCategory } from "@/lib/series-utils";
 import {
@@ -307,7 +308,7 @@ export default function SeriesTable({
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Unified action bar: view · search · filters · results */}
-      <div className="px-5 py-2 border-b border-border flex flex-wrap items-center gap-2 min-h-[44px]">
+      <div className="shrink-0 px-5 py-2 border-b border-border flex flex-wrap items-center gap-2 min-h-[44px]">
         <div className="inline-flex shrink-0 rounded-md border border-border overflow-hidden">
           <button
             type="button"
@@ -377,7 +378,7 @@ export default function SeriesTable({
 
       {/* Bulk action bar */}
       {!isGridView && selectedSeriesIds.length > 0 && (
-        <div className="px-5 py-2 border-b border-border flex items-center gap-3 bg-primary/5">
+        <div className="shrink-0 px-5 py-2 border-b border-border flex items-center gap-3 bg-primary/5">
           <span className="text-xs font-medium">
             {selectedSeriesIds.length} selected
           </span>
@@ -498,46 +499,27 @@ export default function SeriesTable({
                 ))
               )}
             </div>
-
-            {/* Footer */}
-            <div className="sticky bottom-0 z-10 px-5 py-1.5 border-t border-border bg-muted/30 flex items-center gap-3 font-mono text-[10px] text-muted-foreground">
-              <span>
-                {pageRows.length} of {totalFiltered} shown
-              </span>
-              {selectedSeriesIds.length > 0 && (
-                <>
-                  <span className="text-muted-foreground/50">·</span>
-                  <span>{selectedSeriesIds.length} selected</span>
-                </>
-              )}
-              {pageCount > 1 && (
-                <>
-                  <span className="text-muted-foreground/50">·</span>
-                  <span>
-                    page {effectivePage + 1} of {pageCount}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => table.previousPage()}
-                    disabled={!table.getCanPreviousPage()}
-                    className="px-1 hover:text-foreground disabled:opacity-40"
-                  >
-                    prev
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => table.nextPage()}
-                    disabled={!table.getCanNextPage()}
-                    className="px-1 hover:text-foreground disabled:opacity-40"
-                  >
-                    next
-                  </button>
-                </>
-              )}
-            </div>
           </div>
         </div>
       )}
+
+      {/* Footer — a sibling of the scroll region rather than a sticky child, so
+          it sits on the bottom edge of the viewport for both views and does not
+          ride the list's horizontal scroll. */}
+      <DataTableFooter
+        start={pageRows.length === 0 ? 0 : effectivePage * pageSize + 1}
+        end={effectivePage * pageSize + pageRows.length}
+        total={totalFiltered}
+        page={effectivePage + 1}
+        pageCount={pageCount}
+        onPrevPage={() => table.previousPage()}
+        onNextPage={() => table.nextPage()}
+        notes={
+          selectedSeriesIds.length > 0
+            ? `${selectedSeriesIds.length} selected`
+            : undefined
+        }
+      />
     </div>
   );
 }

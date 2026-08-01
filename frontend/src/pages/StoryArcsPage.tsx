@@ -22,7 +22,7 @@ export default function StoryArcsPage() {
   const count = arcs?.length ?? 0;
 
   return (
-    <div className="page-transition">
+    <div className="page-transition flex h-full min-h-0 flex-col">
       <PageHeader
         title="Story Arcs"
         meta={
@@ -32,7 +32,7 @@ export default function StoryArcsPage() {
         }
       />
 
-      <div className="px-5 py-4 space-y-6">
+      <div className="flex-1 min-h-0 overflow-auto px-5 py-4 space-y-6">
         {aiStatus?.configured && <ArcGenerator />}
 
         <ArcSearch searchInputRef={searchInputRef} formRef={searchFormRef} />

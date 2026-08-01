@@ -1,11 +1,6 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import {
-  Search as SearchIcon,
-  ChevronLeft,
-  ChevronRight,
-  Settings,
-} from "lucide-react";
+import { Search as SearchIcon, Settings } from "lucide-react";
 import FilterField from "@/components/ui/FilterField";
 import {
   Select,
@@ -20,6 +15,7 @@ import SearchResultsTable from "@/components/search/SearchResultsTable";
 import { Skeleton } from "@/components/ui/skeleton";
 import EmptyState from "@/components/ui/EmptyState";
 import PageHeader, { Tab, TabRow } from "@/components/layout/PageHeader";
+import { DataTableFooter } from "@/components/data-table/DataTableFooter";
 import type { ContentType } from "@/types/entities";
 
 interface SortOption {
@@ -94,6 +90,7 @@ export default function SearchPage() {
       : "manga";
 
   const [searchQuery, setSearchQuery] = useState(urlQuery);
+  const resultsRef = useRef<HTMLDivElement>(null);
   const [columnToggleEl, setColumnToggleEl] = useState<HTMLDivElement | null>(
     null,
   );
@@ -149,7 +146,9 @@ export default function SearchPage() {
     const params: Record<string, string> = Object.fromEntries(searchParams);
     params.page = newPage.toString();
     setSearchParams(params);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    // The results list is its own scroll container now (the page fills the
+    // viewport), so the window never scrolled here in the first place.
+    resultsRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const handleSortChange = (value: string) => {
@@ -170,7 +169,7 @@ export default function SearchPage() {
   const showBothTabs = comicsEnabled && mangaEnabled;
 
   return (
-    <div className="page-transition min-w-0 overflow-hidden">
+    <div className="page-transition flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       <PageHeader
         title="Search"
         meta={
@@ -199,7 +198,7 @@ export default function SearchPage() {
 
       {/* Compact search form + sort controls */}
       <div
-        className="px-5 py-2.5 border-b flex items-center gap-3 flex-wrap"
+        className="shrink-0 px-5 py-2.5 border-b flex items-center gap-3 flex-wrap"
         style={{ borderColor: "var(--border)" }}
       >
         <form
@@ -251,49 +250,49 @@ export default function SearchPage() {
         </div>
       </div>
 
-      {/* Results area — full-bleed */}
-      {isLoading && (
-        <div className="p-5 space-y-2">
-          {[0, 1, 2, 3, 4].map((i) => (
-            <Skeleton key={i} className="h-14" />
-          ))}
-        </div>
-      )}
+      {/* Results area — full-bleed, and the only thing that scrolls. */}
+      <div ref={resultsRef} className="flex-1 min-h-0 overflow-auto">
+        {isLoading && (
+          <div className="p-5 space-y-2">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <Skeleton key={i} className="h-14" />
+            ))}
+          </div>
+        )}
 
-      {error && (
-        <div className="p-5">
-          {searchMode === "comic" && !comicsConfigured ? (
+        {error && (
+          <div className="p-5">
+            {searchMode === "comic" && !comicsConfigured ? (
+              <EmptyState
+                variant="custom"
+                icon={Settings}
+                eyebrow="PROVIDER · NOT CONFIGURED"
+                title="Comic Vine API key required"
+                description="Add a Comic Vine API key in Settings → API to search comics."
+                action={{ label: "Open settings", to: "/settings" }}
+              />
+            ) : (
+              <EmptyState
+                variant="custom"
+                eyebrow="SEARCH · ERROR"
+                title="Search failed"
+                description={error.message}
+              />
+            )}
+          </div>
+        )}
+
+        {!isLoading && !error && urlQuery && searchResults.length === 0 && (
+          <div className="p-5">
             <EmptyState
-              variant="custom"
-              icon={Settings}
-              eyebrow="PROVIDER · NOT CONFIGURED"
-              title="Comic Vine API key required"
-              description="Add a Comic Vine API key in Settings → API to search comics."
-              action={{ label: "Open settings", to: "/settings" }}
+              variant="search"
+              eyebrow="SEARCH · NO MATCH"
+              description={`No results for "${urlQuery}". Try a different query or check spelling.`}
             />
-          ) : (
-            <EmptyState
-              variant="custom"
-              eyebrow="SEARCH · ERROR"
-              title="Search failed"
-              description={error.message}
-            />
-          )}
-        </div>
-      )}
+          </div>
+        )}
 
-      {!isLoading && !error && urlQuery && searchResults.length === 0 && (
-        <div className="p-5">
-          <EmptyState
-            variant="search"
-            eyebrow="SEARCH · NO MATCH"
-            description={`No results for "${urlQuery}". Try a different query or check spelling.`}
-          />
-        </div>
-      )}
-
-      {!isLoading && !error && searchResults.length > 0 && (
-        <>
+        {!isLoading && !error && searchResults.length > 0 && (
           <SearchResultsTable
             results={searchResults}
             currentSort={urlSort}
@@ -301,49 +300,32 @@ export default function SearchPage() {
             contentType={searchMode}
             columnToggleContainer={columnToggleEl}
           />
-          {totalPages > 1 && (
-            <div
-              className="flex items-center justify-between px-5 py-3 border-t font-mono text-[11px] text-muted-foreground"
-              style={{ borderColor: "var(--border)" }}
-            >
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border disabled:opacity-50"
-                style={{ borderColor: "var(--border)" }}
-                onClick={() => handlePageChange(urlPage - 1)}
-                disabled={urlPage === 1}
-              >
-                <ChevronLeft className="w-3 h-3" />
-                prev
-              </button>
-              <span>
-                page {urlPage} / {totalPages}
-              </span>
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border disabled:opacity-50"
-                style={{ borderColor: "var(--border)" }}
-                onClick={() => handlePageChange(urlPage + 1)}
-                disabled={urlPage >= totalPages}
-              >
-                next
-                <ChevronRight className="w-3 h-3" />
-              </button>
-            </div>
-          )}
-        </>
-      )}
+        )}
 
-      {!urlQuery && (
-        <div className="p-5">
-          <EmptyState
-            variant="custom"
-            icon={SearchIcon}
-            eyebrow="SEARCH · READY"
-            title={`Find ${searchMode === "manga" ? "manga" : "comics"} to add`}
-            description="Type at least 3 characters to search across your configured providers."
-          />
-        </div>
+        {!urlQuery && (
+          <div className="p-5">
+            <EmptyState
+              variant="custom"
+              icon={SearchIcon}
+              eyebrow="SEARCH · READY"
+              title={`Find ${searchMode === "manga" ? "manga" : "comics"} to add`}
+              description="Type at least 3 characters to search across your configured providers."
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Pager — sibling of the scroll region, so it rides the viewport edge. */}
+      {!isLoading && !error && searchResults.length > 0 && pagination && (
+        <DataTableFooter
+          start={startIndex}
+          end={endIndex}
+          total={pagination.total}
+          page={urlPage}
+          pageCount={totalPages}
+          onPrevPage={() => handlePageChange(urlPage - 1)}
+          onNextPage={() => handlePageChange(urlPage + 1)}
+        />
       )}
     </div>
   );
