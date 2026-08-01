@@ -1076,6 +1076,18 @@ def start(ctx):
             )
             IMPORTINBOX_SCHEDULER.pause()
 
+            # Shared daily prune for the five unbounded operational ledgers
+            # (#480). Independent of SEARCH_INTERVAL / DB Updater / narrative
+            # retention; not paused — runs on the daily cadence from start.
+            from comicarr.app.acquisition.retention import run_ledger_retention
+
+            _add_recurring_job(
+                func=run_ledger_retention,
+                id="ledger_retention",
+                name="Ledger Retention",
+                trigger=IntervalTrigger(days=1, timezone="UTC"),
+            )
+
             # A schema failure, persistent repair fence, or explicit operator
             # override suppresses every producer/consumer that can claim or
             # hand off acquisition work. The scheduler itself still starts so

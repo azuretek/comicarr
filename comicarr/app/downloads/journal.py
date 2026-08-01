@@ -76,6 +76,14 @@ TERMINAL_STAGES = (POST_PROCESSED, MANUAL_REVIEW, FAILED)
 # Open stages: rows replay must consider as still-in-flight obligations.
 OPEN_STAGES = (RESERVED, SNATCHED, DOWNLOADED, POST_PROCESSING, MOVED)
 
+# Operator resolution markers on the R9 `status` column (#437). The
+# needs-attention band excludes these; ledger retention may age them out with
+# other eligible terminals (post_processed + resolved failed/manual_review).
+STATUS_RETRIED = "retried"
+STATUS_IGNORED = "ignored"
+STATUS_IMPORTED = "imported"
+RESOLVED_STATUSES = (STATUS_RETRIED, STATUS_IGNORED, STATUS_IMPORTED)
+
 # Synthetic one-off IssueIDs are an unpersisted CONFIG.HIGHCOUNT counter that
 # starts at 900000 (see comicarr/updater.py:1214-1220). Such an IssueID is not
 # reproducible across a restart, so it must NOT be part of the release_key.

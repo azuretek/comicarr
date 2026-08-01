@@ -67,6 +67,7 @@ SCHEDULER_JOB_NAMES = {
     "monitor": "Folder Monitor",
     "importinbox": "Import Inbox Scanner",
     "ddl_health": "DDL Health Check",
+    "ledger_retention": "Ledger Retention",
 }
 
 SETUP_PERSISTENCE_ERROR = "Failed to persist initial credentials"
