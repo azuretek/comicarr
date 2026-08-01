@@ -38,11 +38,19 @@ export default function Layout({ children }: LayoutProps) {
   const mock = isMockEnabled();
 
   return (
-    <SidebarProvider>
+    // The shell is exactly one viewport tall and never scrolls itself: the
+    // status bar stays put and each page owns its own scroll region, so a
+    // table's pagination footer can sit on the bottom edge of the viewport
+    // without fixed/absolute positioning. Full-bleed pages must therefore be
+    // `h-full flex flex-col` with a `flex-1 min-h-0 overflow-auto` body —
+    // anything they render outside that body is clipped, not scrolled.
+    <SidebarProvider className="h-svh overflow-hidden">
       <AppSidebar />
-      <main className="flex-1 min-w-0">
+      {/* No height of its own: as a flex item it stretches to the shell's
+          height, so the column below is bounded by the viewport. */}
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Mobile header with trigger - only visible on mobile */}
-        <header className="sticky top-0 z-10 flex h-16 items-center gap-4 border-b bg-background px-4 md:hidden">
+        <header className="z-10 flex h-16 shrink-0 items-center gap-4 border-b bg-background px-4 md:hidden">
           <SidebarTrigger />
           <span className="text-lg font-bold gradient-brand">Comicarr</span>
           {showAiBell && (
@@ -59,7 +67,7 @@ export default function Layout({ children }: LayoutProps) {
         </header>
 
         {/* Desktop omni status bar */}
-        <div className="hidden md:flex h-12 items-center gap-3 border-b-[0.5px] border-border bg-card px-4 font-mono text-[11px] text-muted-foreground">
+        <div className="hidden md:flex h-12 shrink-0 items-center gap-3 border-b-[0.5px] border-border bg-card px-4 font-mono text-[11px] text-muted-foreground">
           <SidebarTrigger />
           <AppStatusBar />
           <div className="ml-auto flex items-center gap-3">
@@ -89,8 +97,11 @@ export default function Layout({ children }: LayoutProps) {
           </div>
         </div>
 
-        {/* Main content area */}
-        <div className="flex-1 overflow-auto min-w-0">
+        {/* Main content area. Full-bleed pages scroll internally so their
+            footers can stay on the viewport edge; centred pages scroll here. */}
+        <div
+          className={`flex-1 min-h-0 min-w-0 ${fullBleed ? "overflow-hidden" : "overflow-auto"}`}
+        >
           {fullBleed ? (
             children
           ) : (

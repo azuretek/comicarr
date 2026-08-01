@@ -252,7 +252,7 @@ describe("WantedPage", () => {
     render(<WantedPage />);
 
     expect(await screen.findByText("53 issues in queue")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
     await waitFor(() => {
       expect(requests.at(-1)?.searchParams.get("offset")).toBe("50");
     });
@@ -270,10 +270,10 @@ describe("WantedPage", () => {
 
     expect(await screen.findByText("12 matches")).toBeTruthy();
     expect(screen.getByText("12 issues in queue")).toBeTruthy();
-    expect(await screen.findByText("Showing 1 to 12 of 12")).toBeTruthy();
-    expect(
-      screen.getByRole("button", { name: "Next" }).hasAttribute("disabled"),
-    ).toBe(true);
+    expect(await screen.findByText("1–12 of 12")).toBeTruthy();
+    // One page of matches: the footer keeps the range and drops the pager
+    // rather than showing two dead buttons.
+    expect(screen.queryByRole("navigation", { name: "Pagination" })).toBeNull();
     // Matches that lived past the first unfiltered page are still listed.
     expect(screen.getByText("10")).toBeTruthy();
     expect(screen.getByText("12")).toBeTruthy();
@@ -302,7 +302,7 @@ describe("WantedPage", () => {
     render(<WantedPage />);
     await screen.findByText("90 issues in queue");
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next page" }));
     await waitFor(() => {
       expect(requests.at(-1)?.searchParams.get("offset")).toBe("50");
     });

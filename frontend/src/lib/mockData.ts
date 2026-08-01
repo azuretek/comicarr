@@ -272,7 +272,32 @@ function coverToComic(c: MockCover): Comic {
   };
 }
 
-const SERIES: Comic[] = COVERS.map(coverToComic);
+/**
+ * Twelve hand-written covers are not enough rows to page through, and the
+ * paginated views (Library, Search, Activity) are exactly what needs eyeballing
+ * when their footers change. Each cover is repeated as numbered volumes with an
+ * id of `${coverId}--v${n}`, which `resolveCoverId` maps back so detail pages
+ * still resolve.
+ */
+const VOLUMES_PER_COVER = 8;
+
+const LIBRARY: Comic[] = COVERS.flatMap((c) =>
+  Array.from({ length: VOLUMES_PER_COVER }, (_, i) => {
+    const base = coverToComic(c);
+    if (i === 0) return base;
+    return {
+      ...base,
+      ComicID: `${c.id}--v${i + 1}`,
+      ComicName: `${c.title} Vol. ${i + 1}`,
+      ComicYear: String(c.year + i),
+    };
+  }),
+).sort((a, b) => a.ComicName.localeCompare(b.ComicName));
+
+/** Strip the synthetic volume suffix so padded rows share a cover's detail. */
+function resolveCoverId(id: string): string {
+  return id.replace(/--v\d+$/, "");
+}
 
 function buildIssues(c: MockCover): Issue[] {
   const arcs =
@@ -441,9 +466,9 @@ function wantedIssues(): WantedIssue[] {
 }
 
 function dashboardPayload() {
-  const totalSeries = SERIES.length;
-  const totalIssues = SERIES.reduce((sum, s) => sum + (s.Have || 0), 0);
-  const totalExpected = SERIES.reduce((sum, s) => sum + (s.Total || 0), 0);
+  const totalSeries = LIBRARY.length;
+  const totalIssues = LIBRARY.reduce((sum, s) => sum + (s.Have || 0), 0);
+  const totalExpected = LIBRARY.reduce((sum, s) => sum + (s.Total || 0), 0);
   return {
     recently_downloaded: recentDownloads(),
     active_queue: [],
@@ -462,9 +487,10 @@ function dashboardPayload() {
 }
 
 function seriesDetail(id: string) {
-  const cover = COVERS.find((c) => c.id === id);
+  const coverId = resolveCoverId(id);
+  const cover = COVERS.find((c) => c.id === coverId);
   if (!cover) return null;
-  const issues = ISSUES_BY_COMIC.get(id) || [];
+  const issues = ISSUES_BY_COMIC.get(coverId) || [];
   return {
     comic: coverToComic(cover),
     issues,
@@ -512,13 +538,103 @@ export function isMockEnabled(): boolean {
 // there's no real backend to keep it.
 let mockAuthenticated = true;
 
+/** Provider search results. Enough of them to page through. */
+function searchResults(query: string, kind: "comic" | "manga") {
+  const pool = COVERS.filter((c) => c.kind === kind);
+  const source = kind === "manga" ? "mangadex" : "comicvine";
+  const q = query.trim().toLowerCase();
+  const all = Array.from({ length: 143 }, (_, i) => {
+    const c = pool[i % pool.length];
+    const volume = Math.floor(i / pool.length) + 1;
+    return {
+      id: `${c.id}-search-${i}`,
+      comicid: `${c.id}-search-${i}`,
+      name: volume === 1 ? c.title : `${c.title} Vol. ${volume}`,
+      publisher: c.publisher,
+      start_year: String(c.year + volume - 1),
+      comicyear: String(c.year + volume - 1),
+      count_of_issues: c.total + volume,
+      deck: c.description,
+      comicimage: coverSvgDataUri(c, 80, 120),
+      metadata_source: source,
+      url: `https://example.invalid/${c.id}`,
+      in_library: i % 7 === 0,
+    };
+  }).filter((r) => !q || r.name.toLowerCase().includes(q));
+  return all;
+}
+
+/** Queue and history rows for Activity, derived from the mock library. */
+function queueItems() {
+  return COVERS.flatMap((c, index) =>
+    Array.from({ length: 4 }, (_, n) => {
+      const issue = c.have + n + 1;
+      return {
+        ID: `${c.id}-q${n}`,
+        series: c.title,
+        year: String(c.year),
+        filename: `${c.title.replace(/\s+/g, ".")}.${String(issue).padStart(3, "0")}.cbz`,
+        size: `${28 + ((index * 7 + n * 3) % 40)} MB`,
+        issueid: `${c.id}-${issue}`,
+        comicid: c.id,
+        link: `https://example.invalid/${c.id}/${issue}`,
+        status: ["Snatched", "Downloading", "Post-Processing", "Failed"][n],
+        remote_filesize: `${28 + ((index * 7 + n * 3) % 40)} MB`,
+        updated_date: new Date(2026, 6, 20 - n, 12 - n).toISOString(),
+        site: n % 2 === 0 ? "NZBgeek" : "Torznab",
+        submit_date: new Date(2026, 6, 20 - n, 10 - n).toISOString(),
+      };
+    }),
+  );
+}
+
+function historyItems() {
+  return COVERS.flatMap((c, index) =>
+    Array.from({ length: 6 }, (_, n) => {
+      const issue = Math.max(1, c.have - n);
+      return {
+        IssueID: `${c.id}-${issue}`,
+        ComicName: c.title,
+        Issue_Number: String(issue),
+        Size: (30 + ((index + n) % 25)) * 1024 * 1024,
+        DateAdded: new Date(2026, 6, 28 - n, 9 + (index % 8)).toISOString(),
+        Status: n % 5 === 0 ? "Failed" : "Post-Processed",
+        FolderName: `/comics/${c.title}`,
+        ComicID: c.id,
+        Provider: n % 2 === 0 ? "NZBgeek (Prowlarr)" : "Torznab",
+      };
+    }),
+  );
+}
+
+/** Slice a mock collection the way the paginated endpoints do. */
+function paginate<T>(all: T[], parsed: URL) {
+  const limit = Number(parsed.searchParams.get("limit") ?? 50);
+  const offset = Number(parsed.searchParams.get("offset") ?? 0);
+  const rows = all.slice(offset, offset + limit);
+  return {
+    rows,
+    pagination: {
+      total: all.length,
+      limit,
+      offset,
+      returned: rows.length,
+      has_more: offset + rows.length < all.length,
+    },
+  };
+}
+
 /**
  * Match an incoming request to a mock payload. Returns `undefined` to signal
  * "no mock for this endpoint — fall through to the real backend".
+ *
+ * `body` is the request body of a write — the search endpoints take their
+ * query and page window there rather than in the URL.
  */
 export function mockApiResponse(
   method: string,
   path: string,
+  body?: object | null,
 ): unknown | undefined {
   const parsed = new URL(path, "http://mock.local");
   const url = parsed.pathname;
@@ -560,7 +676,7 @@ export function mockApiResponse(
     return dashboardPayload();
   }
   if (m === "GET" && url === "/api/series") {
-    return SERIES;
+    return LIBRARY;
   }
   if (m === "GET" && url === "/api/wanted") {
     const q = (parsed.searchParams.get("q") ?? "").trim().toLowerCase();
@@ -610,9 +726,46 @@ export function mockApiResponse(
     return [];
   }
   if (m === "GET" && url === "/api/downloads/queue") {
+    const q = (parsed.searchParams.get("q") ?? "").trim().toLowerCase();
+    const all = queueItems().filter(
+      (item) => !q || item.series.toLowerCase().includes(q),
+    );
+    const { rows, pagination } = paginate(all, parsed);
+    return { queue: rows, pagination };
+  }
+  if (m === "GET" && url === "/api/downloads/history") {
+    const q = (parsed.searchParams.get("q") ?? "").trim().toLowerCase();
+    const all = historyItems().filter(
+      (item) => !q || item.ComicName.toLowerCase().includes(q),
+    );
+    const { rows, pagination } = paginate(all, parsed);
+    return { history: rows, pagination };
+  }
+  if (
+    m === "POST" &&
+    (url === "/api/search/comics" || url === "/api/search/manga")
+  ) {
+    const search = (body ?? {}) as {
+      name?: string;
+      limit?: number;
+      offset?: number;
+    };
+    const all = searchResults(
+      search.name ?? "",
+      url.endsWith("manga") ? "manga" : "comic",
+    );
+    const limit = search.limit ?? 20;
+    const offset = search.offset ?? 0;
+    const results = all.slice(offset, offset + limit);
     return {
-      queue: [],
-      pagination: { total: 0, limit: 1, offset: 0, has_more: false },
+      results,
+      pagination: {
+        total: all.length,
+        limit,
+        offset,
+        returned: results.length,
+        has_more: offset + results.length < all.length,
+      },
     };
   }
   if (m === "GET" && url === "/api/config") {
@@ -628,14 +781,14 @@ export function mockApiResponse(
 
   const issuesMatch = url.match(/^\/api\/series\/([^/]+)\/issues$/);
   if (m === "GET" && issuesMatch) {
-    return ISSUES_BY_COMIC.get(issuesMatch[1]) || [];
+    return ISSUES_BY_COMIC.get(resolveCoverId(issuesMatch[1])) || [];
   }
 
   // Cover art — return a tiny transparent gif; frontend already falls back
   // gracefully, and the list views synthesize their own SVG covers.
   const artMatch = url.match(/^\/api\/metadata\/art\/([^/]+)$/);
   if (m === "GET" && artMatch) {
-    const cover = COVERS.find((c) => c.id === artMatch[1]);
+    const cover = COVERS.find((c) => c.id === resolveCoverId(artMatch[1]));
     if (cover) return { image: coverSvgDataUri(cover) };
   }
 

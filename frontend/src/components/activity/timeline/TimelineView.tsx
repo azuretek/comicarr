@@ -239,11 +239,14 @@ export function TimelineView({
   }
 
   return (
-    <>
+    // The page column is viewport-bounded, so the band and the filters stay
+    // put and only the feed scrolls — the pager below it stays reachable
+    // without scrolling to the end of the timeline.
+    <div className="flex h-full min-h-0 flex-col">
       <AttentionBand items={bandItems} />
 
       {scoped && (
-        <div className="flex items-center gap-2 border-b border-border px-5 py-2 font-mono text-[11px] text-muted-foreground">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-5 py-2 font-mono text-[11px] text-muted-foreground">
           <span>
             Scoped to {scope_type}:{scope_id}
           </span>
@@ -253,7 +256,7 @@ export function TimelineView({
         </div>
       )}
 
-      <div className="flex items-center gap-3 border-b border-border px-5 py-2.5">
+      <div className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-2.5">
         <div className="max-w-sm flex-1">
           <FilterField
             placeholder="Filter timeline…"
@@ -284,7 +287,11 @@ export function TimelineView({
         </select>
       </div>
 
-      <div role="feed" aria-label="Activity timeline">
+      <div
+        role="feed"
+        aria-label="Activity timeline"
+        className="flex-1 min-h-0 overflow-auto"
+      >
         {pageNodes.map((story, index) => {
           const prev = pageNodes[index - 1];
           const showDay =
@@ -362,7 +369,7 @@ export function TimelineView({
       </div>
 
       {(filtered.length > 0 || hasMoreEvents) && (
-        <div className="flex items-center gap-3 px-5 py-2.5">
+        <div className="flex shrink-0 items-center gap-3 border-t border-border px-5 py-2.5">
           <span className="font-mono text-[10px] text-muted-foreground">
             {filtered.length === 0
               ? "0 stories"
@@ -407,9 +414,9 @@ export function TimelineView({
           </div>
         </div>
       )}
-      <p className="px-5 pb-4 font-mono text-[10px] text-muted-foreground">
+      <p className="shrink-0 px-5 pb-4 font-mono text-[10px] text-muted-foreground">
         older than 90 days is deleted · see download history for the full ledger
       </p>
-    </>
+    </div>
   );
 }

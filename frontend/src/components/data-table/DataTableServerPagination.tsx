@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { DataTableFooter } from "@/components/data-table/DataTableFooter";
 import type { PaginationMeta } from "@/types";
 
 interface DataTableServerPaginationProps {
@@ -7,37 +7,30 @@ interface DataTableServerPaginationProps {
   onPrevPage: () => void;
 }
 
+/**
+ * Adapter: turns an API `pagination` block into the shared table footer, so a
+ * server-paginated table reads exactly like a client-paginated one.
+ */
 export function DataTableServerPagination({
   pagination,
   onNextPage,
   onPrevPage,
 }: DataTableServerPaginationProps) {
-  const start = pagination.offset + 1;
-  const end = Math.min(pagination.offset + pagination.limit, pagination.total);
+  const { total, offset } = pagination;
+  // A zero limit would only come from a malformed response, but it must not
+  // divide the page maths by zero.
+  const limit = pagination.limit || 1;
+  const returned = pagination.returned ?? Math.min(limit, total - offset);
 
   return (
-    <div className="border-t border-card-border px-6 py-3 flex items-center justify-between bg-muted/50">
-      <div className="text-sm text-muted-foreground">
-        Showing {start} to {end} of {pagination.total}
-      </div>
-      <div className="flex items-center space-x-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onPrevPage}
-          disabled={pagination.offset === 0}
-        >
-          Previous
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onNextPage}
-          disabled={!pagination.has_more}
-        >
-          Next
-        </Button>
-      </div>
-    </div>
+    <DataTableFooter
+      start={total === 0 ? 0 : offset + 1}
+      end={offset + Math.max(0, returned)}
+      total={total}
+      page={Math.floor(offset / limit) + 1}
+      pageCount={Math.max(1, Math.ceil(total / limit))}
+      onPrevPage={onPrevPage}
+      onNextPage={onNextPage}
+    />
   );
 }

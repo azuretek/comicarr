@@ -283,13 +283,14 @@ export default function ImportPage() {
   const importDirectoryConfigured = Boolean(appConfig?.import_dir);
 
   return (
-    <div className="page-transition">
+    <div className="page-transition flex h-full min-h-0 flex-col">
       <PageHeader
         title="Import"
         meta={isLoading ? "loading…" : pendingReviewMeta}
       />
 
-      <div className="px-5 py-5 space-y-8">
+      {/* Import stacks several sections, so the whole body scrolls as one. */}
+      <div className="flex-1 min-h-0 overflow-auto px-5 py-5 space-y-8">
         {/* Pending */}
         <section>
           <SectionHeader

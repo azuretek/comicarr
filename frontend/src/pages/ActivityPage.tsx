@@ -135,7 +135,7 @@ export default function ActivityPage() {
         : "download history";
 
   return (
-    <div className="page-transition">
+    <div className="page-transition flex h-full min-h-0 flex-col">
       <PageHeader title="Activity" meta={meta} />
 
       <TabRow>
@@ -156,11 +156,13 @@ export default function ActivityPage() {
         />
       </TabRow>
 
-      {currentView === "timeline" && (
-        <TimelineView scope_type={scope_type} scope_id={scope_id} />
-      )}
-      {currentView === "queue" && <QueueView />}
-      {currentView === "history" && <HistoryView />}
+      <div className="flex-1 min-h-0 flex flex-col">
+        {currentView === "timeline" && (
+          <TimelineView scope_type={scope_type} scope_id={scope_id} />
+        )}
+        {currentView === "queue" && <QueueView />}
+        {currentView === "history" && <HistoryView />}
+      </div>
     </div>
   );
 }
@@ -181,7 +183,7 @@ function ActivityToolbar({
   onRefresh: () => void;
 }) {
   return (
-    <div className="px-5 py-2.5 border-b border-border flex items-center gap-3">
+    <div className="shrink-0 px-5 py-2.5 border-b border-border flex items-center gap-3">
       <div className="flex-1 max-w-lg">
         <FilterField
           placeholder={placeholder}
@@ -350,8 +352,10 @@ function ActivityTableView<TData>({
         </div>
       )}
       {!isLoading && !error && pagination && rows.length > 0 && (
-        <div className="overflow-hidden border-b border-border">
-          <DataTable table={table} />
+        <div className="flex-1 min-h-0 flex flex-col border-b border-border">
+          <div className="flex-1 min-h-0 overflow-auto">
+            <DataTable table={table} />
+          </div>
           <DataTableServerPagination
             pagination={pagination}
             onNextPage={onNextPage}

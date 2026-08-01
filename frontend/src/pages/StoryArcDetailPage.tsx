@@ -37,7 +37,7 @@ export default function StoryArcDetailPage() {
   }
 
   return (
-    <div className="space-y-6 page-transition">
+    <div className="h-full min-h-0 overflow-auto space-y-6 page-transition">
       {/* Breadcrumb */}
       <nav className="flex items-center gap-1 text-sm text-muted-foreground">
         <Link

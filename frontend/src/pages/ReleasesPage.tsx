@@ -188,9 +188,9 @@ export default function ReleasesPage() {
   };
 
   return (
-    <div className="page-transition">
+    <div className="page-transition flex h-full min-h-0 flex-col">
       {/* Header */}
-      <div className="px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
+      <div className="shrink-0 px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
         <div>
           <div className="text-[18px] font-semibold tracking-tight leading-none">
             Releases
@@ -227,7 +227,7 @@ export default function ReleasesPage() {
         <div
           role={weeklyStatus === "error" ? "alert" : "status"}
           aria-live={weeklyStatus === "error" ? "assertive" : "polite"}
-          className="px-5 py-2 border-b border-border font-mono text-[11px]"
+          className="shrink-0 px-5 py-2 border-b border-border font-mono text-[11px]"
           style={{
             color:
               weeklyStatus === "error"
@@ -244,7 +244,7 @@ export default function ReleasesPage() {
       )}
 
       {/* Tab row */}
-      <div className="px-5 pt-3 border-b border-border flex items-end gap-6">
+      <div className="shrink-0 px-5 pt-3 border-b border-border flex items-end gap-6">
         <Tab
           active={currentView === "mine"}
           label="Mine"
@@ -257,7 +257,7 @@ export default function ReleasesPage() {
         />
       </div>
 
-      <div>
+      <div className="flex-1 min-h-0 flex flex-col">
         {currentView === "mine" ? <MyReleasesView /> : <AllReleasesView />}
       </div>
     </div>
@@ -358,9 +358,9 @@ function MyReleasesView() {
   };
 
   return (
-    <div>
+    <div className="flex h-full min-h-0 flex-col">
       {/* Full-width filter bar */}
-      <div className="px-5 py-2.5 border-b border-border flex items-center gap-2 flex-wrap">
+      <div className="shrink-0 px-5 py-2.5 border-b border-border flex items-center gap-2 flex-wrap">
         <div className="font-mono text-[10px] tracking-[0.1em] uppercase text-muted-foreground/70 pr-1">
           Filter
         </div>
@@ -442,31 +442,35 @@ function MyReleasesView() {
         </div>
       </div>
 
-      {isLoading && (
-        <div className="px-5 py-4 space-y-2">
-          <Skeleton className="h-14" />
-          <Skeleton className="h-14" />
-          <Skeleton className="h-14" />
-        </div>
-      )}
+      {/* Only the release rows scroll; the filter bar above and the bulk bar
+          below stay put. */}
+      <div className="flex-1 min-h-0 overflow-auto">
+        {isLoading && (
+          <div className="px-5 py-4 space-y-2">
+            <Skeleton className="h-14" />
+            <Skeleton className="h-14" />
+            <Skeleton className="h-14" />
+          </div>
+        )}
 
-      {error && (
-        <div className="px-5 py-4">
-          <ErrorDisplay
-            error={error}
-            title="Unable to load your releases"
-            onRetry={() => refetch()}
-          />
-        </div>
-      )}
+        {error && (
+          <div className="px-5 py-4">
+            <ErrorDisplay
+              error={error}
+              title="Unable to load your releases"
+              onRetry={() => refetch()}
+            />
+          </div>
+        )}
 
-      {!isLoading && !error && issues.length === 0 && (
-        <EmptyState variant="upcoming" />
-      )}
+        {!isLoading && !error && issues.length === 0 && (
+          <EmptyState variant="upcoming" />
+        )}
 
-      {!isLoading && !error && issues.length > 0 && (
-        <UpcomingTable table={table} />
-      )}
+        {!isLoading && !error && issues.length > 0 && (
+          <UpcomingTable table={table} />
+        )}
+      </div>
 
       <BulkActionBar
         selectedCount={selectedIds.length}
@@ -494,7 +498,7 @@ function AllReleasesView() {
   }
 
   return (
-    <>
+    <div className="flex-1 min-h-0 overflow-auto">
       {aiStatus?.configured && (
         <div className="px-5 py-4">
           <AiSuggestions />
@@ -517,7 +521,7 @@ function AllReleasesView() {
       ) : (
         <div>
           <div
-            className="grid font-mono text-[10px] tracking-[0.1em] uppercase text-muted-foreground/70 px-5 py-2 border-b bg-muted/30"
+            className="sticky top-0 z-10 grid font-mono text-[10px] tracking-[0.1em] uppercase text-muted-foreground/70 px-5 py-2 border-b bg-background"
             style={{
               borderColor: "var(--border)",
               gridTemplateColumns: "1fr 80px 160px 100px",
@@ -563,6 +567,6 @@ function AllReleasesView() {
           })}
         </div>
       )}
-    </>
+    </div>
   );
 }

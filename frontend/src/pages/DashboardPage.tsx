@@ -225,274 +225,279 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 border-b border-border">
-        <Kpi
-          label="Active series"
-          value={isLoading ? "—" : String(activeSeries)}
-        />
-        <Kpi
-          label="Issues"
-          value={isLoading ? "—" : String(totalIssues)}
-          borderLeft
-        />
-        <Kpi
-          label="Completion"
-          value={isLoading ? "—" : `${completion.toFixed(1)}%`}
-          borderLeft
-        />
-        <Kpi label="Queue" value={String(queueCount)} borderLeft />
-      </div>
+      {/* Everything below the ask bar scrolls inside the page column. */}
+      <div className="flex-1 min-h-0 overflow-auto">
+        {/* KPI strip */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 border-b border-border">
+          <Kpi
+            label="Active series"
+            value={isLoading ? "—" : String(activeSeries)}
+          />
+          <Kpi
+            label="Issues"
+            value={isLoading ? "—" : String(totalIssues)}
+            borderLeft
+          />
+          <Kpi
+            label="Completion"
+            value={isLoading ? "—" : `${completion.toFixed(1)}%`}
+            borderLeft
+          />
+          <Kpi label="Queue" value={String(queueCount)} borderLeft />
+        </div>
 
-      {/* Operational summaries */}
-      <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]">
-        {/* Active queue and recent history */}
-        <section className="px-5 py-4 lg:border-r lg:border-border">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="text-[13px] font-semibold">Active queue</div>
-              <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
-                {queueCount} item{queueCount === 1 ? "" : "s"}
-              </div>
-            </div>
-            <Link
-              to="/activity"
-              className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
-            >
-              open queue →
-            </Link>
-          </div>
-
-          {isLoading && (
-            <div className="font-mono text-[11px] text-muted-foreground py-3">
-              loading queue…
-            </div>
-          )}
-
-          {!isLoading && activeQueue.length === 0 && (
-            <div className="font-mono text-[11px] text-muted-foreground py-3">
-              queue is clear
-            </div>
-          )}
-
-          <div className="font-mono text-[11px]">
-            {activeQueue.map((item, index) => (
-              <div
-                key={item.ID}
-                className="grid items-center gap-2 py-1.5"
-                style={{
-                  gridTemplateColumns: "minmax(140px, 1fr) 100px 120px",
-                  borderTop:
-                    index > 0
-                      ? "1px solid var(--border-soft, var(--border))"
-                      : "none",
-                }}
-              >
-                <div className="min-w-0">
-                  <div className="font-sans text-foreground truncate">
-                    {item.series || item.filename || "Unnamed download"}
-                  </div>
-                  {item.filename && item.filename !== item.series && (
-                    <div className="text-muted-foreground truncate">
-                      {item.filename}
-                    </div>
-                  )}
-                </div>
-                <QueueStatus status={item.status} />
-                <span className="text-muted-foreground truncate text-right">
-                  {item.updated_date ? (
-                    <RelativeTime value={item.updated_date} />
-                  ) : (
-                    "—"
-                  )}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-5 pt-4 border-t border-border">
+        {/* Operational summaries */}
+        <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]">
+          {/* Active queue and recent history */}
+          <section className="px-5 py-4 lg:border-r lg:border-border">
             <div className="flex items-center justify-between gap-3 mb-3">
               <div className="flex items-center gap-2.5">
-                <div className="text-[13px] font-semibold">Recent activity</div>
+                <div className="text-[13px] font-semibold">Active queue</div>
                 <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
-                  {downloads.length} event{downloads.length === 1 ? "" : "s"} ·
-                  30 days
+                  {queueCount} item{queueCount === 1 ? "" : "s"}
                 </div>
               </div>
               <Link
-                to="/activity?view=history"
+                to="/activity"
                 className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
               >
-                open history →
+                open queue →
+              </Link>
+            </div>
+
+            {isLoading && (
+              <div className="font-mono text-[11px] text-muted-foreground py-3">
+                loading queue…
+              </div>
+            )}
+
+            {!isLoading && activeQueue.length === 0 && (
+              <div className="font-mono text-[11px] text-muted-foreground py-3">
+                queue is clear
+              </div>
+            )}
+
+            <div className="font-mono text-[11px]">
+              {activeQueue.map((item, index) => (
+                <div
+                  key={item.ID}
+                  className="grid items-center gap-2 py-1.5"
+                  style={{
+                    gridTemplateColumns: "minmax(140px, 1fr) 100px 120px",
+                    borderTop:
+                      index > 0
+                        ? "1px solid var(--border-soft, var(--border))"
+                        : "none",
+                  }}
+                >
+                  <div className="min-w-0">
+                    <div className="font-sans text-foreground truncate">
+                      {item.series || item.filename || "Unnamed download"}
+                    </div>
+                    {item.filename && item.filename !== item.series && (
+                      <div className="text-muted-foreground truncate">
+                        {item.filename}
+                      </div>
+                    )}
+                  </div>
+                  <QueueStatus status={item.status} />
+                  <span className="text-muted-foreground truncate text-right">
+                    {item.updated_date ? (
+                      <RelativeTime value={item.updated_date} />
+                    ) : (
+                      "—"
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-5 pt-4 border-t border-border">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="text-[13px] font-semibold">
+                    Recent activity
+                  </div>
+                  <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
+                    {downloads.length} event{downloads.length === 1 ? "" : "s"}{" "}
+                    · 30 days
+                  </div>
+                </div>
+                <Link
+                  to="/activity?view=history"
+                  className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  open history →
+                </Link>
+              </div>
+
+              {isLoading && (
+                <div className="font-mono text-[11px] text-muted-foreground py-4">
+                  loading recent activity…
+                </div>
+              )}
+
+              {!isLoading && downloads.length === 0 && (
+                <div className="font-mono text-[11px] text-muted-foreground py-4">
+                  no activity in the last 30 days —{" "}
+                  <Link
+                    to="/activity?view=history"
+                    className="hover:text-foreground"
+                  >
+                    open full history
+                  </Link>
+                </div>
+              )}
+
+              <div className="font-mono text-[11px]">
+                {downloads.slice(0, 5).map((d, i) => {
+                  const action = d.Status?.toLowerCase() || "—";
+                  const color = action.includes("down")
+                    ? "var(--chart-4)"
+                    : action.includes("post") || action.includes("import")
+                      ? "var(--status-active)"
+                      : action.includes("snatch") || action.includes("queue")
+                        ? "var(--status-paused)"
+                        : "var(--muted-foreground)";
+                  return (
+                    <div
+                      key={`${d.ComicID}-${d.IssueID}-${i}`}
+                      className="grid items-center gap-2 py-1.5"
+                      style={{
+                        gridTemplateColumns:
+                          "120px 90px minmax(180px, 1fr) 140px",
+                        borderTop:
+                          i > 0
+                            ? "1px solid var(--border-soft, var(--border))"
+                            : "none",
+                      }}
+                    >
+                      <RelativeTime value={d.DateAdded} />
+                      <span className="uppercase truncate" style={{ color }}>
+                        {action}
+                      </span>
+                      <div className="flex items-center gap-2 min-w-0">
+                        {d.ComicID && (
+                          <img
+                            src={`/api/metadata/art/${d.ComicID}`}
+                            alt=""
+                            className="w-4 h-6 object-cover rounded-[1px] shrink-0"
+                            onError={(e) => {
+                              e.currentTarget.style.visibility = "hidden";
+                            }}
+                          />
+                        )}
+                        <Link
+                          to={`/library/${d.ComicID}`}
+                          className="font-sans text-foreground truncate hover:text-[var(--primary)]"
+                        >
+                          {d.ComicName} #{d.Issue_Number}
+                        </Link>
+                      </div>
+                      <span className="text-muted-foreground truncate">
+                        {d.Provider || "—"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          {/* This week */}
+          <section className="px-5 py-4">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="text-[13px] font-semibold">This week</div>
+                <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
+                  {upcoming.length} releases
+                </div>
+              </div>
+              <Link
+                to="/releases?view=mine"
+                className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                view mine →
               </Link>
             </div>
 
             {isLoading && (
               <div className="font-mono text-[11px] text-muted-foreground py-4">
-                loading recent activity…
+                loading releases…
               </div>
             )}
 
-            {!isLoading && downloads.length === 0 && (
+            {!isLoading && upcoming.length === 0 && (
               <div className="font-mono text-[11px] text-muted-foreground py-4">
-                no activity in the last 30 days —{" "}
-                <Link
-                  to="/activity?view=history"
-                  className="hover:text-foreground"
-                >
-                  open full history
-                </Link>
+                nothing upcoming this week
               </div>
             )}
 
-            <div className="font-mono text-[11px]">
-              {downloads.slice(0, 5).map((d, i) => {
-                const action = d.Status?.toLowerCase() || "—";
-                const color = action.includes("down")
-                  ? "var(--chart-4)"
-                  : action.includes("post") || action.includes("import")
-                    ? "var(--status-active)"
-                    : action.includes("snatch") || action.includes("queue")
-                      ? "var(--status-paused)"
-                      : "var(--muted-foreground)";
-                return (
-                  <div
-                    key={`${d.ComicID}-${d.IssueID}-${i}`}
-                    className="grid items-center gap-2 py-1.5"
-                    style={{
-                      gridTemplateColumns:
-                        "120px 90px minmax(180px, 1fr) 140px",
-                      borderTop:
-                        i > 0
-                          ? "1px solid var(--border-soft, var(--border))"
-                          : "none",
-                    }}
+            {upcoming.slice(0, 6).map((u, i) => (
+              <div
+                key={`${u.ComicID}-${u.IssueNumber}-${i}`}
+                className="flex items-center gap-2.5 py-2.5"
+                style={{
+                  borderTop:
+                    i > 0
+                      ? "1px solid var(--border-soft, var(--border))"
+                      : "none",
+                }}
+              >
+                <div className="font-mono text-[10px] text-muted-foreground w-12 shrink-0">
+                  {u.IssueDate?.slice(5) || "—"}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <Link
+                    to={`/library/${u.ComicID}`}
+                    className="text-[12px] truncate block hover:text-[var(--primary)]"
                   >
-                    <RelativeTime value={d.DateAdded} />
-                    <span className="uppercase truncate" style={{ color }}>
-                      {action}
-                    </span>
-                    <div className="flex items-center gap-2 min-w-0">
-                      {d.ComicID && (
-                        <img
-                          src={`/api/metadata/art/${d.ComicID}`}
-                          alt=""
-                          className="w-4 h-6 object-cover rounded-[1px] shrink-0"
-                          onError={(e) => {
-                            e.currentTarget.style.visibility = "hidden";
-                          }}
-                        />
-                      )}
-                      <Link
-                        to={`/library/${d.ComicID}`}
-                        className="font-sans text-foreground truncate hover:text-[var(--primary)]"
-                      >
-                        {d.ComicName} #{d.Issue_Number}
-                      </Link>
-                    </div>
-                    <span className="text-muted-foreground truncate">
-                      {d.Provider || "—"}
-                    </span>
+                    {u.ComicName}
+                  </Link>
+                  <div className="font-mono text-[10px] text-muted-foreground">
+                    #{u.IssueNumber}
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        </section>
-
-        {/* This week */}
-        <section className="px-5 py-4">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="text-[13px] font-semibold">This week</div>
-              <div className="font-mono text-[10px] text-muted-foreground tracking-wider uppercase">
-                {upcoming.length} releases
-              </div>
-            </div>
-            <Link
-              to="/releases?view=mine"
-              className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
-            >
-              view mine →
-            </Link>
-          </div>
-
-          {isLoading && (
-            <div className="font-mono text-[11px] text-muted-foreground py-4">
-              loading releases…
-            </div>
-          )}
-
-          {!isLoading && upcoming.length === 0 && (
-            <div className="font-mono text-[11px] text-muted-foreground py-4">
-              nothing upcoming this week
-            </div>
-          )}
-
-          {upcoming.slice(0, 6).map((u, i) => (
-            <div
-              key={`${u.ComicID}-${u.IssueNumber}-${i}`}
-              className="flex items-center gap-2.5 py-2.5"
-              style={{
-                borderTop:
-                  i > 0
-                    ? "1px solid var(--border-soft, var(--border))"
-                    : "none",
-              }}
-            >
-              <div className="font-mono text-[10px] text-muted-foreground w-12 shrink-0">
-                {u.IssueDate?.slice(5) || "—"}
-              </div>
-              <div className="flex-1 min-w-0">
-                <Link
-                  to={`/library/${u.ComicID}`}
-                  className="text-[12px] truncate block hover:text-[var(--primary)]"
-                >
-                  {u.ComicName}
-                </Link>
+                </div>
                 <div className="font-mono text-[10px] text-muted-foreground">
-                  #{u.IssueNumber}
+                  {u.Status || "auto"}
                 </div>
               </div>
-              <div className="font-mono text-[10px] text-muted-foreground">
-                {u.Status || "auto"}
-              </div>
-            </div>
-          ))}
+            ))}
 
-          <div className="mt-4 p-3 rounded-[6px] border border-border bg-card">
-            <div className="flex items-center justify-between gap-2 mb-1.5">
-              <div className="mono-label">Recent chats</div>
-              <Link
-                to="/chat"
-                className="font-mono text-[10px] text-primary hover:underline"
-              >
-                all →
-              </Link>
-            </div>
-            {recentChats.length === 0 ? (
-              <div className="font-mono text-[11px] text-muted-foreground py-1">
-                no saved chats yet
-              </div>
-            ) : (
-              recentChats.map((thread) => (
+            <div className="mt-4 p-3 rounded-[6px] border border-border bg-card">
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="mono-label">Recent chats</div>
                 <Link
-                  key={thread.id}
-                  to={`/chat/${thread.id}`}
-                  className="block px-2 py-1.5 -mx-1 rounded-[6px] hover:bg-accent"
+                  to="/chat"
+                  className="font-mono text-[10px] text-primary hover:underline"
                 >
-                  <div className="text-[12px] font-medium truncate">
-                    {thread.title}
-                  </div>
-                  <div className="mono-meta text-[10px]">
-                    {thread.message_count} msgs ·{" "}
-                    <RelativeTime value={thread.updated_at} />
-                  </div>
+                  all →
                 </Link>
-              ))
-            )}
-          </div>
-        </section>
+              </div>
+              {recentChats.length === 0 ? (
+                <div className="font-mono text-[11px] text-muted-foreground py-1">
+                  no saved chats yet
+                </div>
+              ) : (
+                recentChats.map((thread) => (
+                  <Link
+                    key={thread.id}
+                    to={`/chat/${thread.id}`}
+                    className="block px-2 py-1.5 -mx-1 rounded-[6px] hover:bg-accent"
+                  >
+                    <div className="text-[12px] font-medium truncate">
+                      {thread.title}
+                    </div>
+                    <div className="mono-meta text-[10px]">
+                      {thread.message_count} msgs ·{" "}
+                      <RelativeTime value={thread.updated_at} />
+                    </div>
+                  </Link>
+                ))
+              )}
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   );
