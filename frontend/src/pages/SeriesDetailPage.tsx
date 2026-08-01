@@ -633,7 +633,7 @@ export default function SeriesDetailPage() {
       <div className="flex-1 min-h-0 overflow-auto">
         <div className="min-w-[720px]">
           <div
-            className="grid grid-cols-[54px_42px_minmax(220px,1fr)_130px_110px_190px] gap-3 border-b px-5 py-2 font-mono text-[10px] uppercase tracking-[0.1em]"
+            className="sticky top-0 z-10 grid grid-cols-[54px_42px_minmax(220px,1fr)_130px_110px_190px] gap-3 border-b px-5 py-2 font-mono text-[10px] uppercase tracking-[0.1em]"
             style={{
               borderColor: "var(--border)",
               color: "var(--text-muted)",
