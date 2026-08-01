@@ -154,9 +154,7 @@ def test_refresh_run_items_do_not_annotate_wanted_issues(wanted_db):
 def test_membership_filter_unchanged_snatched_not_returned(wanted_db):
     _seed_wanted_issues(wanted_db, ["issue-wanted", "issue-snatched"])
     with wanted_db.begin() as conn:
-        conn.execute(
-            update(issues).where(issues.c.IssueID == "issue-snatched").values(Status="Snatched")
-        )
+        conn.execute(update(issues).where(issues.c.IssueID == "issue-snatched").values(Status="Snatched"))
 
     ledger = RunLedger(wanted_db)
     ledger.create_run("run-snatch", command_kind="search", trigger="manual")

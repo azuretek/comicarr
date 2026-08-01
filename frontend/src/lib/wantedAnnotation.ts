@@ -73,8 +73,9 @@ export function formatWantedAcquisitionAnnotation(
     return "cancelled";
   }
   if (state === "succeeded") {
-    // Snatch should remove membership shortly; while still Wanted, stay neutral.
-    return WANTED_ANNOTATION_SEARCHING;
+    // Snatch should drop membership shortly; while still Wanted, stay honest
+    // (do not claim an active search).
+    return "matched";
   }
 
   // Unknown ledger value: never invent progress; surface the token as-is.

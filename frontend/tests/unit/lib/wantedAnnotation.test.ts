@@ -96,5 +96,12 @@ describe("formatWantedAcquisitionAnnotation", () => {
         attempt_count: 1,
       }),
     ).toBe("cancelled");
+    // succeeded is terminal — never claim searching while still on Wanted
+    expect(
+      formatWantedAcquisitionAnnotation({
+        state: "succeeded",
+        attempt_count: 1,
+      }),
+    ).toBe("matched");
   });
 });
