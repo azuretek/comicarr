@@ -539,6 +539,17 @@ def get_version_info(ctx):
     }
 
 
+def get_release_notes(ctx, after, through):
+    """Return structured release-note sections for ``(after, through]``.
+
+    Mechanical transform of local CHANGELOG.md (and optional cached remote
+    body when the operator is behind). See ``comicarr.changelog_notes``.
+    """
+    from comicarr.changelog_notes import get_release_notes as _get_notes
+
+    return _get_notes(ctx, after=after, through=through)
+
+
 def force_version_check(ctx):
     """Run one release check, ignoring the automatic-check switch.
 

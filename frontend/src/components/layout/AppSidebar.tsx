@@ -6,7 +6,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useChatThreads } from "@/hooks/useLibraryChat";
 import { isEditableTarget } from "@/lib/keyboard";
-import { formatAppVersion } from "@/lib/version";
+import VersionChip from "@/components/layout/VersionChip";
 import {
   Sidebar,
   SidebarContent,
@@ -191,9 +191,7 @@ export default function AppSidebar() {
           >
             <Logo className="h-3 w-auto text-foreground" />
           </Link>
-          <span className="group-data-[collapsible=icon]:hidden font-mono text-[10px] text-muted-foreground px-1.5 py-0.5 border border-sidebar-border rounded-sm">
-            {formatAppVersion(false)}
-          </span>
+          <VersionChip />
         </div>
       </SidebarHeader>
 

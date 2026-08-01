@@ -278,6 +278,32 @@ def get_version(ctx: AppContext = Depends(get_context)):
     return system_service.get_version_info(ctx)
 
 
+@router.get("/system/release-notes", dependencies=[Depends(require_session)])
+def get_release_notes(
+    after: str,
+    through: str,
+    ctx: AppContext = Depends(get_context),
+):
+    """Return structured release notes for the open-closed semver range.
+
+    Query params:
+      after   — exclusive lower bound (typically last_seen / current when behind)
+      through — inclusive upper bound (typically current install or latest remote)
+
+    Sections are newest-first. Source is local CHANGELOG.md under PROG_DIR;
+    when the operator is behind, notes for the notified remote release may
+    come from the body already cached by the update check (no second fetch).
+    """
+    after = (after or "").strip()
+    through = (through or "").strip()
+    if not after or not through:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "after and through query params are required"},
+        )
+    return system_service.get_release_notes(ctx, after=after, through=through)
+
+
 @router.post("/system/version/check", dependencies=[Depends(require_session)])
 def check_version_now(ctx: AppContext = Depends(get_context)):
     """Force a single release check (ignores automatic-check off).
