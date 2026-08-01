@@ -6,20 +6,73 @@ import { renderMinimal, screen } from "../test-utils";
 import AppStatusBar from "@/components/layout/AppStatusBar";
 
 describe("AppStatusBar", () => {
-  it("shows live library, API, and queue status", async () => {
+  it("shows library, api, and quiet in-flight counts", async () => {
     renderMinimal(<AppStatusBar />);
 
     await waitFor(() => {
       expect(screen.getByText("10 series")).toBeTruthy();
       expect(screen.getByText("online")).toBeTruthy();
-      expect(screen.getByText("2 active")).toBeTruthy();
+      expect(screen.getByText("2 in flight")).toBeTruthy();
     });
 
+    expect(screen.queryByText("2 active")).toBeNull();
+    expect(screen.queryByText(/queue:/i)).toBeNull();
     expect(screen.queryByText("production")).toBeNull();
     expect(screen.queryByText("healthy")).toBeNull();
+
+    // Activity segment links to /activity; library/api do not.
+    const activityLink = screen.getByRole("link", { name: "2 in flight" });
+    expect(activityLink.getAttribute("href")).toBe("/activity");
+    expect(screen.queryByRole("link", { name: /10 series/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /online/ })).toBeNull();
+
+    // Outer row is not aria-live; dedicated polite region is.
+    const status = screen.getByLabelText("Application status");
+    expect(status.getAttribute("aria-live")).toBeNull();
+    expect(status.querySelector("[aria-live='polite']")).toBeTruthy();
   });
 
-  it("reports unavailable services instead of retaining stale placeholder text", async () => {
+  it("shows idle when open-work counts are empty", async () => {
+    server.use(
+      http.get("/api/activity/status", () =>
+        HttpResponse.json({ in_flight: 0, attention: 0 }),
+      ),
+    );
+
+    renderMinimal(<AppStatusBar />);
+
+    await waitFor(() => {
+      expect(screen.getByText("idle")).toBeTruthy();
+    });
+    expect(screen.queryByText(/in flight/)).toBeNull();
+    expect(screen.queryByText(/need attention/)).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "idle" }).getAttribute("href"),
+    ).toBe("/activity");
+  });
+
+  it("shows attention segment only when K > 0", async () => {
+    server.use(
+      http.get("/api/activity/status", () =>
+        HttpResponse.json({ in_flight: 3, attention: 2 }),
+      ),
+    );
+
+    renderMinimal(<AppStatusBar />);
+
+    await waitFor(() => {
+      expect(screen.getByText("3 in flight")).toBeTruthy();
+      expect(screen.getByText("⚠ 2 need attention")).toBeTruthy();
+    });
+
+    expect(
+      screen
+        .getByRole("link", { name: "⚠ 2 need attention" })
+        .getAttribute("href"),
+    ).toBe("/activity");
+  });
+
+  it("shows unreachable when library and api are both down", async () => {
     server.use(
       http.get("/api/dashboard", () =>
         HttpResponse.json({ detail: "Database unavailable" }, { status: 503 }),
@@ -27,15 +80,21 @@ describe("AppStatusBar", () => {
       http.get("/api/health", () =>
         HttpResponse.json({ detail: "Service unavailable" }, { status: 503 }),
       ),
-      http.get("/api/downloads/queue", () =>
-        HttpResponse.json({ detail: "Queue unavailable" }, { status: 503 }),
+      http.get("/api/activity/status", () =>
+        HttpResponse.json({ detail: "Status unavailable" }, { status: 503 }),
       ),
     );
 
     renderMinimal(<AppStatusBar />);
 
     await waitFor(() => {
-      expect(screen.getAllByText("unavailable")).toHaveLength(3);
+      expect(screen.getByText("unavailable")).toBeTruthy();
+      expect(screen.getByText("offline")).toBeTruthy();
+      expect(screen.getByText("unreachable")).toBeTruthy();
     });
+
+    expect(
+      screen.getByRole("link", { name: "unreachable" }).getAttribute("href"),
+    ).toBe("/activity");
   });
 });

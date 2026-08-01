@@ -141,6 +141,10 @@ export const handlers = [
 
   http.get("/api/health", () => HttpResponse.json({ status: "ok" })),
 
+  http.get("/api/activity/status", () =>
+    HttpResponse.json({ in_flight: 2, attention: 0 }),
+  ),
+
   http.get("/api/downloads/queue", () =>
     HttpResponse.json({
       queue: [],
@@ -346,11 +350,21 @@ export const handlers = [
   }),
 
   http.get("/api/import/comic/progress", () =>
-    HttpResponse.json({ status: null, progress: {}, scan_id: null, results: null }),
+    HttpResponse.json({
+      status: null,
+      progress: {},
+      scan_id: null,
+      results: null,
+    }),
   ),
 
   http.get("/api/import/manga/progress", () =>
-    HttpResponse.json({ status: null, progress: {}, scan_id: null, results: null }),
+    HttpResponse.json({
+      status: null,
+      progress: {},
+      scan_id: null,
+      results: null,
+    }),
   ),
 
   http.put("/api/config", () => {

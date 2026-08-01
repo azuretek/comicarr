@@ -1,0 +1,26 @@
+import { useQuery } from "@tanstack/react-query";
+import { apiRequest } from "@/lib/api";
+
+export const ACTIVITY_STATUS_QUERY_KEY = ["activity", "status"] as const;
+
+const STATUS_POLL_MS = 30 * 1000;
+
+/** Derived open-work counts from GET /api/activity/status (never narrative). */
+export interface ActivityStatusResponse {
+  in_flight: number;
+  attention: number;
+}
+
+/**
+ * Quiet-count inputs for the global status indicator.
+ * Polls every 30s; shared SSE invalidates this key via useServerEvents.
+ */
+export function useActivityStatus() {
+  return useQuery<ActivityStatusResponse>({
+    queryKey: ACTIVITY_STATUS_QUERY_KEY,
+    queryFn: () =>
+      apiRequest<ActivityStatusResponse>("GET", "/api/activity/status"),
+    staleTime: 15 * 1000,
+    refetchInterval: STATUS_POLL_MS,
+  });
+}

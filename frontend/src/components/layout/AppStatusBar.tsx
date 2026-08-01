@@ -1,32 +1,37 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useDownloadQueue } from "@/hooks/useActivity";
+import { Link } from "react-router-dom";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useActivityStatus } from "@/hooks/useActivityStatus";
 import { apiRequest } from "@/lib/api";
+import {
+  formatQuietStatus,
+  liveAnnouncement,
+  type ActivityApiState,
+  type ActivityStatusSnapshot,
+  type StatusSegment,
+} from "@/lib/activityStatus";
 
 const STATUS_POLL_MS = 30 * 1000;
-const STATUS_QUEUE_QUERY = {
-  limit: 1,
-  offset: 0,
-  sort: "updated",
-  order: "desc" as const,
-};
 
 interface HealthResponse {
   status: string;
 }
 
-function countLabel(count: number, singular: string, plural = `${singular}s`) {
-  return `${count} ${count === 1 ? singular : plural}`;
+function apiColor(api: ActivityApiState): string | undefined {
+  if (api === "online") return "var(--status-active)";
+  if (api === "offline") return "var(--status-error)";
+  return undefined;
 }
 
 /**
- * A compact, independently refreshed summary of the application's live state.
- * Dashboard data shares React Query's cache with the dashboard page, avoiding
- * duplicate requests when both are visible.
+ * Compact global status line: library · api · idle|M in flight · optional attention.
+ * Activity Center ADR §9 Variant A (quiet counts). Polls status every 30s;
+ * shared SSE invalidates the activity status query (no second EventSource).
  */
 export default function AppStatusBar() {
   const dashboard = useDashboard();
-  const queue = useDownloadQueue(STATUS_QUEUE_QUERY);
+  const activity = useActivityStatus();
   const health = useQuery<HealthResponse>({
     queryKey: ["app", "health"],
     queryFn: () => apiRequest<HealthResponse>("GET", "/api/health"),
@@ -34,48 +39,247 @@ export default function AppStatusBar() {
     refetchInterval: STATUS_POLL_MS,
   });
 
-  const libraryStatus = dashboard.isPending
-    ? "loading…"
-    : dashboard.data
-      ? countLabel(dashboard.data.stats.total_series ?? 0, "series", "series")
-      : "unavailable";
-  const queueStatus = queue.isPending
-    ? "loading…"
-    : queue.data
-      ? `${queue.data.pagination.total} active`
-      : "unavailable";
-  const apiStatus = health.isPending
-    ? "checking…"
+  const libraryPending = dashboard.isPending;
+  const libraryFailed = !dashboard.isPending && !dashboard.data;
+  const librarySeries = dashboard.data?.stats.total_series ?? 0;
+
+  const api: ActivityApiState = health.isPending
+    ? "checking"
     : health.data?.status === "ok"
       ? "online"
-      : "unavailable";
-  const apiStatusColor =
-    apiStatus === "online"
-      ? "var(--status-active)"
-      : apiStatus === "unavailable"
-        ? "var(--status-error)"
-        : undefined;
+      : "offline";
+
+  const activityPending = activity.isPending;
+  const activityFailed = !activity.isPending && !activity.data;
+  const inFlight = activity.data?.in_flight ?? 0;
+  const attention = activity.data?.attention ?? 0;
+
+  const ready = !libraryPending && !health.isPending && !activityPending;
+
+  const snapshot: ActivityStatusSnapshot | null = ready
+    ? {
+        librarySeries: libraryFailed ? null : librarySeries,
+        api,
+        inFlight: activityFailed ? 0 : inFlight,
+        attention: activityFailed ? 0 : attention,
+      }
+    : null;
+
+  const liveText = useStatusLiveRegion(snapshot);
+
+  // Loading shell: same layout, provisional values until queries settle.
+  if (!ready) {
+    return (
+      <StatusShell liveText="">
+        <LibrarySegment
+          text={
+            libraryPending ? "loading…" : libraryFailed ? "unavailable" : null
+          }
+          seriesCount={libraryFailed || libraryPending ? null : librarySeries}
+        />
+        <Sep />
+        <ApiSegment api={api} />
+        <Sep />
+        <span className="text-foreground">
+          {activityPending ? "loading…" : activityFailed ? "unavailable" : "…"}
+        </span>
+      </StatusShell>
+    );
+  }
+
+  // Activity endpoint failed but library/api may still be up — show partial line.
+  if (activityFailed && !(libraryFailed && api === "offline")) {
+    return (
+      <StatusShell liveText={liveText}>
+        <LibrarySegment
+          text={libraryFailed ? "unavailable" : null}
+          seriesCount={libraryFailed ? null : librarySeries}
+        />
+        <Sep />
+        <ApiSegment api={api} />
+        <Sep />
+        <Link
+          to="/activity"
+          className="text-foreground hover:underline"
+          title="Activity status unavailable — open Activity"
+        >
+          unavailable
+        </Link>
+      </StatusShell>
+    );
+  }
+
+  const meta = formatQuietStatus(snapshot!);
 
   return (
+    <StatusShell liveText={liveText}>
+      {meta.segments.map((segment, index) => (
+        <SegmentView
+          key={`${segment.role}-${index}`}
+          segment={segment}
+          api={api}
+        />
+      ))}
+    </StatusShell>
+  );
+}
+
+function StatusShell({
+  children,
+  liveText,
+}: {
+  children: ReactNode;
+  liveText: string;
+}) {
+  return (
     <div
-      className="flex min-w-0 items-center gap-3 font-mono text-[11px] text-muted-foreground"
+      className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground"
       aria-label="Application status"
-      aria-live="polite"
     >
-      <span title="Active series in your library">
-        library: <span className="text-foreground">{libraryStatus}</span>
-      </span>
-      <span aria-hidden="true">·</span>
-      <span title="Connection to the Comicarr API">
-        api:{" "}
-        <span className="text-foreground" style={{ color: apiStatusColor }}>
-          {apiStatus}
-        </span>
-      </span>
-      <span aria-hidden="true">·</span>
-      <span title="Active direct downloads">
-        queue: <span className="text-foreground">{queueStatus}</span>
+      {children}
+      {/* Outer row is not aria-live; dedicated polite region for policy events only. */}
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        {liveText}
       </span>
     </div>
   );
+}
+
+function Sep() {
+  return <span aria-hidden="true">·</span>;
+}
+
+function LibrarySegment({
+  text,
+  seriesCount,
+}: {
+  text: string | null;
+  seriesCount: number | null;
+}) {
+  const display =
+    text ?? (seriesCount === 1 ? "1 series" : `${seriesCount ?? 0} series`);
+  return (
+    <span title="Active series in your library">
+      library: <span className="text-foreground">{display}</span>
+    </span>
+  );
+}
+
+function ApiSegment({ api }: { api: ActivityApiState }) {
+  const display = api === "checking" ? "checking…" : api;
+  return (
+    <span title="Connection to the Comicarr API">
+      api:{" "}
+      <span className="text-foreground" style={{ color: apiColor(api) }}>
+        {display}
+      </span>
+    </span>
+  );
+}
+
+function SegmentView({
+  segment,
+  api,
+}: {
+  segment: StatusSegment;
+  api: ActivityApiState;
+}) {
+  if (segment.role === "separator") {
+    return <Sep />;
+  }
+
+  if (segment.role === "library") {
+    // segment.text is "library: N series" — split for styling
+    const value = segment.text.replace(/^library:\s*/, "");
+    return (
+      <span title="Active series in your library">
+        library: <span className="text-foreground">{value}</span>
+      </span>
+    );
+  }
+
+  if (segment.role === "api") {
+    const value = segment.text.replace(/^api:\s*/, "");
+    return (
+      <span title="Connection to the Comicarr API">
+        api:{" "}
+        <span className="text-foreground" style={{ color: apiColor(api) }}>
+          {value}
+        </span>
+      </span>
+    );
+  }
+
+  if (segment.role === "attention") {
+    return (
+      <Link
+        to={segment.href ?? "/activity"}
+        className="font-semibold hover:underline"
+        style={{ color: "var(--status-error)" }}
+        title="Needs attention → Activity"
+      >
+        {segment.text}
+      </Link>
+    );
+  }
+
+  // activity | idle
+  const title =
+    segment.text === "unreachable"
+      ? "Server unreachable — open Activity"
+      : segment.text === "idle"
+        ? "No open work → Activity"
+        : "Open work (searches + open pipeline stages) → Activity";
+
+  if (segment.href) {
+    return (
+      <Link
+        to={segment.href}
+        className="text-foreground hover:underline"
+        title={title}
+      >
+        {segment.text}
+      </Link>
+    );
+  }
+
+  return <span className="text-foreground">{segment.text}</span>;
+}
+
+/**
+ * Dedicated polite live region: offline/recovery, attention changes, idle↔busy.
+ * Mid-flight count ticks stay silent. Snapshot fields are tracked as primitives
+ * so object identity churn does not re-fire announcements.
+ */
+function useStatusLiveRegion(snapshot: ActivityStatusSnapshot | null): string {
+  const [text, setText] = useState("");
+  const prevRef = useRef<ActivityStatusSnapshot | null>(null);
+
+  const librarySeries = snapshot?.librarySeries ?? null;
+  const api = snapshot?.api;
+  const inFlight = snapshot?.inFlight;
+  const attention = snapshot?.attention;
+  const ready = snapshot !== null;
+
+  useEffect(() => {
+    if (
+      !ready ||
+      api === undefined ||
+      inFlight === undefined ||
+      attention === undefined
+    ) {
+      return;
+    }
+    const next: ActivityStatusSnapshot = {
+      librarySeries,
+      api,
+      inFlight,
+      attention,
+    };
+    const announcement = liveAnnouncement(prevRef.current, next);
+    prevRef.current = next;
+    setText(announcement);
+  }, [ready, librarySeries, api, inFlight, attention]);
+
+  return text;
 }
