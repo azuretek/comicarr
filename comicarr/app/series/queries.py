@@ -17,6 +17,7 @@ from sqlalchemy import delete, func, literal, or_, select
 
 from comicarr import db
 from comicarr.app.core.database import paginated_query  # noqa: F401 — re-exported
+from comicarr.tables import acquisition_run_items as t_acquisition_run_items
 from comicarr.tables import annuals as t_annuals
 from comicarr.tables import comics as t_comics
 from comicarr.tables import importresults as t_importresults
@@ -315,6 +316,71 @@ def get_wanted_annuals():
         .where(t_annuals.c.Deleted != 1)
         .where(t_annuals.c.Status == "Wanted")
     )
+
+
+def get_latest_search_items_by_entity_ids(entity_ids):
+    """Return the latest search run item per entity id (live-and-sticky annotation).
+
+    "Latest" is the most recently updated ``acquisition_run_items`` row for
+    ``command_kind='search'`` on entity types ``issue`` / ``annual``. A closed
+    run keeps annotating until a newer run supersedes that entity. Membership
+    of Wanted is not decided here — callers only attach fields.
+    """
+    ids = []
+    seen = set()
+    for raw in entity_ids or []:
+        entity_id = str(raw).strip() if raw is not None else ""
+        if not entity_id or entity_id in seen:
+            continue
+        seen.add(entity_id)
+        ids.append(entity_id)
+    if not ids:
+        return {}
+
+    row_number = func.row_number().over(
+        partition_by=(
+            t_acquisition_run_items.c.entity_type,
+            t_acquisition_run_items.c.entity_id,
+        ),
+        order_by=(
+            t_acquisition_run_items.c.updated_at.desc(),
+            t_acquisition_run_items.c.item_id.desc(),
+        ),
+    )
+    ranked = (
+        select(
+            t_acquisition_run_items.c.item_id,
+            t_acquisition_run_items.c.run_id,
+            t_acquisition_run_items.c.entity_type,
+            t_acquisition_run_items.c.entity_id,
+            t_acquisition_run_items.c.state,
+            t_acquisition_run_items.c.attempt_count,
+            t_acquisition_run_items.c.reason,
+            t_acquisition_run_items.c.updated_at,
+            t_acquisition_run_items.c.completed_at,
+            row_number.label("rn"),
+        )
+        .where(t_acquisition_run_items.c.command_kind == "search")
+        .where(t_acquisition_run_items.c.entity_type.in_(("issue", "annual")))
+        .where(t_acquisition_run_items.c.entity_id.in_(ids))
+        .subquery()
+    )
+    rows = db.select_all(select(ranked).where(ranked.c.rn == 1))
+    # One annotation key per IssueID. If both an issue and annual row somehow
+    # share an id (should not), the later row in the result set wins — callers
+    # always key by the Wanted row's IssueID alone.
+    latest = {}
+    for row in rows:
+        latest[str(row["entity_id"])] = {
+            "state": row["state"],
+            "attempt_count": int(row["attempt_count"] or 0),
+            "reason": row["reason"],
+            "run_id": row["run_id"],
+            "entity_type": row["entity_type"],
+            "updated_at": row["updated_at"],
+            "completed_at": row["completed_at"],
+        }
+    return latest
 
 
 # ---------------------------------------------------------------------------

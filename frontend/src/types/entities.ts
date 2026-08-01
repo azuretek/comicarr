@@ -312,10 +312,27 @@ export interface SearchResult {
   content_rating?: string | null;
 }
 
+/**
+ * Live-sticky acquisition annotation on a Wanted row (#490).
+ * Latest search `acquisition_run_items` row for this IssueID, or null when
+ * the issue has never been accepted into a search run.
+ */
+export interface WantedAcquisitionAnnotation {
+  state: string | null;
+  attempt_count: number;
+  reason?: string | null;
+  run_id?: string | null;
+  entity_type?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+}
+
 /** Wanted issue (issue with extra fields from wanted queue) */
 export interface WantedIssue extends Issue {
   QueueType?: string;
   Provider?: string;
+  /** Latest search run-item annotation; null when never searched. */
+  acquisition?: WantedAcquisitionAnnotation | null;
 }
 
 /** Upcoming issue */
