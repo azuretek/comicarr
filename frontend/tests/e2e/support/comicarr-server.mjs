@@ -67,9 +67,8 @@ async function writeSeededConfig(dataDir, port) {
   await writeFile(
     configPath,
     `[General]
-config_version = 15
+config_version = 16
 minimal_ini = False
-auto_update = False
 launch_browser = False
 destination_dir = ${quoteIniValue(join(dataDir, "downloads"))}
 manga_destination_dir = ${quoteIniValue(join(dataDir, "manga"))}
@@ -104,7 +103,6 @@ log_level = 0
 
 [Git]
 check_github = False
-check_github_on_startup = False
 
 [CV]
 comicvine_enabled = False

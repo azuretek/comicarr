@@ -511,13 +511,26 @@ def _reconfigure_schedulers(ctx):
 
 
 def get_version_info(ctx):
-    """Return version information."""
+    """Return version information.
+
+    Update availability is Changesets semver (``update_state``), not commit lag.
+    ``release_version`` is the local release line; ``current_version`` remains
+    the install/build identity (often a SHA).
+    """
+    update_state = getattr(ctx, "update_state", None) or "unknown"
+    update_reason = getattr(ctx, "update_reason", None)
+    if update_state != "unknown":
+        update_reason = None
+    elif update_reason is None:
+        update_reason = "never_checked"
     return {
         "current_version": ctx.current_version,
         "current_version_name": ctx.current_version_name,
         "current_release_name": ctx.current_release_name,
         "latest_version": ctx.latest_version,
-        "commits_behind": ctx.commits_behind,
+        "release_version": get_release_version(),
+        "update_state": update_state,
+        "update_reason": update_reason,
         "install_type": ctx.install_type,
         "current_branch": ctx.current_branch,
         "build": get_build_identity(ctx),

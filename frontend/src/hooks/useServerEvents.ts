@@ -5,7 +5,6 @@ import type {
   AddByIdEventData,
   SchedulerMessageEventData,
   ConfigCheckEventData,
-  CheckUpdateEventData,
   SearchProgressEventData,
   SearchCompleteEventData,
   MessageEventData,
@@ -185,36 +184,6 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
           // For now, we'll just log it. Could add a modal later if needed.
         } catch (error) {
           console.error("[SSE] Error parsing config_check event:", error);
-        }
-      });
-
-      // Event: check_update - Version update notifications
-      evtSource.addEventListener("check_update", (e: MessageEvent) => {
-        if (!e.data) return;
-
-        try {
-          const data: CheckUpdateEventData = JSON.parse(e.data);
-          console.log("[SSE] check_update event:", data);
-
-          const commitsBehind = parseInt(String(data.commits_behind), 10);
-          if (
-            commitsBehind > 0 &&
-            data.current_version !== data.latest_version
-          ) {
-            addToast({
-              type: "info",
-              title: "Update Available",
-              description: `A newer version is available. You are ${commitsBehind} commits behind.`,
-            });
-          } else if (commitsBehind === 0) {
-            addToast({
-              type: "success",
-              title: "Up to Date",
-              description: "Comicarr is up to date.",
-            });
-          }
-        } catch (error) {
-          console.error("[SSE] Error parsing check_update event:", error);
         }
       });
 

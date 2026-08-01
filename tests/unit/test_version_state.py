@@ -7,11 +7,11 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-"""Version state written after startup must reach the API.
+"""Semver release check state must reach GET /api/system/version.
 
-The runtime context is built once, from a snapshot of the module globals. The
-scheduled version check wrote only the globals, so every result after boot
-landed in a copy nobody reads and the update banner could never appear.
+Update availability is the Changesets release line (not git commit lag). The
+runtime context is built once from module globals, so every write after boot
+must go through ``_set_version_state`` or the API never moves.
 """
 
 from unittest.mock import MagicMock, patch
@@ -26,17 +26,24 @@ from comicarr.app.system import service as system_service
 
 
 def test_git_user_default_is_project_owner():
-    """Out-of-box update checks must hit frankieramirez/comicarr, not comicarr/comicarr.
+    """Out-of-box owner constant remains frankieramirez (identity elsewhere).
 
-    The latter resolves to an unrelated third-party repo, so a 404 looks like
-    "no releases" rather than a misconfigured owner. Regression for #456.
+    Update checks no longer read GIT_USER, but other git tooling still does.
+    Regression for #456.
     """
     assert REGISTRY["GIT_USER"].default == "frankieramirez"
 
 
+def test_check_github_defaults_on():
+    assert REGISTRY["CHECK_GITHUB"].default is True
+    assert REGISTRY["CONFIG_VERSION"].default == 16
+    assert "AUTO_UPDATE" not in REGISTRY
+    assert "CHECK_GITHUB_ON_STARTUP" not in REGISTRY
+
+
 @pytest.fixture
 def ctx(monkeypatch):
-    config = MagicMock(GIT_USER="frankieramirez", GIT_BRANCH="main", GIT_TOKEN=None, AUTO_UPDATE=False)
+    config = MagicMock(GIT_USER="wrong-user", GIT_BRANCH="main", GIT_TOKEN=None, CHECK_GITHUB=True)
     context = AppContext(
         prog_dir="/tmp/comicarr_test",
         data_dir="/tmp/comicarr_test/data",
@@ -44,104 +51,161 @@ def ctx(monkeypatch):
         config=config,
         scheduler=MagicMock(),
         current_version="aaaaaaa",
-        latest_version="aaaaaaa",
-        commits_behind=0,
+        latest_version=None,
+        update_state="unknown",
+        update_reason="never_checked",
     )
-    # checkGithub still reads config and install type off the module.
     monkeypatch.setattr(comicarr, "CONFIG", config, raising=False)
     monkeypatch.setattr(comicarr, "INSTALL_TYPE", "git", raising=False)
     monkeypatch.setattr(comicarr, "CURRENT_VERSION", "aaaaaaa", raising=False)
-    with patch("comicarr.app.core.runtime.get_runtime_if_initialized", return_value=context):
+    monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
+    with (
+        patch("comicarr.app.core.runtime.get_runtime_if_initialized", return_value=context),
+        patch.object(system_service, "get_release_version", return_value="0.20.0"),
+    ):
         yield context
 
 
-def _github_response(payload):
+def _github_response(payload, status_code=200):
     response = MagicMock()
+    response.status_code = status_code
     response.json.return_value = payload
     return response
 
 
-class TestScheduledVersionCheckReachesTheApi:
-    def test_new_commit_moves_latest_version_and_commits_behind(self, ctx):
-        responses = [
-            _github_response({"sha": "bbbbbbb"}),
-            _github_response({"total_commits": 3}),
-        ]
-
-        with patch.object(versioncheck.requests, "get", side_effect=responses):
-            versioncheck.checkGithub(current_version="aaaaaaa")
+class TestSemverReleaseCheck:
+    def test_behind_when_remote_is_newer(self, ctx):
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.21.0"}),
+        ) as mock_get:
+            result = versioncheck.checkGithub(current_version="aaaaaaa")
 
         info = system_service.get_version_info(ctx)
-        assert info["latest_version"] == "bbbbbbb"
-        assert info["commits_behind"] == 3
+        assert result["update_state"] == "behind"
+        assert info["update_state"] == "behind"
+        assert info["update_reason"] is None
+        assert info["latest_version"] == "0.21.0"
+        assert info["release_version"] == "0.20.0"
+        assert "commits_behind" not in info
+        # Constant owner/repo — never GIT_USER from config.
+        assert mock_get.call_args.args[0] == versioncheck._GITHUB_RELEASES_LATEST
+        assert "wrong-user" not in mock_get.call_args.args[0]
+        assert "frankieramirez/comicarr" in mock_get.call_args.args[0]
+
+    def test_current_when_versions_match(self, ctx):
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.20.0"}),
+        ):
+            versioncheck.checkGithub()
+
+        info = system_service.get_version_info(ctx)
+        assert info["update_state"] == "current"
+        assert info["update_reason"] is None
+        assert info["latest_version"] == "0.20.0"
+
+    def test_ahead_collapses_to_current(self, ctx):
+        with (
+            patch.object(system_service, "get_release_version", return_value="0.22.0"),
+            patch.object(
+                versioncheck.requests,
+                "get",
+                return_value=_github_response({"tag_name": "v0.21.0"}),
+            ),
+        ):
+            versioncheck.checkGithub()
+
+        assert system_service.get_version_info(ctx)["update_state"] == "current"
+
+    def test_strips_single_leading_v_only(self, ctx):
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.21.0"}),
+        ):
+            versioncheck.checkGithub()
+        assert system_service.get_version_info(ctx)["latest_version"] == "0.21.0"
 
     def test_legacy_globals_stay_in_step(self, ctx):
-        responses = [
-            _github_response({"sha": "ccccccc"}),
-            _github_response({"total_commits": 1}),
-        ]
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.21.0"}),
+        ):
+            versioncheck.checkGithub()
 
-        with patch.object(versioncheck.requests, "get", side_effect=responses):
-            versioncheck.checkGithub(current_version="aaaaaaa")
-
-        assert comicarr.LATEST_VERSION == "ccccccc"
-        assert comicarr.COMMITS_BEHIND == 1
+        assert comicarr.LATEST_VERSION == "0.21.0"
+        assert comicarr.UPDATE_STATE == "behind"
         assert ctx.latest_version == comicarr.LATEST_VERSION
-        assert ctx.commits_behind == comicarr.COMMITS_BEHIND
+        assert ctx.update_state == comicarr.UPDATE_STATE
 
-    def test_github_failure_still_records_a_result(self, ctx):
+
+class TestUnknownReasons:
+    def test_network_failure_is_unreachable_not_current(self, ctx):
         with patch.object(versioncheck.requests, "get", side_effect=RuntimeError("no network")):
-            versioncheck.checkGithub(current_version="aaaaaaa")
+            result = versioncheck.checkGithub()
 
-        assert system_service.get_version_info(ctx)["commits_behind"] == 0
+        info = system_service.get_version_info(ctx)
+        assert result["update_state"] == "unknown"
+        assert info["update_state"] == "unknown"
+        assert info["update_reason"] == "unreachable"
+        assert info["update_state"] != "current"
 
+    def test_rate_limited_is_not_up_to_date(self, ctx):
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({}, status_code=403),
+        ):
+            versioncheck.checkGithub()
 
-class TestATransientOutageDoesNotClearAKnownUpdate:
-    """A failed check must not report 0 -- that reads as "up to date".
+        info = system_service.get_version_info(ctx)
+        assert info["update_state"] == "unknown"
+        assert info["update_reason"] == "rate_limited"
 
-    Before these writes reached the runtime context they were inert, so a
-    failure could not affect the API. Now that they land, publishing 0 on
-    failure would silently replace a real "update available" with a false
-    negative until the next successful check.
-    """
+    def test_http_429_is_rate_limited(self, ctx):
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({}, status_code=429),
+        ):
+            versioncheck.checkGithub()
 
-    def test_first_request_failure_preserves_the_last_known_count(self, ctx):
-        responses = [
-            _github_response({"sha": "bbbbbbb"}),
-            _github_response({"total_commits": 3}),
-        ]
-        with patch.object(versioncheck.requests, "get", side_effect=responses):
-            versioncheck.checkGithub(current_version="aaaaaaa")
-        assert system_service.get_version_info(ctx)["commits_behind"] == 3
+        assert system_service.get_version_info(ctx)["update_reason"] == "rate_limited"
+
+    def test_unparseable_local_is_unknown(self, ctx):
+        with (
+            patch.object(system_service, "get_release_version", return_value="not-a-version"),
+            patch.object(
+                versioncheck.requests,
+                "get",
+                return_value=_github_response({"tag_name": "v0.21.0"}),
+            ),
+        ):
+            versioncheck.checkGithub()
+
+        info = system_service.get_version_info(ctx)
+        assert info["update_state"] == "unknown"
+        assert info["update_reason"] == "unreachable"
+
+    def test_failed_check_does_not_clear_to_current(self, ctx):
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.21.0"}),
+        ):
+            versioncheck.checkGithub()
+        assert system_service.get_version_info(ctx)["update_state"] == "behind"
 
         with patch.object(versioncheck.requests, "get", side_effect=RuntimeError("no network")):
-            versioncheck.checkGithub(current_version="aaaaaaa")
+            versioncheck.checkGithub()
 
-        assert system_service.get_version_info(ctx)["commits_behind"] == 3
-
-    def test_compare_request_failure_preserves_the_last_known_count(self, ctx):
-        responses = [
-            _github_response({"sha": "bbbbbbb"}),
-            _github_response({"total_commits": 2}),
-        ]
-        with patch.object(versioncheck.requests, "get", side_effect=responses):
-            versioncheck.checkGithub(current_version="aaaaaaa")
-        assert system_service.get_version_info(ctx)["commits_behind"] == 2
-
-        # First call succeeds, the compare call fails.
-        responses = [_github_response({"sha": "ccccccc"}), RuntimeError("no network")]
-        with patch.object(versioncheck.requests, "get", side_effect=responses):
-            versioncheck.checkGithub(current_version="aaaaaaa")
-
-        assert system_service.get_version_info(ctx)["commits_behind"] == 2
-
-    def test_failure_before_any_successful_check_still_seeds_zero(self, ctx):
-        versioncheck._set_version_state(commits_behind=None)
-
-        with patch.object(versioncheck.requests, "get", side_effect=RuntimeError("no network")):
-            versioncheck.checkGithub(current_version="aaaaaaa")
-
-        assert system_service.get_version_info(ctx)["commits_behind"] == 0
+        info = system_service.get_version_info(ctx)
+        assert info["update_state"] == "unknown"
+        assert info["update_reason"] == "unreachable"
 
 
 class TestGithubRequestTimeout:
@@ -152,40 +216,66 @@ class TestGithubRequestTimeout:
     """
 
     def test_check_github_passes_timeout_on_every_request(self, ctx):
-        responses = [
-            _github_response({"sha": "bbbbbbb"}),
-            _github_response({"total_commits": 1}),
-        ]
-        with patch.object(versioncheck.requests, "get", side_effect=responses) as mock_get:
-            versioncheck.checkGithub(current_version="aaaaaaa")
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.21.0"}),
+        ) as mock_get:
+            versioncheck.checkGithub()
 
-        assert mock_get.call_count == 2
-        for call in mock_get.call_args_list:
-            assert call.kwargs.get("timeout") == versioncheck._GITHUB_REQUEST_TIMEOUT
+        assert mock_get.call_count == 1
+        assert mock_get.call_args.kwargs.get("timeout") == versioncheck._GITHUB_REQUEST_TIMEOUT
         assert versioncheck._GITHUB_REQUEST_TIMEOUT == (10, 10)
 
     def test_check_github_preserves_auth_with_timeout(self, ctx):
         token = ("ghp_test", "x-oauth-basic")
         comicarr.CONFIG.GIT_TOKEN = token
-        responses = [
-            _github_response({"sha": "bbbbbbb"}),
-            _github_response({"total_commits": 0}),
-        ]
-        with patch.object(versioncheck.requests, "get", side_effect=responses) as mock_get:
-            versioncheck.checkGithub(current_version="aaaaaaa")
-
-        for call in mock_get.call_args_list:
-            assert call.kwargs.get("auth") is token
-            assert call.kwargs.get("timeout") == (10, 10)
-
-    def test_timeout_error_is_treated_as_a_failed_check(self, ctx):
         with patch.object(
-            versioncheck.requests, "get", side_effect=versioncheck.requests.exceptions.Timeout("connect timed out")
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.20.0"}),
+        ) as mock_get:
+            versioncheck.checkGithub()
+
+        assert mock_get.call_args.kwargs.get("auth") is token
+        assert mock_get.call_args.kwargs.get("timeout") == (10, 10)
+
+    def test_timeout_error_is_unreachable(self, ctx):
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            side_effect=versioncheck.requests.exceptions.Timeout("connect timed out"),
         ):
-            result = versioncheck.checkGithub(current_version="aaaaaaa")
+            result = versioncheck.checkGithub()
 
         assert result["status"] == "failure"
-        assert system_service.get_version_info(ctx)["commits_behind"] == 0
+        assert system_service.get_version_info(ctx)["update_reason"] == "unreachable"
+
+
+class TestDeadToastPathRetired:
+    def test_check_github_does_not_assign_global_messages_or_check_update(self, ctx):
+        comicarr.GLOBAL_MESSAGES = {"event": "stale"}
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.21.0"}),
+        ):
+            result = versioncheck.checkGithub()
+
+        assert "event" not in result
+        assert result.get("event") != "check_update"
+        # Producer must not clobber GLOBAL_MESSAGES (issue #430 / #470).
+        assert comicarr.GLOBAL_MESSAGES == {"event": "stale"}
+
+    def test_check_github_does_not_set_auto_update_signal(self, ctx):
+        comicarr.SIGNAL = None
+        with patch.object(
+            versioncheck.requests,
+            "get",
+            return_value=_github_response({"tag_name": "v0.21.0"}),
+        ):
+            versioncheck.checkGithub()
+        assert comicarr.SIGNAL is None
 
 
 class TestVersionStateHelper:
@@ -212,3 +302,8 @@ class TestVersionStateHelper:
     def test_every_mapped_field_exists_on_the_context(self, ctx):
         for field in versioncheck._VERSION_FIELDS:
             assert hasattr(ctx, field), "AppContext is missing %s" % field
+
+    def test_never_checked_is_the_precheck_default(self, ctx):
+        info = system_service.get_version_info(ctx)
+        assert info["update_state"] == "unknown"
+        assert info["update_reason"] == "never_checked"

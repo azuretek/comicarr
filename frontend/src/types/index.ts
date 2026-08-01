@@ -72,7 +72,6 @@ export type {
   AddByIdEventData,
   SchedulerMessageEventData,
   ConfigCheckEventData,
-  CheckUpdateEventData,
   SearchProgressEventData,
   SearchCompleteEventData,
   MessageEventData,
