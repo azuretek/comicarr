@@ -1,0 +1,86 @@
+#  Copyright (C) 2025–2026 Comicarr contributors
+#
+#  This file is part of Comicarr.
+#
+#  Comicarr is free software: you can redistribute it and/or modify
+#  it under the terms of the GNU General Public License as published by
+#  the Free Software Foundation, either version 3 of the License, or
+#  (at your option) any later version.
+
+"""Activity Center HTTP read surface.
+
+Endpoints:
+
+* ``GET /api/activity/timeline`` — narrative events, newest first
+* ``GET /api/activity/band`` — needs-attention journal rows (R9 predicate)
+* ``GET /api/activity/status`` — derived open-work counts (never narrative)
+
+**Pagination choice:** timeline pages *events* ordered by ``created_at``.
+Story grouping (25 stories per UI page) is a client concern so the API can
+support arbitrary story sizes without re-querying. Clients pass optional
+``scope_type`` + ``scope_id`` for series rollup or issue/annual exact match
+(Activity Center ADR §§5–6).
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from comicarr.app.activity import service
+from comicarr.app.activity.queries import TIMELINE_LIMIT_DEFAULT, TIMELINE_LIMIT_MAX, TIMELINE_LIMIT_MIN
+from comicarr.app.core.security import require_session
+
+router = APIRouter(prefix="/api/activity", tags=["activity"])
+
+
+def _scope_error(exc):
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/timeline", dependencies=[Depends(require_session)])
+def get_timeline(
+    limit: int = Query(TIMELINE_LIMIT_DEFAULT, ge=TIMELINE_LIMIT_MIN, le=TIMELINE_LIMIT_MAX),
+    offset: int = Query(0, ge=0),
+    scope_type: str | None = Query(None, max_length=32),
+    scope_id: str | None = Query(None, max_length=255),
+):
+    """Return a page of narrative activity events (newest first).
+
+    Pages events, not pre-grouped stories. Optional ``scope_type`` /
+    ``scope_id`` filters: ``issue``/``annual`` exact subject match; ``series``
+    rollup via ``parent_series_id``, series subject rows, and series-scoped
+    run events.
+    """
+    try:
+        return service.get_timeline(
+            limit=limit,
+            offset=offset,
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+    except ValueError as e:
+        _scope_error(e)
+
+
+@router.get("/band", dependencies=[Depends(require_session)])
+def get_attention_band(
+    scope_type: str | None = Query(None, max_length=32),
+    scope_id: str | None = Query(None, max_length=255),
+):
+    """Return unresolved needs-attention pipeline_journal rows.
+
+    Predicate: stage in (failed, manual_review) and status is null or not in
+    (retried, ignored, imported). When scoped, intersected with that scope.
+    """
+    try:
+        return service.get_attention_band(scope_type=scope_type, scope_id=scope_id)
+    except ValueError as e:
+        _scope_error(e)
+
+
+@router.get("/status", dependencies=[Depends(require_session)])
+def get_status():
+    """Return derived open-work counts for the quiet-counts status indicator.
+
+    ``in_flight`` = accepted|running run items + OPEN_STAGES journal.
+    ``attention`` = unresolved band count. Never aggregates activity_events.
+    """
+    return service.get_status()
