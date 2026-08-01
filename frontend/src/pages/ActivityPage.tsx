@@ -14,6 +14,7 @@ import {
   type QueueItem,
 } from "@/hooks/useActivity";
 import { useDebounce } from "@/hooks/use-debounce";
+import { TimelineView } from "@/components/activity/timeline";
 import { DataTable } from "@/components/data-table/DataTable";
 import { useTableState } from "@/components/data-table/useTableState";
 import { useServerPage } from "@/components/data-table/useServerPage";
@@ -29,7 +30,7 @@ import PageHeader, { Tab, TabRow } from "@/components/layout/PageHeader";
 import { useToast } from "@/components/ui/toast";
 import type { PaginationMeta } from "@/types";
 
-type ActivityView = "queue" | "history";
+type ActivityView = "timeline" | "queue" | "history";
 const PAGE_SIZE = 25;
 
 function statusPillMeta(status: string) {
@@ -108,41 +109,58 @@ function StatusPill({ status }: { status: string }) {
 
 export default function ActivityPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const rawView = searchParams.get("view");
+  // Timeline is the default landing tab (#429 / #486). Queue keeps working via
+  // ?view=queue; history via ?view=history.
   const currentView: ActivityView =
-    searchParams.get("view") === "history" ? "history" : "queue";
+    rawView === "history" || rawView === "queue" ? rawView : "timeline";
+
+  const scope_type = searchParams.get("scope_type");
+  const scope_id = searchParams.get("scope_id");
 
   const setView = (view: ActivityView) => {
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
-      if (view === "history") next.set("view", "history");
-      else next.delete("view");
+      if (view === "timeline") next.delete("view");
+      else next.set("view", view);
       return next;
     });
   };
 
+  const meta =
+    currentView === "timeline"
+      ? "what Comicarr has been doing"
+      : currentView === "queue"
+        ? "live direct downloads"
+        : "download history";
+
   return (
     <div className="page-transition">
-      <PageHeader
-        title="Activity"
-        meta={
-          currentView === "queue" ? "live download queue" : "download history"
-        }
-      />
+      <PageHeader title="Activity" meta={meta} />
 
       <TabRow>
         <Tab
+          active={currentView === "timeline"}
+          label="Timeline"
+          onClick={() => setView("timeline")}
+        />
+        <Tab
           active={currentView === "queue"}
-          label="Queue"
+          label="Direct Downloads"
           onClick={() => setView("queue")}
         />
         <Tab
           active={currentView === "history"}
-          label="History"
+          label="Download History"
           onClick={() => setView("history")}
         />
       </TabRow>
 
-      {currentView === "queue" ? <QueueView /> : <HistoryView />}
+      {currentView === "timeline" && (
+        <TimelineView scope_type={scope_type} scope_id={scope_id} />
+      )}
+      {currentView === "queue" && <QueueView />}
+      {currentView === "history" && <HistoryView />}
     </div>
   );
 }

@@ -106,6 +106,13 @@ describe("IssueDetailPage", () => {
         (link) => link.getAttribute("href") === "/library/series-9",
       ),
     ).toBe(true);
+
+    const activityLink = screen.getByRole("link", {
+      name: "View activity for this issue",
+    });
+    expect(activityLink.getAttribute("href")).toBe(
+      "/activity?scope_type=issue&scope_id=issue-23",
+    );
   });
 
   it("shows a clear not-found state for unknown issue ids", async () => {

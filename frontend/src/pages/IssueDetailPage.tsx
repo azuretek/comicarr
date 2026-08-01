@@ -1,5 +1,5 @@
 import { Link, useParams } from "react-router-dom";
-import { ChevronRight, Library } from "lucide-react";
+import { Activity, ChevronRight, Library } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIssueDetail } from "@/hooks/useIssueDetail";
@@ -161,6 +161,23 @@ export default function IssueDetailPage() {
           >
             series:{comicId} · issue:{issueId}
           </p>
+
+          {issueId ? (
+            <div className="pt-1">
+              <Link
+                to={`/activity?scope_type=issue&scope_id=${encodeURIComponent(issueId)}`}
+                className="inline-flex items-center gap-1.5 rounded-[5px] border px-3 py-1.5 text-[12px] font-semibold transition-colors hover:text-foreground"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--muted-foreground)",
+                }}
+                aria-label="View activity for this issue"
+              >
+                <Activity className="h-3.5 w-3.5" />
+                Activity
+              </Link>
+            </div>
+          ) : null}
         </div>
       </div>
 

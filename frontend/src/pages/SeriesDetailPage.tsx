@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
+  Activity,
   MoreHorizontal,
   Pause,
   Play,
@@ -455,6 +456,17 @@ export default function SeriesDetailPage() {
               />
               Refresh
             </button>
+            {comicId ? (
+              <Link
+                to={`/activity?scope_type=series&scope_id=${encodeURIComponent(comicId)}`}
+                className={ghostBtn}
+                style={{ borderColor: "var(--border)" }}
+                aria-label="View activity for this series"
+              >
+                <Activity className="h-3.5 w-3.5" />
+                Activity
+              </Link>
+            ) : null}
             <button
               type="button"
               onClick={handlePauseResume}

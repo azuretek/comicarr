@@ -201,6 +201,21 @@ describe("SeriesDetailPage", () => {
     );
   });
 
+  it("deep-links to scoped Activity without embedding a feed", async () => {
+    renderDetail();
+    await screen.findByText("Absolute Batman");
+
+    const activityLink = screen.getByRole("link", {
+      name: "View activity for this series",
+    });
+    expect(activityLink.getAttribute("href")).toBe(
+      "/activity?scope_type=series&scope_id=1",
+    );
+    // No embedded timeline feed on the detail page.
+    expect(screen.queryByLabelText("Activity timeline")).toBeNull();
+    expect(screen.queryByLabelText("Needs attention")).toBeNull();
+  });
+
   it("uses the canonical summary and shows annuals, evidence, and intent separately", async () => {
     const user = userEvent.setup();
     renderDetail();
