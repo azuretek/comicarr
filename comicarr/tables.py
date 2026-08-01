@@ -750,8 +750,8 @@ activity_events = Table(
 # post-process pipeline. One row per release_key. Survives process restart so
 # an in-flight item completes exactly once. stage is totally ordered via
 # stage_rank (the conditional advance-only WHERE + the PP-consumer atomic
-# claim). status/retry_count/next_retry_at are reserved-nullable for a future
-# operator status / retry-backoff layer (R9) and are unpopulated now.
+# claim). status/retry_count/next_retry_at are R9 resolution columns: operator
+# band exits and FAILED_AUTO stamp status without rewriting stage (#483).
 pipeline_journal = Table(
     "pipeline_journal",
     metadata,
