@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.22.0
+
+### Minor Changes
+
+- de44564: Comicarr now runs a daily **Ledger Retention** job that prunes old acquisition, pipeline journal, maintenance, and AI activity ledger rows under fixed age and count rules, so those tables stop growing without bound.
+- 8c86384: Failed and manual-review downloads on the needs-attention work queue can be cleared with retry, search again, ignore, or import — without rewriting pipeline stage history.
+- 60a8c70: When release announcements are enabled (`announce_releases = True` under `[Git]` in `config.ini`; default off), Comicarr sends **one** outbound message through every enabled notifier after a check finds the install behind — body is `{current} → {latest}` plus the GitHub release URL. The same remote version is not re-announced every check interval. Snatch/grab notifier flags are not reused.
+- c58a06a: Settings → About now has an **Updates** group: turn automatic release checks on or off, choose whether to announce releases through enabled notifiers, see why update status looks quiet (including air-gapped or rate-limited installs), and run **Check now** even when automatic checks are off.
+- 4bd5691: When an update is available, the sidebar version pill shows a quiet status dot. Opening it compares your install to the latest release, loads What’s new from the shared notes pipeline, and offers install-type **How to update** steps plus a Release link — without applying the update in-app.
+
 ## 0.21.0
 
 ### Minor Changes
