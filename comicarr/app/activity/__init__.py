@@ -7,8 +7,9 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-"""Activity Center domain — narrative timeline, attention band, open-work reads.
+"""Activity Center domain — narrative timeline, attention band, open-work reads,
+and age-based retention of activity_events.
 
-Write facade, producers, retention, and UI land in sibling issues. This package
-owns query-backed HTTP reads only (#485).
+Query-backed HTTP reads (#485); daily 90-day purge (#489). Write facade,
+producers, and UI land in sibling issues.
 """
