@@ -532,6 +532,7 @@ def checkGithub(current_version=None):
     try:
         payload = response.json()
         latest_version = _strip_leading_v(payload.get("tag_name"))
+        release_body = payload.get("body")
     except Exception as e:
         logger.warn("[CHECK_GITHUB] Could not parse GitHub releases/latest response: %s" % e)
         return _apply_update_state(
@@ -559,6 +560,16 @@ def checkGithub(current_version=None):
             latest_version=latest_version,
             message="Could not compare release versions",
         )
+
+    # Cache the release body already returned by this check so behind-popover
+    # notes can reuse it without a second notes network call (issue #472).
+    from comicarr.changelog_notes import set_cached_release_body
+
+    if update_state == UPDATE_STATE_BEHIND and release_body:
+        set_cached_release_body(latest_version, release_body)
+    else:
+        # Current/empty: local CHANGELOG covers installed notes; drop stale body.
+        set_cached_release_body(None, None)
 
     if update_state == UPDATE_STATE_BEHIND:
         chk_message = "New version is available. Latest release is %s (running %s)" % (

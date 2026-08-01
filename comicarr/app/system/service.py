@@ -537,6 +537,17 @@ def get_version_info(ctx):
     }
 
 
+def get_release_notes(ctx, after, through):
+    """Return structured release-note sections for ``(after, through]``.
+
+    Mechanical transform of local CHANGELOG.md (and optional cached remote
+    body when the operator is behind). See ``comicarr.changelog_notes``.
+    """
+    from comicarr.changelog_notes import get_release_notes as _get_notes
+
+    return _get_notes(ctx, after=after, through=through)
+
+
 def get_build_identity(ctx):
     """Return deploy identity without treating runtime fallbacks as verified."""
     declared_build_id = (os.environ.get("COMICARR_BUILD_ID") or "").strip() or None
