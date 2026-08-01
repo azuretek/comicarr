@@ -738,7 +738,8 @@ pipeline_journal = Table(
     Column("stage_rank", Integer, nullable=False),  # derived from stage; drives the monotonic guard
     Column("payload_json", Text),  # reconstruct the SNATCHED_QUEUE/PP_QUEUE item
     Column("fail_reason", Text),  # nullable
-    Column("updated_date", Text, nullable=False),
+    # MYSQL_KEY_TEXT: retention index (stage, updated_date) must stay portable.
+    Column("updated_date", MYSQL_KEY_TEXT, nullable=False),
     # Reserved-nullable (R9) — unpopulated now:
     Column("status", Text),
     Column("retry_count", Integer),
@@ -1065,10 +1066,26 @@ Index("failed_issueid", failed.c.IssueID)
 Index("upcoming_issuedate", upcoming.c.IssueDate)
 Index("upcoming_issueid", upcoming.c.IssueID)
 Index("pipeline_journal_stage", pipeline_journal.c.stage)
+# Retention eligibility + age predicates (see #478). Keep pipeline_journal_stage.
+Index(
+    "pipeline_journal_stage_updated",
+    pipeline_journal.c.stage,
+    pipeline_journal.c.updated_date,
+)
 Index("issues_acquisition_intent", issues.c.AcquisitionIntent)
 Index("annuals_acquisition_intent", annuals.c.AcquisitionIntent)
 Index("acquisition_runs_state", acquisition_runs.c.completion_state)
+Index(
+    "acquisition_runs_completion_completed_at",
+    acquisition_runs.c.completion_state,
+    acquisition_runs.c.completed_at,
+)
 Index("acquisition_run_items_run_state", acquisition_run_items.c.run_id, acquisition_run_items.c.state)
+Index(
+    "acquisition_run_items_state_completed_at",
+    acquisition_run_items.c.state,
+    acquisition_run_items.c.completed_at,
+)
 Index(
     "acquisition_run_items_entity",
     acquisition_run_items.c.command_kind,
@@ -1086,6 +1103,10 @@ Index(
     acquisition_maintenance_leases.c.epoch,
 )
 Index("acquisition_maintenance_events_epoch", acquisition_maintenance_events.c.epoch)
+Index(
+    "acquisition_maintenance_events_created_at",
+    acquisition_maintenance_events.c.created_at,
+)
 Index("acq_repair_runs_state", acquisition_repair_runs.c.state)
 Index("acq_repair_manifest_run", acquisition_repair_manifests.c.run_id)
 Index(
