@@ -379,6 +379,22 @@ export const handlers = [
     return HttpResponse.json({ sections: [] });
   }),
 
+  http.get("/api/system/whats-new/archive", () => {
+    return HttpResponse.json({
+      sections: [],
+      pending: null,
+      current: "1.0.0",
+      last_seen: "1.0.0",
+    });
+  }),
+
+  http.post("/api/system/whats-new/dismiss", () => {
+    return HttpResponse.json({
+      success: true,
+      last_seen_version: "1.0.0",
+    });
+  }),
+
   http.post("/api/system/version/check", () => {
     return HttpResponse.json({
       current_version: "1.0.0",

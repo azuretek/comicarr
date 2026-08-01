@@ -18,6 +18,14 @@ export function formatUnknownUpdateReason(reason: UpdateReason): string {
   return UNKNOWN_REASON_COPY[reason] ?? "Update status is unavailable";
 }
 
+/** Open-closed pending range ends for post-upgrade What's New (#474). */
+export interface PendingWhatsNew {
+  /** Exclusive lower bound (LAST_SEEN_VERSION). */
+  from: string;
+  /** Inclusive upper bound (current release). */
+  to: string;
+}
+
 export interface VersionInfo {
   current_version?: string | null;
   latest_version?: string | null;
@@ -26,6 +34,8 @@ export interface VersionInfo {
   update_reason?: UpdateReason;
   install_type?: string | null;
   message?: string | null;
+  /** When set, show the post-upgrade modal / unread archive state. */
+  pending_whats_new?: PendingWhatsNew | null;
 }
 
 /** One-line diagnostic for the Updates group (not a second badge). */

@@ -5,6 +5,7 @@ import AppSidebar from "@/components/layout/AppSidebar";
 import AppStatusBar from "@/components/layout/AppStatusBar";
 import { useAiStatus } from "@/hooks/useAiStatus";
 import { ActivityFeedDrawer } from "@/components/ai/ActivityFeedDrawer";
+import WhatsNewModal from "@/components/whats-new/WhatsNewModal";
 import { Bell } from "lucide-react";
 import { isMockEnabled } from "@/lib/mockData";
 
@@ -101,6 +102,8 @@ export default function Layout({ children }: LayoutProps) {
       </main>
 
       <ActivityFeedDrawer open={activityOpen} onOpenChange={setActivityOpen} />
+      {/* Post-upgrade What's New — only when pending_whats_new is set (#474). */}
+      <WhatsNewModal />
     </SidebarProvider>
   );
 }

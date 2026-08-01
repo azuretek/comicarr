@@ -525,6 +525,12 @@ def get_version_info(ctx):
         update_reason = None
     elif update_reason is None:
         update_reason = "never_checked"
+    from comicarr.app.system.whats_new import resolve_pending_whats_new
+
+    # Seed LAST_SEEN_VERSION when absent (fresh install / first boot after
+    # feature); may write once. Pending compare itself is read-only.
+    pending_whats_new = resolve_pending_whats_new(ctx)
+
     return {
         "current_version": ctx.current_version,
         "current_version_name": ctx.current_version_name,
@@ -536,6 +542,7 @@ def get_version_info(ctx):
         "install_type": ctx.install_type,
         "current_branch": ctx.current_branch,
         "build": get_build_identity(ctx),
+        "pending_whats_new": pending_whats_new,
     }
 
 
@@ -548,6 +555,20 @@ def get_release_notes(ctx, after, through):
     from comicarr.changelog_notes import get_release_notes as _get_notes
 
     return _get_notes(ctx, after=after, through=through)
+
+
+def dismiss_whats_new(ctx):
+    """Acknowledge What's New — write LAST_SEEN_VERSION = current."""
+    from comicarr.app.system.whats_new import dismiss_whats_new as _dismiss
+
+    return _dismiss(ctx)
+
+
+def get_whats_new_archive(ctx):
+    """Settings → About archive: floored/padded sections + pending range."""
+    from comicarr.app.system.whats_new import get_archive_notes
+
+    return get_archive_notes(ctx)
 
 
 def force_version_check(ctx):

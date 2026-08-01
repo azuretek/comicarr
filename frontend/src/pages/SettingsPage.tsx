@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useConfig, useUpdateConfig } from "@/hooks/useConfig";
 import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -48,12 +49,48 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "about", label: "About" },
 ];
 
+const SECTION_IDS = new Set(SECTIONS.map((s) => s.id));
+
+function parseSectionParam(raw: string | null): SectionId | null {
+  if (!raw) return null;
+  return SECTION_IDS.has(raw as SectionId) ? (raw as SectionId) : null;
+}
+
 export default function SettingsPage() {
   const { data: config, isLoading, error } = useConfig();
   const updateConfigMutation = useUpdateConfig();
   const { addToast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const [section, setSection] = useState<SectionId>("general");
+  const sectionFromUrl = parseSectionParam(searchParams.get("section"));
+  const [section, setSectionState] = useState<SectionId>(
+    () => sectionFromUrl ?? "general",
+  );
+
+  // Honour ?section=about (modal overflow → archive) without losing local nav.
+  useEffect(() => {
+    if (sectionFromUrl && sectionFromUrl !== section) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- URL is the source of truth for deep links
+      setSectionState(sectionFromUrl);
+    }
+  }, [sectionFromUrl, section]);
+
+  const setSection = (id: SectionId) => {
+    setSectionState(id);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (id === "general") {
+          next.delete("section");
+        } else {
+          next.set("section", id);
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  };
+
   const [formData, setFormData] = useState<SettingsFormData>({});
   const [originalData, setOriginalData] = useState<SettingsFormData>({});
   const [regeneratedApiKey, setRegeneratedApiKey] = useState<string | null>(

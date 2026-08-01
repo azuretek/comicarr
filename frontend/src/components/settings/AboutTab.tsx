@@ -5,6 +5,7 @@ import { useToast } from "@/components/ui/toast";
 import { useForceVersionCheck, useVersionInfo } from "@/hooks/useVersion";
 import { formatAppVersion } from "@/lib/version";
 import { formatUpdateDiagnostic } from "@/lib/updateStatus";
+import WhatsNewArchive from "@/components/whats-new/WhatsNewArchive";
 import type { Config } from "@/types";
 import type {
   SettingsFormData,
@@ -108,14 +109,9 @@ export function AboutTab({ config, formData, onChange }: AboutTabProps) {
 
       <SettingGroup
         title="What's new"
-        description="Release notes for this install will appear here."
+        description="Release notes for this install, newest first."
       >
-        <div
-          className="rounded-lg border px-3 py-3 text-[12.5px] text-muted-foreground"
-          style={{ borderColor: "var(--border)", background: "var(--card)" }}
-        >
-          Release history is not available in this build yet.
-        </div>
+        <WhatsNewArchive />
       </SettingGroup>
 
       <SettingGroup
