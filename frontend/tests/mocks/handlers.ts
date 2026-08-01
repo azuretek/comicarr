@@ -371,7 +371,12 @@ export const handlers = [
       release_version: "1.0.0",
       update_state: "current",
       update_reason: null,
+      install_type: "docker",
     });
+  }),
+
+  http.get("/api/system/release-notes", () => {
+    return HttpResponse.json({ sections: [] });
   }),
 
   http.get("/api/system/diagnostics", () => {

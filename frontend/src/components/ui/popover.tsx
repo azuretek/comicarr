@@ -31,7 +31,12 @@ const PopoverContent = React.forwardRef<
   > &
     Pick<
       PopoverPrimitive.Positioner.Props,
-      "side" | "sideOffset" | "align" | "alignOffset"
+      | "side"
+      | "sideOffset"
+      | "align"
+      | "alignOffset"
+      | "positionMethod"
+      | "collisionPadding"
     >
 >(
   (
@@ -41,6 +46,8 @@ const PopoverContent = React.forwardRef<
       sideOffset = 4,
       side,
       alignOffset,
+      positionMethod,
+      collisionPadding,
       ...props
     },
     ref,
@@ -51,6 +58,8 @@ const PopoverContent = React.forwardRef<
         align={align}
         sideOffset={sideOffset}
         alignOffset={alignOffset}
+        positionMethod={positionMethod}
+        collisionPadding={collisionPadding}
       >
         <PopoverPrimitive.Popup
           ref={ref}
