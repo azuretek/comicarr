@@ -21,7 +21,156 @@ const queueItem = {
   submit_date: "2026-07-10 08:35",
 };
 
+function emptyTimelineHandlers() {
+  return [
+    http.get("/api/activity/timeline", () =>
+      HttpResponse.json({
+        results: [],
+        total: 0,
+        limit: 100,
+        offset: 0,
+        has_more: false,
+      }),
+    ),
+    http.get("/api/activity/band", () =>
+      HttpResponse.json({ results: [], total: 0 }),
+    ),
+  ];
+}
+
 describe("ActivityPage", () => {
+  it("defaults to the Timeline tab and renames Queue / History", async () => {
+    server.use(...emptyTimelineHandlers());
+    render(<ActivityPage />, { route: "/activity", useMemoryRouter: true });
+
+    expect(await screen.findByText("Nothing has happened yet")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Timeline" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Direct Downloads" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Download History" }),
+    ).toBeTruthy();
+    // Queue-specific chrome must not be the default landing surface.
+    expect(
+      screen.queryByRole("textbox", { name: "Filter queue activity" }),
+    ).toBeNull();
+  });
+
+  it("renders Variant A timeline rows, band actions, and scoped query params", async () => {
+    let timelineUrl: URL | undefined;
+    let bandUrl: URL | undefined;
+    const resolveCalls: string[] = [];
+
+    server.use(
+      http.get("/api/activity/timeline", ({ request }) => {
+        timelineUrl = new URL(request.url);
+        return HttpResponse.json({
+          results: [
+            {
+              event_id: 1,
+              created_at: "2026-07-10 10:00:00",
+              activity: "grab",
+              status: "succeeded",
+              subject_type: "issue",
+              subject_id: "iss-1",
+              subject_label: "Saga #1",
+              parent_series_id: "ser-1",
+              provider: "DDL",
+            },
+            {
+              event_id: 2,
+              created_at: "2026-07-10 10:05:00",
+              activity: "import",
+              status: "succeeded",
+              subject_type: "issue",
+              subject_id: "iss-1",
+              subject_label: "Saga #1",
+              parent_series_id: "ser-1",
+            },
+            {
+              event_id: 3,
+              created_at: "2026-07-10 11:00:00",
+              activity: "add",
+              status: "succeeded",
+              subject_type: "series",
+              subject_id: "ser-2",
+              subject_label: "Invincible",
+            },
+          ],
+          total: 3,
+          limit: 100,
+          offset: 0,
+          has_more: false,
+        });
+      }),
+      http.get("/api/activity/band", ({ request }) => {
+        bandUrl = new URL(request.url);
+        return HttpResponse.json({
+          results: [
+            {
+              release_key: "rk-failed-1",
+              stage: "failed",
+              issueid: "iss-9",
+              nzbname: "Broken.cbz",
+              fail_reason: "download_failed",
+              updated_date: "2026-07-10 12:00:00",
+              status: null,
+            },
+          ],
+          total: 1,
+        });
+      }),
+      http.post(
+        "/api/downloads/needs-attention/:releaseKey/retry",
+        ({ params }) => {
+          resolveCalls.push(String(params.releaseKey));
+          return HttpResponse.json({
+            success: true,
+            status: "retried",
+            action: "retry",
+            release_key: params.releaseKey,
+          });
+        },
+      ),
+    );
+
+    const user = userEvent.setup();
+    render(<ActivityPage />, {
+      route: "/activity?scope_type=series&scope_id=ser-1",
+      useMemoryRouter: true,
+    });
+
+    // Multi-event story collapses to the closer sentence (inline entity link).
+    expect(
+      await screen.findByText((_content, node) => {
+        const text = node?.textContent ?? "";
+        return (
+          node?.tagName === "SPAN" &&
+          text.includes("Imported") &&
+          text.includes("Saga #1")
+        );
+      }),
+    ).toBeTruthy();
+    // Group-of-one plain row for the series add.
+    expect(screen.getByRole("link", { name: "Invincible" })).toBeTruthy();
+    expect(screen.getByText(/Added/)).toBeTruthy();
+    // Always-collapsed multi-event story: no phase trail expansion chrome.
+    expect(screen.queryByRole("button", { name: /^2$/ })).toBeNull();
+
+    expect(timelineUrl?.searchParams.get("scope_type")).toBe("series");
+    expect(timelineUrl?.searchParams.get("scope_id")).toBe("ser-1");
+    expect(bandUrl?.searchParams.get("scope_type")).toBe("series");
+    expect(bandUrl?.searchParams.get("scope_id")).toBe("ser-1");
+
+    expect(screen.getByLabelText("Needs attention")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "retry" }));
+    await waitFor(() => {
+      expect(resolveCalls).toEqual(["rk-failed-1"]);
+    });
+    expect(await screen.findByText(/Retry started/)).toBeTruthy();
+  });
+
   it("labels terminal and manual-review queue rows truthfully and only retries failed DDL work after confirmation", async () => {
     const queueRows = [
       {
@@ -65,7 +214,10 @@ describe("ActivityPage", () => {
       }),
     );
     const user = userEvent.setup();
-    render(<ActivityPage />, { route: "/activity", useMemoryRouter: true });
+    render(<ActivityPage />, {
+      route: "/activity?view=queue",
+      useMemoryRouter: true,
+    });
 
     await screen.findByText("Failed Series");
     expect(screen.getByLabelText(/failed: terminal/i)).toBeTruthy();
@@ -118,7 +270,10 @@ describe("ActivityPage", () => {
     );
 
     const user = userEvent.setup();
-    render(<ActivityPage />, { route: "/activity", useMemoryRouter: true });
+    render(<ActivityPage />, {
+      route: "/activity?view=queue",
+      useMemoryRouter: true,
+    });
     await screen.findByText("Absolute Flash");
 
     await user.click(screen.getByRole("button", { name: "Next" }));
@@ -169,7 +324,10 @@ describe("ActivityPage", () => {
     );
 
     const user = userEvent.setup();
-    render(<ActivityPage />, { route: "/activity", useMemoryRouter: true });
+    render(<ActivityPage />, {
+      route: "/activity?view=queue",
+      useMemoryRouter: true,
+    });
 
     await screen.findByText("Absolute Flash");
     await user.type(
