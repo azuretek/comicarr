@@ -271,7 +271,8 @@ CURRENT_VERSION = None
 CURRENT_VERSION_NAME = None
 CURRENT_RELEASE_NAME = None
 LATEST_VERSION = None
-COMMITS_BEHIND = None
+UPDATE_STATE = "unknown"
+UPDATE_REASON = "never_checked"
 LOCAL_IP = None
 DOWNLOAD_APIKEY = None
 APILOCK = ThreadSafeLock()
@@ -377,7 +378,8 @@ def initialize(config_file):
             MAINTENANCE, \
             CURRENT_VERSION, \
             LATEST_VERSION, \
-            COMMITS_BEHIND, \
+            UPDATE_STATE, \
+            UPDATE_REASON, \
             INSTALL_TYPE, \
             IMPORTLOCK, \
             PULLBYFILE, \

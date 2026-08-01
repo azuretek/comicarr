@@ -63,6 +63,18 @@ def _provider_entry_is_structurally_valid(entry):
     return True
 
 
+def apply_check_github_v16_migration(old_version, check_github):
+    """CONFIG_VERSION 15 → 16: rewrite CHECK_GITHUB False to True only.
+
+    Existing installs that still have automatic release checks off are turned
+    on. Values already True are left alone. Operators can still opt out after
+    the upgrade via config.ini.
+    """
+    if old_version < 16 and check_github is False:
+        return True
+    return check_github
+
+
 def parse_provider_extras(value, config_version=15):
     """Parse provider extras without assuming one historical tuple width."""
     if value in (None, "", "None"):
@@ -240,7 +252,7 @@ class Config(object):
                 count = 0
 
             # this is the current version at this particular point in time.
-            self.newconfig = 15
+            self.newconfig = 16
 
             OLDCONFIG_VERSION = 0
             if count == 0:
@@ -454,6 +466,21 @@ class Config(object):
                 # 12-ddl seperation into multiple providers, new keys, update tables
                 # 13-remove dognzb and nzbsu as independent options (throw them under newznabs if present)
                 self.config_update()
+            # 16 — default-on GitHub release checks for existing installs (#470)
+            if self.CONFIG_VERSION < 16:
+                migrated = apply_check_github_v16_migration(self.CONFIG_VERSION, self.CHECK_GITHUB)
+                if migrated is not self.CHECK_GITHUB:
+                    self.CHECK_GITHUB = migrated
+                    try:
+                        config.set("Git", "check_github", str(self.CHECK_GITHUB))
+                    except configparser.NoSectionError:
+                        config.add_section("Git")
+                        config.set("Git", "check_github", str(self.CHECK_GITHUB))
+                    logger.info(
+                        "[CONFIG] CHECK_GITHUB defaulted on (config v16). "
+                        "Comicarr contacts GitHub every 6 hours for release checks; "
+                        "set check_github = False in config.ini to opt out."
+                    )
             self.OLDCONFIG_VERSION = str(self.CONFIG_VERSION)
             self.CONFIG_VERSION = self.newconfig
             config.set("General", "CONFIG_VERSION", str(self.newconfig))

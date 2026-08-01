@@ -200,15 +200,12 @@ class carePackage(object):
             git_branch = git_tmp["git_branch"]
             git_token = git_tmp["git_token"]
             self.git_path = git_tmp["git_path"]
-            auto_update = False
-            check_github_on_startup = False
             self.pass_thru_vals = {
                 "git_user": git_user,
                 "git_branch": git_branch,
                 "git_token": git_token,
                 "git_path": self.git_path,
-                "auto_update": auto_update,
-                "check_github_on_startup": check_github_on_startup,
+                "check_github": False,
             }
         else:
             self.log_dir = comicarr.CONFIG.LOG_DIR

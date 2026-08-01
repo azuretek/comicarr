@@ -366,9 +366,12 @@ export const handlers = [
 
   http.get("/api/system/version", () => {
     return HttpResponse.json({
-      current_version: "1.0.0",
+      current_version: "aaaaaaa",
       latest_version: "1.0.0",
-      commits_behind: 0,
+      release_version: "1.0.0",
+      update_state: "current",
+      update_reason: null,
+      install_type: "git",
     });
   }),
 

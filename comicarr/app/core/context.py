@@ -164,7 +164,11 @@ class AppContext:
     current_version_name: str = None
     current_release_name: str = None
     latest_version: str = None
-    commits_behind: int = None
+    # Update availability against the Changesets semver line (not git commits).
+    # update_state: "behind" | "current" | "unknown"
+    # update_reason (when unknown): "never_checked" | "unreachable" | "rate_limited"
+    update_state: str = "unknown"
+    update_reason: str = "never_checked"
     install_type: str = None
     current_branch: str = None
 
