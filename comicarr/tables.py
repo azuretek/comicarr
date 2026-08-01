@@ -717,6 +717,33 @@ ai_chat_attachments = Table(
 )
 
 # ---------------------------------------------------------------------------
+# activity_events
+# ---------------------------------------------------------------------------
+# Append-only Activity Center narrative rows (Activity Center ADR).
+# Derived live state stays on acquisition_runs / acquisition_run_items /
+# pipeline_journal; this table only stores timestamped history the ledgers
+# cannot express. Writers, APIs, and retention land in later issues.
+activity_events = Table(
+    "activity_events",
+    metadata,
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column("created_at", String(40), nullable=False),
+    Column("activity", String(32), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("subject_type", String(32), nullable=False),
+    Column("subject_id", String(255), nullable=False),
+    Column("subject_label", Text, nullable=False),
+    Column("reason_code", String(64)),
+    Column("reason_detail", Text),
+    Column("provider", String(64)),
+    Column("run_id", String(64)),
+    Column("release_key", String(255)),
+    Column("parent_series_id", String(255)),
+    Column("scope_type", String(32)),
+    Column("scope_id", String(255)),
+)
+
+# ---------------------------------------------------------------------------
 # pipeline_journal
 # ---------------------------------------------------------------------------
 # Durable, forward-only transition record for the snatch -> download ->
@@ -1066,6 +1093,13 @@ Index("upcoming_issuedate", upcoming.c.IssueDate)
 Index("upcoming_issueid", upcoming.c.IssueID)
 Index("pipeline_journal_stage", pipeline_journal.c.stage)
 Index("pipeline_journal_stage_updated", pipeline_journal.c.stage, pipeline_journal.c.updated_date)
+Index("activity_events_created_at", activity_events.c.created_at)
+Index("activity_events_parent_series_id", activity_events.c.parent_series_id)
+Index(
+    "activity_events_subject",
+    activity_events.c.subject_type,
+    activity_events.c.subject_id,
+)
 Index("issues_acquisition_intent", issues.c.AcquisitionIntent)
 Index("annuals_acquisition_intent", annuals.c.AcquisitionIntent)
 Index("acquisition_runs_state", acquisition_runs.c.completion_state)
@@ -1167,6 +1201,7 @@ TABLE_MAP = {
     "ai_chat_threads": ai_chat_threads,
     "ai_chat_messages": ai_chat_messages,
     "ai_chat_attachments": ai_chat_attachments,
+    "activity_events": activity_events,
     "pipeline_journal": pipeline_journal,
     "acquisition_schema_versions": acquisition_schema_versions,
     "acquisition_runs": acquisition_runs,
