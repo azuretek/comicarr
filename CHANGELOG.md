@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.0
+
+### Minor Changes
+
+- cc88c15: Activity now opens on a Timeline tab (with Direct Downloads and Download History beside it). A pinned needs-attention band shows actionable failures above a ledger-style feed of plain-language stories, and series/issue detail pages deep-link into a scoped Activity view.
+- e6e12af: The bottom status bar now shows quiet activity counts (`M in flight`, optional `⚠ K need attention`, or `idle`) instead of the old DDL `queue: N active` line. Click the activity text to open Activity.
+- 690acb9: After an upgrade, Comicarr shows a What's New modal once until you acknowledge it, and keeps a permanent What's new history under Settings → About.
+
 ## 0.22.0
 
 ### Minor Changes
