@@ -723,7 +723,8 @@ ai_chat_attachments = Table(
 # Derived live state stays on acquisition_runs / acquisition_run_items /
 # pipeline_journal; this table only stores timestamped history the ledgers
 # cannot express. Retention: comicarr.app.activity.retention (90-day age purge).
-# Read APIs live under comicarr.app.activity; writers land in later issues.
+# Read APIs live under comicarr.app.activity; sole writer is
+# comicarr.app.activity.events.record_activity (#479).
 activity_events = Table(
     "activity_events",
     metadata,

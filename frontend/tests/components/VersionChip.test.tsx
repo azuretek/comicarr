@@ -29,22 +29,25 @@ describe("VersionChip", () => {
   });
 
   it("shows quiet-dot cue when behind and opens popover", async () => {
+    // latest_version must differ from package APP_VERSION (currently 0.22.0)
+    // so the pill label and popover target do not both match the same text.
+    const latestVersion = "0.99.0";
     server.use(
       http.get("/api/system/version", () =>
         HttpResponse.json({
           update_state: "behind",
-          latest_version: "0.22.0",
+          latest_version: latestVersion,
           release_version: "0.21.0",
           install_type: "docker",
         }),
       ),
       http.get("/api/system/release-notes", ({ request }) => {
         const url = new URL(request.url);
-        expect(url.searchParams.get("through")).toBe("0.22.0");
+        expect(url.searchParams.get("through")).toBe(latestVersion);
         return HttpResponse.json({
           sections: [
             {
-              version: "0.22.0",
+              version: latestVersion,
               bullets: ["Brand new remote release note."],
             },
           ],
@@ -61,14 +64,14 @@ describe("VersionChip", () => {
     await user.click(pill);
 
     expect(await screen.findByText("Update available")).toBeTruthy();
-    expect(await screen.findByText("0.22.0")).toBeTruthy();
+    expect(await screen.findByText(latestVersion)).toBeTruthy();
     expect(
       await screen.findByText(/Brand new remote release note/),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: /How to update/i })).toBeTruthy();
     const release = screen.getByRole("link", { name: /Release/i });
     expect(release.getAttribute("href")).toBe(
-      "https://github.com/frankieramirez/comicarr/releases/tag/v0.22.0",
+      `https://github.com/frankieramirez/comicarr/releases/tag/v${latestVersion}`,
     );
   });
 
@@ -110,7 +113,7 @@ describe("VersionChip", () => {
       http.get("/api/system/version", () =>
         HttpResponse.json({
           update_state: "behind",
-          latest_version: "0.22.0",
+          latest_version: "0.99.0",
           install_type: "docker",
         }),
       ),
