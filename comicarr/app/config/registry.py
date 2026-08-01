@@ -276,6 +276,9 @@ _KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("ANNOUNCE_RELEASES", bool, "Git", False, readable=True, writable=True),
     # Install-wide dedup for outbound release announces; not a Settings field.
     ConfigKey("LAST_ANNOUNCED_VERSION", str, "Git", None),
+    # Install-wide What's New acknowledgement (#449 / #474); not Settings-writable.
+    # Written only by seed (key absent) and dismiss (Got it / Mark as read).
+    ConfigKey("LAST_SEEN_VERSION", str, "Git", None),
     ConfigKey("ENFORCE_PERMS", bool, "Perms", False),
     ConfigKey("CHMOD_DIR", str, "Perms", "0777"),
     ConfigKey("CHMOD_FILE", str, "Perms", "0660"),

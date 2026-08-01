@@ -39,7 +39,7 @@ def test_last_announced_version_is_install_wide_and_separate_from_settings():
     assert REGISTRY["LAST_ANNOUNCED_VERSION"].readable is False
     assert REGISTRY["LAST_ANNOUNCED_VERSION"].writable is False
     assert REGISTRY["LAST_ANNOUNCED_VERSION"].section == "Git"
-    assert "LAST_SEEN_VERSION" not in REGISTRY
+    # LAST_SEEN_VERSION is owned by What's New (#474), not announce dedup.
 
 
 class TestShouldAnnounceRelease:

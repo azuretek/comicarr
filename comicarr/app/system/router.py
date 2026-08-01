@@ -304,6 +304,30 @@ def get_release_notes(
     return system_service.get_release_notes(ctx, after=after, through=through)
 
 
+@router.get("/system/whats-new/archive", dependencies=[Depends(require_session)])
+def get_whats_new_archive(ctx: AppContext = Depends(get_context)):
+    """Permanent Settings → About What's new archive.
+
+    Sections are newest-first, floored at the pending range when unread so
+    modal overflow is never shorter than this list, and padded toward ~10
+    historical rows when quiet (#451 / #474).
+    """
+    return system_service.get_whats_new_archive(ctx)
+
+
+@router.post("/system/whats-new/dismiss", dependencies=[Depends(require_session)])
+def dismiss_whats_new(ctx: AppContext = Depends(get_context)):
+    """Acknowledge post-upgrade notes — LAST_SEEN_VERSION = current.
+
+    Used by the modal "Got it" and About "Mark as read". Does not run on
+    overflow navigation alone.
+    """
+    result = system_service.dismiss_whats_new(ctx)
+    if not result.get("success"):
+        return JSONResponse(status_code=400, content=result)
+    return result
+
+
 @router.post("/system/version/check", dependencies=[Depends(require_session)])
 def check_version_now(ctx: AppContext = Depends(get_context)):
     """Force a single release check (ignores automatic-check off).

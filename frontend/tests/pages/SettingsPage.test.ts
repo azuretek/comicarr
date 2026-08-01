@@ -130,6 +130,15 @@ describe("SettingsPage", () => {
           latest_version: "0.22.0",
           update_state: "behind",
           update_reason: null,
+          pending_whats_new: null,
+        }),
+      ),
+      http.get("/api/system/whats-new/archive", () =>
+        HttpResponse.json({
+          sections: [{ version: "0.21.0", bullets: ["notes"] }],
+          pending: null,
+          current: "0.21.0",
+          last_seen: "0.21.0",
         }),
       ),
     );
@@ -148,7 +157,9 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("button", { name: "Check now" })).toBeTruthy();
     // Order: Updates before What's new before build rows.
     const updates = screen.getByText("Updates");
+    // SettingGroup title (exact); archive no longer duplicates an h2.
     const whatsNew = screen.getByText("What's new");
+    expect(await screen.findByTestId("whats-new-archive-summary")).toBeTruthy();
     const build = screen.getByText("Build / environment");
     expect(
       updates.compareDocumentPosition(whatsNew) &
