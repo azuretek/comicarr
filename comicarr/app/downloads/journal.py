@@ -80,7 +80,8 @@ OPEN_STAGES = (RESERVED, SNATCHED, DOWNLOADED, POST_PROCESSING, MOVED)
 BAND_STAGES = (FAILED, MANUAL_REVIEW)
 
 # R9 resolution stamps — written by operator actions (and FAILED_AUTO retry)
-# without rewriting stage / stage_rank. Rows with these statuses leave the band.
+# without rewriting stage / stage_rank. Rows with these statuses leave the band;
+# ledger retention may age them out with other eligible terminals (#480).
 STATUS_RETRIED = "retried"
 STATUS_IGNORED = "ignored"
 STATUS_IMPORTED = "imported"
