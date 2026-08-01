@@ -159,6 +159,28 @@ How it works:
 
 Version files (`package.json`, `pyproject.toml`, `frontend/package.json`, and lockfiles) are updated automatically — never edit versions by hand outside release automation.
 
+### Writing a changeset (operator-facing)
+
+Changeset summary text is copied into `CHANGELOG.md` and shown to operators in-app (What's New / update notes) with only a **mechanical** transform — strip commit hashes, drop bucket headings, flatten links. There is **no** editorial filter in the app. Write every entry as if an operator will read it after upgrading.
+
+| Do | Don't |
+|----|--------|
+| Outcome first: what the operator can see or do differently | Ticket-only or filename-only bullets (`Fix #123`, `Update search.py`) |
+| Name the UI surface or behaviour (`Settings → API`, Wanted filter, manual import) | Internals as the headline (`Make METRON_PASSWORD writable`, `Route through series_kind`) |
+| Skip the changeset when nothing an operator can observe changed | Ship a release whose only line is "No user-visible behaviour changes." |
+
+Examples:
+
+- **Good:** `The Metron Password field in Settings → API now actually saves.`
+- **Good:** `Wanted filtering now searches the full queue, not only the currently loaded page.`
+- **Bad:** `Make METRON_PASSWORD writable in the config registry.`
+- **Bad:** `No user-visible behaviour changes.` — omit the changeset instead; let the next operator-visible change carry the bump.
+
+When to add one:
+
+- **Add a changeset** when an *operator* could notice a change (UI, settings behaviour, downloads, migration outcomes, defaults that affect running installs).
+- **Omit the changeset** for pure internal restructuring with verified-identical behaviour, tooling/CI-only work, docs, or contributor-only gates (lint rules, types). CI treats a missing changeset as an allowed warning.
+
 ## Reporting Issues
 
 - Use the [Bug Report](https://github.com/frankieramirez/comicarr/issues/new?template=bug_report.md) template
