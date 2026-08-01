@@ -23,7 +23,16 @@ function renderWantedWithForceResult(result: Record<string, unknown>) {
   return render(<WantedPage />);
 }
 
-function sagaIssue(id: string, number: string) {
+function sagaIssue(
+  id: string,
+  number: string,
+  acquisition?: {
+    state: string | null;
+    attempt_count: number;
+    reason?: string | null;
+    run_id?: string | null;
+  } | null,
+) {
   return {
     IssueID: id,
     ComicID: "comic-saga",
@@ -32,6 +41,7 @@ function sagaIssue(id: string, number: string) {
     IssueDate: "2020-01-01",
     Status: "Wanted",
     DateAdded: "2026-01-01",
+    acquisition: acquisition === undefined ? null : acquisition,
   };
 }
 
@@ -148,6 +158,48 @@ describe("WantedPage", () => {
         "Search accepted — 3 wanted issues queued. Run run-123.",
       ),
     ).toBeNull();
+  });
+
+  /**
+   * #490: Wanted rows show live-sticky acquisition copy from the latest run
+   * item — never searched / searching… / no match · N tries — without a
+   * countdown or progress percent.
+   */
+  it("renders live-sticky acquisition annotations from the API payload", async () => {
+    server.use(
+      http.get("/api/wanted", () =>
+        HttpResponse.json({
+          issues: [
+            sagaIssue("saga-never", "1", null),
+            sagaIssue("saga-live", "2", {
+              state: "running",
+              attempt_count: 1,
+              run_id: "run-live",
+            }),
+            sagaIssue("saga-sticky", "3", {
+              state: "no_match",
+              attempt_count: 3,
+              run_id: "run-old",
+              reason: "providers empty",
+            }),
+          ],
+          pagination: {
+            total: 3,
+            limit: 50,
+            offset: 0,
+            has_more: false,
+          },
+        }),
+      ),
+    );
+
+    render(<WantedPage />);
+
+    expect(await screen.findByText("never searched")).toBeTruthy();
+    expect(screen.getByText("searching…")).toBeTruthy();
+    expect(screen.getByText("no match · 3 tries")).toBeTruthy();
+    expect(screen.queryByText(/retry/i)).toBeNull();
+    expect(screen.queryByText(/%/)).toBeNull();
   });
 
   /**

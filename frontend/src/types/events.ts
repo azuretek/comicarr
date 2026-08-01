@@ -26,13 +26,6 @@ export interface ConfigCheckEventData extends SSEEventData {
   config_errors?: string[];
 }
 
-/** check_update event data */
-export interface CheckUpdateEventData extends SSEEventData {
-  commits_behind: string | number;
-  current_version?: string;
-  latest_version?: string;
-}
-
 /** search_progress event data */
 export interface SearchProgressEventData extends SSEEventData {
   current?: number;

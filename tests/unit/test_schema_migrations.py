@@ -196,8 +196,8 @@ def test_upgrade_database_accepts_a_known_prior_comicarr_revision(tmp_path):
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
         conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0001_baseline')"))
 
-    assert upgrade_database(engine) == "0004_activity_events"
-    assert current_revision(engine) == "0004_activity_events"
+    assert upgrade_database(engine) == "0005_activity_events"
+    assert current_revision(engine) == "0005_activity_events"
 
 
 def test_upgrade_database_accepts_pre_chat_revision_without_library_chat_tables(tmp_path):
@@ -218,8 +218,8 @@ def test_upgrade_database_accepts_pre_chat_revision_without_library_chat_tables(
 
     assert "ai_chat_threads" not in set(inspect(engine).get_table_names())
     assert classify_database(engine) is DatabaseState.VERSIONED
-    assert upgrade_database(engine) == "0004_activity_events"
-    assert current_revision(engine) == "0004_activity_events"
+    assert upgrade_database(engine) == "0005_activity_events"
+    assert current_revision(engine) == "0005_activity_events"
     assert {"ai_chat_threads", "ai_chat_messages", "ai_chat_attachments"}.issubset(
         set(inspect(engine).get_table_names())
     )
@@ -241,7 +241,7 @@ def test_revision_0003_still_requires_library_chat_tables(tmp_path):
 
 
 def test_upgrade_database_accepts_pre_activity_revision_without_activity_events(tmp_path):
-    """Pre-#477 installs stamped at 0003 lack activity_events until 0004 runs."""
+    """Pre-#477 installs stamped at 0003 lack activity_events until 0005 runs."""
     engine = create_engine("sqlite:///%s" % (tmp_path / "pre-activity-version.db"))
     metadata.create_all(engine)
     with engine.begin() as conn:
@@ -252,8 +252,8 @@ def test_upgrade_database_accepts_pre_activity_revision_without_activity_events(
 
     assert "activity_events" not in set(inspect(engine).get_table_names())
     assert classify_database(engine) is DatabaseState.VERSIONED
-    assert upgrade_database(engine) == "0004_activity_events"
-    assert current_revision(engine) == "0004_activity_events"
+    assert upgrade_database(engine) == "0005_activity_events"
+    assert current_revision(engine) == "0005_activity_events"
     assert "activity_events" in set(inspect(engine).get_table_names())
 
     activity_indexes = {index["name"] for index in inspect(engine).get_indexes("activity_events")}
@@ -273,7 +273,7 @@ def test_head_revision_still_requires_activity_events(tmp_path):
         conn.execute(text("DROP TABLE activity_events"))
         conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
-        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0004_activity_events')"))
+        conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0005_activity_events')"))
 
     with pytest.raises(MigrationStateError, match="missing tables required by its Comicarr revision"):
         upgrade_database(engine)
@@ -320,10 +320,8 @@ def test_upgrade_creates_pipeline_journal_stage_index_when_missing(tmp_path):
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
         conn.execute(text("INSERT INTO alembic_version(version_num) VALUES ('0003_library_chat')"))
 
-    assert "pipeline_journal_stage" not in {
-        index["name"] for index in inspect(engine).get_indexes("pipeline_journal")
-    }
-    assert upgrade_database(engine) == "0004_activity_events"
+    assert "pipeline_journal_stage" not in {index["name"] for index in inspect(engine).get_indexes("pipeline_journal")}
+    assert upgrade_database(engine) == "0005_activity_events"
     assert "pipeline_journal_stage" in {index["name"] for index in inspect(engine).get_indexes("pipeline_journal")}
 
 
@@ -341,7 +339,7 @@ def test_upgrade_database_builds_a_fresh_database_to_the_single_head(tmp_path):
 
     revision = upgrade_database(engine)
 
-    assert revision == "0004_activity_events"
+    assert revision == "0005_activity_events"
     assert set(metadata.tables).issubset(set(inspect(engine).get_table_names()))
 
 
@@ -351,8 +349,8 @@ def test_upgrade_database_stamps_only_a_verified_legacy_database(tmp_path):
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO mylar_info(DatabaseVersion) VALUES (0)"))
 
-    assert upgrade_database(engine) == "0004_activity_events"
-    assert current_revision(engine) == "0004_activity_events"
+    assert upgrade_database(engine) == "0005_activity_events"
+    assert current_revision(engine) == "0005_activity_events"
 
 
 def test_upgrade_database_never_stamps_an_unknown_database(tmp_path):

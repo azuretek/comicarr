@@ -833,17 +833,50 @@ def search_all_missing(
     }
 
 
+def _attach_wanted_acquisition_annotations(rows):
+    """Stamp each Wanted row with its latest search run-item annotation.
+
+    Membership is unchanged (``Status == 'Wanted'``). Annotation is derived
+    solely from the latest ``acquisition_run_items`` search row for that
+    IssueID so closed runs stay sticky until a newer run supersedes them.
+    """
+    if not rows:
+        return rows
+    entity_ids = [row.get("IssueID") for row in rows if row.get("IssueID")]
+    latest = series_queries.get_latest_search_items_by_entity_ids(entity_ids)
+    for row in rows:
+        issue_id = row.get("IssueID")
+        item = latest.get(str(issue_id)) if issue_id is not None else None
+        if item is None:
+            row["acquisition"] = None
+            continue
+        row["acquisition"] = {
+            "state": item["state"],
+            "attempt_count": item["attempt_count"],
+            "reason": item["reason"],
+            "run_id": item["run_id"],
+            "entity_type": item["entity_type"],
+            "updated_at": item["updated_at"],
+            "completed_at": item["completed_at"],
+        }
+    return rows
+
+
 def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False, search=None):
     """Get all wanted issues, optionally with story arcs and annuals.
 
     ``search`` filters ComicName / Issue_Number before pagination so the
     returned rows and pagination metadata describe the same result set.
+
+    Each returned row also carries a live-and-sticky ``acquisition`` annotation
+    from the latest search run item for that IssueID (or ``null`` when never
+    searched). Membership filtering is unchanged.
     """
     # Issues
     if limit is not None:
         paginated = series_queries.get_wanted_issues(limit=limit, offset=offset, search=search)
         result = {
-            "issues": paginated["results"],
+            "issues": _attach_wanted_acquisition_annotations(paginated["results"]),
             "pagination": {
                 "total": paginated["total"],
                 "limit": paginated["limit"],
@@ -852,18 +885,20 @@ def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False, search=No
             },
         }
     else:
-        result = {"issues": series_queries.get_wanted_issues(search=search)}
+        result = {
+            "issues": _attach_wanted_acquisition_annotations(series_queries.get_wanted_issues(search=search)),
+        }
 
     # Story arcs
     if include_story_arcs:
         upcoming_storyarcs = getattr(ctx.config, "UPCOMING_STORYARCS", False) if ctx.config else False
         if upcoming_storyarcs:
-            result["story_arcs"] = series_queries.get_wanted_storyarc_issues()
+            result["story_arcs"] = _attach_wanted_acquisition_annotations(series_queries.get_wanted_storyarc_issues())
 
     # Annuals
     annuals_on = getattr(ctx.config, "ANNUALS_ON", False) if ctx.config else False
     if annuals_on:
-        result["annuals"] = series_queries.get_wanted_annuals()
+        result["annuals"] = _attach_wanted_acquisition_annotations(series_queries.get_wanted_annuals())
 
     return result
 

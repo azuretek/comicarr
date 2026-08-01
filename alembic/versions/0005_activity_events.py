@@ -9,16 +9,16 @@
 
 """Add activity_events narrative table and required Activity Center indexes.
 
-Revision ID: 0004_activity_events
-Revises: 0003_library_chat
+Revision ID: 0005_activity_events
+Revises: 0004_ledger_retention_indexes
 """
 
 import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0004_activity_events"
-down_revision = "0003_library_chat"
+revision = "0005_activity_events"
+down_revision = "0004_ledger_retention_indexes"
 branch_labels = None
 depends_on = None
 
