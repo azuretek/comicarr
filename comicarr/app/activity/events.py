@@ -17,9 +17,10 @@ Contract (Activity Center ADR §7 / #479):
 
 * When ``conn`` is supplied, the insert co-commits in the caller's transaction
   and this module does **not** publish. The caller publishes after their
-  commit succeeds (Core has no after-commit hook).
+  commit succeeds (Core has no after-commit hook). Insert failures propagate
+  so the caller can roll back the transaction they own.
 * When ``conn`` is omitted, this module owns a short transaction, commits, then
-  publishes best-effort.
+  publishes best-effort. Insert failures are logged and swallowed (``None``).
 * Journal-backed producers pass ``won`` from ``record_transition``; ``won=False``
   is a full no-op (no insert, no publish) so concurrent losers stay silent.
 * Illegal ``(activity, status, subject_type)`` cells and missing ``reason_code``
@@ -287,7 +288,9 @@ def record_activity(
     conn:
         Optional caller-owned SQLAlchemy connection. When provided, the insert
         joins that transaction and **publish is left to the caller** after their
-        commit (call :func:`publish_activity` with the returned payload).
+        commit (call :func:`publish_activity` with the returned payload). Insert
+        failures **propagate** on this path so the caller can roll back; only
+        the owned-transaction path (``conn=None``) swallows them.
     won:
         Journal-backed gate. Pass ``record_transition``'s return value. When
         False, this is a full no-op (no insert, no publish).
@@ -332,11 +335,13 @@ def record_activity(
     if created_at is not None:
         values["created_at"] = created_at
 
-    try:
-        if conn is not None:
-            # Co-commit: caller owns durability and post-commit publish.
-            return _insert_row(conn, values)
+    if conn is not None:
+        # Co-commit: caller owns the transaction, so a failed insert must
+        # surface. Swallowing it here would leave the caller's transaction
+        # poisoned and fail later at an unrelated statement or commit().
+        return _insert_row(conn, values)
 
+    try:
         engine = get_engine()
         with engine.begin() as owned_conn:
             payload = _insert_row(owned_conn, values)

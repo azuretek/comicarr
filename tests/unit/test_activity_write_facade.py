@@ -170,6 +170,62 @@ def test_record_activity_rolls_back_with_caller_transaction(activity_db, mock_ev
     mock_event_bus.publish_sync.assert_not_called()
 
 
+def test_record_activity_propagates_insert_failure_on_caller_conn(
+    activity_db, mock_event_bus, monkeypatch
+):
+    """Co-commit insert failures must reach the caller, not be swallowed.
+
+    The caller owns the transaction; a masked failure would poison it and
+    resurface as an unrelated error at their next statement or commit().
+    """
+    from comicarr.app.activity import events
+
+    def _boom(conn, values):
+        raise RuntimeError("insert exploded")
+
+    monkeypatch.setattr(events, "_insert_row", _boom)
+
+    with activity_db.begin() as conn:
+        with pytest.raises(RuntimeError, match="insert exploded"):
+            events.record_activity(
+                activity="grab",
+                status="succeeded",
+                subject_type="issue",
+                subject_id="iss-9",
+                subject_label="Saga #9",
+                provider="NZBGeek",
+                conn=conn,
+            )
+
+    assert _count_events(activity_db) == 0
+    mock_event_bus.publish_sync.assert_not_called()
+
+
+def test_record_activity_swallows_insert_failure_on_owned_transaction(
+    activity_db, mock_event_bus, monkeypatch
+):
+    """Owned-transaction path stays best-effort: it rolls back and returns None."""
+    from comicarr.app.activity import events
+
+    def _boom(conn, values):
+        raise RuntimeError("insert exploded")
+
+    monkeypatch.setattr(events, "_insert_row", _boom)
+
+    row = events.record_activity(
+        activity="grab",
+        status="succeeded",
+        subject_type="issue",
+        subject_id="iss-10",
+        subject_label="Saga #10",
+        provider="NZBGeek",
+    )
+
+    assert row is None
+    assert _count_events(activity_db) == 0
+    mock_event_bus.publish_sync.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Journal won gate
 # ---------------------------------------------------------------------------
