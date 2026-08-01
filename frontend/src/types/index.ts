@@ -68,16 +68,7 @@ export type {
 } from "./auth";
 
 // Event types
-export type {
-  SSEEventData,
-  AddByIdEventData,
-  SchedulerMessageEventData,
-  ConfigCheckEventData,
-  SearchProgressEventData,
-  SearchCompleteEventData,
-  MessageEventData,
-  ComicAddedEvent,
-} from "./events";
+export type { ComicAddedDetail, ComicAddedEvent } from "./events";
 
 // Config types
 export type {

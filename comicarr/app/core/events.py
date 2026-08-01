@@ -8,7 +8,7 @@
 #  (at your option) any later version.
 
 """
-EventBus — thread-safe pub/sub replacing GLOBAL_MESSAGES.
+EventBus — thread-safe pub/sub, sole transport for server-sent events.
 
 Each SSE subscriber gets its own asyncio.Queue. Background threads
 publish via publish_sync(), which uses loop.call_soon_threadsafe()

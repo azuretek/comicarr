@@ -9,9 +9,8 @@
 
 """Activity Center production helpers — journal stage map and run brackets.
 
-Producers call these after a durable transition wins. They never write
-``GLOBAL_MESSAGES``. All narrative inserts go through
-:func:`comicarr.app.activity.events.record_activity`.
+Producers call these after a durable transition wins. All narrative inserts
+go through :func:`comicarr.app.activity.events.record_activity`.
 """
 
 from __future__ import annotations

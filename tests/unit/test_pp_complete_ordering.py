@@ -117,7 +117,6 @@ def _isolated_db(tmp_path, monkeypatch):
         types.SimpleNamespace(HIGHCOUNT=0, POST_PROCESSING=True),
         raising=False,
     )
-    monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     engine = get_engine()
     metadata.create_all(engine)
     yield

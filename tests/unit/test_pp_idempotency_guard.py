@@ -61,7 +61,6 @@ def _isolated_db(tmp_path, monkeypatch):
         types.SimpleNamespace(HIGHCOUNT=0, POST_PROCESSING=True, MANUAL_PP_FOLDER=str(tmp_path)),
         raising=False,
     )
-    monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     # APILOCK is consulted at the top of the postprocess_main loop.
     fake_lock = MagicMock()
     fake_lock.locked.return_value = False

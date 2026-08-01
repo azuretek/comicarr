@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
-
-export const ACTIVITY_STATUS_QUERY_KEY = ["activity", "status"] as const;
+import { ACTIVITY_STATUS_QUERY_KEY } from "@/lib/activityKeys";
 
 const STATUS_POLL_MS = 30 * 1000;
 

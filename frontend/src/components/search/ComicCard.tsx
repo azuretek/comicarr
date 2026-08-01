@@ -5,16 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAddComic } from "@/hooks/useSearch";
 import { useToast } from "@/components/ui/toast";
-import type { SearchResult } from "@/types";
+import type { ComicAddedDetail, SearchResult } from "@/types";
 
 interface ComicCardProps {
   comic: SearchResult & { isLoadingImage?: boolean };
-}
-
-interface AddByIdEventDetail {
-  comicid: string;
-  status: "success" | "failure";
-  message?: string;
 }
 
 export default function ComicCard({ comic }: ComicCardProps) {
@@ -32,7 +26,7 @@ export default function ComicCard({ comic }: ComicCardProps) {
 
     const handleAddById = (event: CustomEvent<string>) => {
       try {
-        const data: AddByIdEventDetail = JSON.parse(event.detail);
+        const data: ComicAddedDetail = JSON.parse(event.detail);
 
         // Check if this event is for our comic
         if (data.comicid === comicIdRef.current) {
@@ -54,11 +48,11 @@ export default function ComicCard({ comic }: ComicCardProps) {
           }
         }
       } catch (error) {
-        console.error("Error parsing addbyid event:", error);
+        console.error("Error parsing comic-added event:", error);
       }
     };
 
-    // Listen for custom event dispatched by useServerEvents
+    // Listen for custom event useServerEvents derives from `activity`
     window.addEventListener("comic-added", handleAddById as EventListener);
 
     return () => {

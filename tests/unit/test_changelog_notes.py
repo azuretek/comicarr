@@ -181,7 +181,6 @@ class TestCheckGithubCachesReleaseBody:
         monkeypatch.setattr("comicarr.CONFIG", config, raising=False)
         monkeypatch.setattr("comicarr.INSTALL_TYPE", "git", raising=False)
         monkeypatch.setattr("comicarr.CURRENT_VERSION", "aaaaaaa", raising=False)
-        monkeypatch.setattr("comicarr.GLOBAL_MESSAGES", None, raising=False)
 
         response = MagicMock()
         response.status_code = 200
@@ -212,7 +211,6 @@ class TestCheckGithubCachesReleaseBody:
         monkeypatch.setattr("comicarr.CONFIG", config, raising=False)
         monkeypatch.setattr("comicarr.INSTALL_TYPE", "git", raising=False)
         monkeypatch.setattr("comicarr.CURRENT_VERSION", "aaaaaaa", raising=False)
-        monkeypatch.setattr("comicarr.GLOBAL_MESSAGES", None, raising=False)
 
         response = MagicMock()
         response.status_code = 200

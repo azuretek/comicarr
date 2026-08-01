@@ -1,9 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "../mocks/server";
 import { renderMinimal, screen } from "../test-utils";
 import AppStatusBar from "@/components/layout/AppStatusBar";
+import type { ServerEventsHealth } from "@/contexts/ServerEventsContext";
+
+const { health } = vi.hoisted(() => ({
+  health: { current: { live: "connected" } as ServerEventsHealth },
+}));
+vi.mock("@/contexts/ServerEventsContext", () => ({
+  useServerEventsHealth: () => health.current,
+}));
+
+afterEach(() => {
+  health.current = { live: "connected" };
+});
 
 describe("AppStatusBar", () => {
   it("shows library, api, and quiet in-flight counts", async () => {
@@ -70,6 +82,30 @@ describe("AppStatusBar", () => {
         .getByRole("link", { name: "⚠ 2 need attention" })
         .getAttribute("href"),
     ).toBe("/activity");
+  });
+
+  it("shows unreachable after a prolonged live-channel loss", async () => {
+    health.current = { live: "lost" };
+
+    renderMinimal(<AppStatusBar />);
+
+    await waitFor(() => {
+      expect(screen.getByText("unreachable")).toBeTruthy();
+    });
+    // HTTP is fine; only the live channel is gone, so counts are suppressed.
+    expect(screen.getByText("online")).toBeTruthy();
+    expect(screen.queryByText(/in flight/)).toBeNull();
+  });
+
+  it("stays quiet while the live channel is merely reconnecting", async () => {
+    health.current = { live: "reconnecting" };
+
+    renderMinimal(<AppStatusBar />);
+
+    await waitFor(() => {
+      expect(screen.getByText("2 in flight")).toBeTruthy();
+    });
+    expect(screen.queryByText("unreachable")).toBeNull();
   });
 
   it("shows unreachable when library and api are both down", async () => {

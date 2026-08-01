@@ -33,7 +33,7 @@ export default tseslint.config(
       ],
       'react-refresh/only-export-components': [
         'warn',
-        { allowConstantExport: true, allowExportNames: ['useAuth', 'useTheme', 'useToast', 'useSidebar', 'buttonVariants'] },
+        { allowConstantExport: true, allowExportNames: ['useAuth', 'useTheme', 'useToast', 'useSidebar', 'useServerEventsHealth', 'buttonVariants'] },
       ],
       // Row identity is the invariant the data-table/useTableState seam exists
       // to centralise, and `getRowId` can only be *required* if there is one

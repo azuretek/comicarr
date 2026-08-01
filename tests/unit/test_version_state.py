@@ -58,7 +58,6 @@ def ctx(monkeypatch):
     monkeypatch.setattr(comicarr, "CONFIG", config, raising=False)
     monkeypatch.setattr(comicarr, "INSTALL_TYPE", "git", raising=False)
     monkeypatch.setattr(comicarr, "CURRENT_VERSION", "aaaaaaa", raising=False)
-    monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     with (
         patch("comicarr.app.core.runtime.get_runtime_if_initialized", return_value=context),
         patch.object(system_service, "get_release_version", return_value="0.20.0"),
@@ -253,8 +252,8 @@ class TestGithubRequestTimeout:
 
 
 class TestDeadToastPathRetired:
-    def test_check_github_does_not_assign_global_messages_or_check_update(self, ctx):
-        comicarr.GLOBAL_MESSAGES = {"event": "stale"}
+    def test_check_github_emits_no_toast_event(self, ctx):
+        """Version state is polled, never announced (#430 / #470 / #488)."""
         with patch.object(
             versioncheck.requests,
             "get",
@@ -264,8 +263,6 @@ class TestDeadToastPathRetired:
 
         assert "event" not in result
         assert result.get("event") != "check_update"
-        # Producer must not clobber GLOBAL_MESSAGES (issue #430 / #470).
-        assert comicarr.GLOBAL_MESSAGES == {"event": "stale"}
 
     def test_check_github_does_not_set_auto_update_signal(self, ctx):
         comicarr.SIGNAL = None

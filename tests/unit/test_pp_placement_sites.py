@@ -85,7 +85,6 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     if getattr(comicarr, "LOG_LEVEL", None) is None:
         monkeypatch.setattr(comicarr, "LOG_LEVEL", 0, raising=False)
-    monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     metadata.create_all(get_engine())
     yield
     shutdown_engine()

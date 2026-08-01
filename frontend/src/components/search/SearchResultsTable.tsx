@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useAddComic, useAddManga } from "@/hooks/useSearch";
 import { useToast } from "@/components/ui/toast";
-import type { SearchResult, ContentType } from "@/types";
+import type { ComicAddedDetail, SearchResult, ContentType } from "@/types";
 
 const SOURCE_LABELS: Record<string, string> = {
   comicvine: "CV",
@@ -101,12 +101,6 @@ function CoverThumbnail({ comic }: { comic: SearchResult }) {
   );
 }
 
-interface AddByIdEventDetail {
-  comicid: string;
-  status: "success" | "failure";
-  message?: string;
-}
-
 function AddButton({
   comic,
   contentType,
@@ -132,7 +126,7 @@ function AddButton({
     const handleAddById = (event: CustomEvent<string>) => {
       if (cancelled) return;
       try {
-        const data: AddByIdEventDetail = JSON.parse(event.detail);
+        const data: ComicAddedDetail = JSON.parse(event.detail);
         if (data.comicid === comicIdRef.current) {
           if (data.status === "success") {
             navigate(`/library/${comicIdRef.current}`);
@@ -151,7 +145,7 @@ function AddButton({
           }
         }
       } catch (error) {
-        console.error("Error parsing addbyid event:", error);
+        console.error("Error parsing comic-added event:", error);
       }
     };
 

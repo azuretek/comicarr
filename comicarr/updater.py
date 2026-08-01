@@ -1527,7 +1527,7 @@ def foundsearch(
 
         logger.info("%s Updated the status (Snatched) complete for %s Issue: %s" % (module, ComicName, IssueNum))
         # grab.succeeded is owned by the journal snatched transition (#430 /
-        # #484) — do not double-write GLOBAL_MESSAGES here.
+        # #484) — do not announce it a second time here.
 
         # --- Durable pipeline journal: snatched (U2) ---------------------------
         # STRICTLY LAST on this seam: every db.upsert("snatched"/"nzblog"/...)

@@ -316,7 +316,6 @@ PROVIDER_START_ID = 0
 COMICINFO = ()
 CHECK_FOLDER_CACHE = None
 FOLDER_CACHE = None
-GLOBAL_MESSAGES = None
 SSE_KEY = None
 SESSION_ID = None
 SETUP_TOKEN = None
@@ -479,7 +478,6 @@ def initialize(config_file):
             EXT_IP, \
             ISSUE_EXCEPTIONS, \
             PROVIDER_START_ID, \
-            GLOBAL_MESSAGES, \
             CHECK_FOLDER_CACHE, \
             FOLDER_CACHE, \
             SESSION_ID, \

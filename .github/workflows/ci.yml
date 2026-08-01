@@ -94,6 +94,11 @@ jobs:
       - name: Run modern backend quality ratchet
         run: python scripts/run_ruff.py modern
 
+      # Deleting a module-level global cannot make its reassignment fail, so
+      # the only gate against GLOBAL_MESSAGES coming back is a source scan.
+      - name: Check retired globals stay retired
+        run: python scripts/check_retired_globals.py
+
       - name: Run ruff formatter check
         run: ruff format --check comicarr/
 

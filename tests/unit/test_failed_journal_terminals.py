@@ -43,7 +43,6 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     if not hasattr(comicarr, "LOG_LEVEL") or comicarr.LOG_LEVEL is None:
         monkeypatch.setattr(comicarr, "LOG_LEVEL", 0, raising=False)
-    monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     monkeypatch.setattr(
         comicarr,
         "CONFIG",

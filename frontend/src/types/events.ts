@@ -1,49 +1,23 @@
 /**
  * Server-Sent Events (SSE) type definitions
+ *
+ * The narrative channel is `activity` alone — its payload type is
+ * `TimelineEvent` (see components/activity/timeline/types.ts), parsed through
+ * `lib/activityLive.ts`. The per-feature channels that used to live here
+ * (`addbyid`, `scheduler_message`, `config_check`, `search_progress`,
+ * `search_complete`, generic `message`) have no producer and no listener.
  */
 
-/** Base SSE event data */
-export interface SSEEventData {
-  status?: "success" | "failure" | "mid-message-event";
-  message?: string;
-  tables?: "both" | "tables" | "tabs" | "None";
-}
-
-/** addbyid event data */
-export interface AddByIdEventData extends SSEEventData {
-  comicid?: string;
-  comicname?: string;
-  seriesyear?: string;
-}
-
-/** scheduler_message event data */
-export interface SchedulerMessageEventData extends SSEEventData {
+/**
+ * Payload of the `comic-added` window event, derived from an `add` @ series
+ * narration. Search cards settle their add button on it, so both the producer
+ * (`lib/activityLive.ts`) and every consumer share this one shape.
+ */
+export interface ComicAddedDetail {
+  comicid: string;
+  comicname: string;
+  status: "success" | "failure";
   message: string;
-}
-
-/** config_check event data */
-export interface ConfigCheckEventData extends SSEEventData {
-  config_errors?: string[];
-}
-
-/** search_progress event data */
-export interface SearchProgressEventData extends SSEEventData {
-  current?: number;
-  total?: number;
-  query?: string;
-}
-
-/** search_complete event data */
-export interface SearchCompleteEventData extends SSEEventData {
-  result_count?: number;
-}
-
-/** Generic message event data */
-export interface MessageEventData extends SSEEventData {
-  type?: string;
-  comicid?: string;
-  comicname?: string;
-  seriesyear?: string;
 }
 
 /** Custom window event for comic-added */
