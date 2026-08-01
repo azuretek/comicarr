@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.24.1
+
+### Patch Changes
+
+- ea4f1b2: Open Activity surfaces now refresh the moment work happens instead of waiting out the 30s poll, and they catch up immediately after a dropped connection. Bursty work — a search run grabbing dozens of issues — costs one refresh, not one per issue.
+
+  Toasts are quieter and more useful: Comicarr interrupts you once when something starts needing attention, then stays silent until the needs-attention count clears. Routine progress no longer toasts at all. The noisy "Search Complete", "Task Complete", and duplicate "Series Added" pop-ups are gone; the Activity timeline carries that history instead. A server restart now says so, and the status bar reports `unreachable` when the connection has been down long enough to matter rather than only after the next health check.
+
+- 3e18796: Pagination controls on Library, Search, Wanted, and Activity now stay on the bottom edge of the window. The rows scroll inside the table while the page header, filters, and the pager stay in place, so moving to the next page no longer means scrolling to the end of the list first.
+
+  Every table now shares one footer: it reads `21–40 of 143` so you can see where you are in the results rather than just how many there are, and single-page tables drop the pager instead of showing prev and next greyed out.
+
 ## 0.24.0
 
 ### Minor Changes
