@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useActivityStatus } from "@/hooks/useActivityStatus";
+import { useServerEventsHealth } from "@/contexts/ServerEventsContext";
 import { apiRequest } from "@/lib/api";
 import {
   formatQuietStatus,
@@ -32,6 +33,7 @@ function apiColor(api: ActivityApiState): string | undefined {
 export default function AppStatusBar() {
   const dashboard = useDashboard();
   const activity = useActivityStatus();
+  const { live } = useServerEventsHealth();
   const health = useQuery<HealthResponse>({
     queryKey: ["app", "health"],
     queryFn: () => apiRequest<HealthResponse>("GET", "/api/health"),
@@ -62,6 +64,7 @@ export default function AppStatusBar() {
         api,
         inFlight: activityFailed ? 0 : inFlight,
         attention: activityFailed ? 0 : attention,
+        live,
       }
     : null;
 
@@ -87,8 +90,13 @@ export default function AppStatusBar() {
     );
   }
 
-  // Activity endpoint failed but library/api may still be up — show partial line.
-  if (activityFailed && !(libraryFailed && api === "offline")) {
+  // Activity endpoint failed but library/api may still be up — show partial
+  // line. A prolonged live-channel loss is the better explanation, so it wins.
+  if (
+    activityFailed &&
+    live !== "lost" &&
+    !(libraryFailed && api === "offline")
+  ) {
     return (
       <StatusShell liveText={liveText}>
         <LibrarySegment
@@ -259,6 +267,7 @@ function useStatusLiveRegion(snapshot: ActivityStatusSnapshot | null): string {
   const api = snapshot?.api;
   const inFlight = snapshot?.inFlight;
   const attention = snapshot?.attention;
+  const live = snapshot?.live;
   const ready = snapshot !== null;
 
   useEffect(() => {
@@ -266,7 +275,8 @@ function useStatusLiveRegion(snapshot: ActivityStatusSnapshot | null): string {
       !ready ||
       api === undefined ||
       inFlight === undefined ||
-      attention === undefined
+      attention === undefined ||
+      live === undefined
     ) {
       return;
     }
@@ -275,11 +285,12 @@ function useStatusLiveRegion(snapshot: ActivityStatusSnapshot | null): string {
       api,
       inFlight,
       attention,
+      live,
     };
     const announcement = liveAnnouncement(prevRef.current, next);
     prevRef.current = next;
     setText(announcement);
-  }, [ready, librarySeries, api, inFlight, attention]);
+  }, [ready, librarySeries, api, inFlight, attention, live]);
 
   return text;
 }

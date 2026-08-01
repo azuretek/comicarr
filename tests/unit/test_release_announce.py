@@ -167,7 +167,6 @@ def announce_ctx(monkeypatch):
     monkeypatch.setattr(comicarr, "CONFIG", config, raising=False)
     monkeypatch.setattr(comicarr, "INSTALL_TYPE", "docker", raising=False)
     monkeypatch.setattr(comicarr, "CURRENT_VERSION", "aaaaaaa", raising=False)
-    monkeypatch.setattr(comicarr, "GLOBAL_MESSAGES", None, raising=False)
     with (
         patch("comicarr.app.core.runtime.get_runtime_if_initialized", return_value=context),
         patch.object(system_service, "get_release_version", return_value="0.20.0"),

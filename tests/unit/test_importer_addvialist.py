@@ -54,7 +54,7 @@ class TestAddvialistSeriesyear:
         mock_add.assert_called_once_with("12345")
 
     def test_comicname_with_seriesyear(self):
-        """In-flight mass-add no longer writes GLOBAL_MESSAGES (#484); seriesyear is passed through."""
+        """In-flight mass-add narrates nothing per item (#484); seriesyear is passed through."""
         series_queue = queue.Queue()
         issue_queue = queue.Queue()
         item = {"comicid": "12345", "comicname": "Spider-Man", "seriesyear": "2020"}

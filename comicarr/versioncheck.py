@@ -720,7 +720,7 @@ def checkGithub(current_version=None):
         chk_message = "Comicarr is up to date (release %s)" % release_version
     logger.info("[CHECK_GITHUB] %s" % chk_message)
 
-    # No GLOBAL_MESSAGES / check_update producer — badge will poll (later ticket).
+    # No check_update producer — the update badge polls (#470).
     result = _apply_update_state(
         update_state,
         update_reason=None,

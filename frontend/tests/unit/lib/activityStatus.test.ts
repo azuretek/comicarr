@@ -13,6 +13,7 @@ function snap(
     api: "online",
     inFlight: 0,
     attention: 0,
+    live: "connected",
     ...partial,
   };
 }
@@ -73,6 +74,17 @@ describe("formatQuietStatus", () => {
     expect(meta.segments.some((s) => s.role === "attention")).toBe(false);
   });
 
+  it("renders unreachable on prolonged live-channel loss alone", () => {
+    const meta = formatQuietStatus(snap({ live: "lost", inFlight: 4 }));
+    expect(meta.line).toBe("library: 412 series · api: online · unreachable");
+    expect(meta.segments.some((s) => s.role === "attention")).toBe(false);
+  });
+
+  it("stays quiet while the live channel is merely reconnecting", () => {
+    const meta = formatQuietStatus(snap({ live: "reconnecting", inFlight: 4 }));
+    expect(meta.line).toBe("library: 412 series · api: online · 4 in flight");
+  });
+
   it("uses singular series label for one series", () => {
     const meta = formatQuietStatus(snap({ librarySeries: 1 }));
     expect(meta.line).toBe("library: 1 series · api: online · idle");
@@ -120,5 +132,19 @@ describe("liveAnnouncement", () => {
     expect(
       liveAnnouncement(snap({ api: "offline", librarySeries: null }), snap({})),
     ).toBe("API online");
+  });
+
+  it("announces prolonged live-channel loss and recovery ahead of counts", () => {
+    expect(
+      liveAnnouncement(snap({}), snap({ live: "lost", attention: 3 })),
+    ).toBe("Server unreachable");
+    expect(liveAnnouncement(snap({ live: "lost" }), snap({}))).toBe(
+      "Reconnected",
+    );
+  });
+
+  it("says nothing for a brief reconnect", () => {
+    expect(liveAnnouncement(snap({}), snap({ live: "reconnecting" }))).toBe("");
+    expect(liveAnnouncement(snap({ live: "reconnecting" }), snap({}))).toBe("");
   });
 });

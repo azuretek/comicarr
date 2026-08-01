@@ -54,11 +54,11 @@ export default function ComicCard({ comic }: ComicCardProps) {
           }
         }
       } catch (error) {
-        console.error("Error parsing addbyid event:", error);
+        console.error("Error parsing comic-added event:", error);
       }
     };
 
-    // Listen for custom event dispatched by useServerEvents
+    // Listen for custom event useServerEvents derives from `activity`
     window.addEventListener("comic-added", handleAddById as EventListener);
 
     return () => {

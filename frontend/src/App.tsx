@@ -16,7 +16,7 @@ import FocusLayout from "@/components/layout/FocusLayout";
 import { ToastProvider } from "@/components/ui/toast";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { RouteLoader } from "@/components/RouteLoader";
-import { useServerEvents } from "@/hooks/useServerEvents";
+import { ServerEventsProvider } from "@/contexts/ServerEventsContext";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
 const LoginPage = () => (
@@ -119,68 +119,67 @@ function SeriesListRedirect() {
 function AppContent() {
   const { isAuthenticated } = useAuth();
 
-  // Set up SSE connection when authenticated (JWT cookie-based)
-  useServerEvents(isAuthenticated);
-
   // Set up global keyboard shortcuts
   useKeyboardShortcuts();
 
   return (
-    <BrowserRouter>
-      <NuqsAdapter>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/chat" element={<ChatWorkspace />} />
-          <Route path="/chat/:threadId" element={<ChatWorkspace />} />
-          <Route
-            path="/*"
-            element={
-              <ProtectedRoute>
-                <Layout>
-                  <Routes>
-                    <Route path="/" element={<DashboardPage />} />
-                    <Route path="/library" element={<SeriesListPage />} />
-                    <Route
-                      path="/library/:comicId/issue/:issueId"
-                      element={<IssueDetailPage />}
-                    />
-                    <Route
-                      path="/library/:comicId"
-                      element={<SeriesDetailPage />}
-                    />
-                    <Route
-                      path="/series/:comicId"
-                      element={<SeriesRedirect />}
-                    />
-                    <Route path="/series" element={<SeriesListRedirect />} />
-                    <Route path="/search" element={<SearchPage />} />
-                    <Route path="/releases" element={<ReleasesPage />} />
-                    <Route
-                      path="/upcoming"
-                      element={<Navigate to="/releases?view=mine" replace />}
-                    />
-                    <Route
-                      path="/weekly"
-                      element={<Navigate to="/releases?view=all" replace />}
-                    />
-                    <Route path="/wanted" element={<WantedPage />} />
-                    <Route path="/story-arcs" element={<StoryArcsPage />} />
-                    <Route
-                      path="/story-arcs/:storyArcId"
-                      element={<StoryArcDetailPage />}
-                    />
-                    <Route path="/activity" element={<ActivityPage />} />
-                    <Route path="/import" element={<ImportPage />} />
-                    <Route path="/settings" element={<SettingsPage />} />
-                    <Route path="*" element={<Navigate to="/" replace />} />
-                  </Routes>
-                </Layout>
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
-      </NuqsAdapter>
-    </BrowserRouter>
+    <ServerEventsProvider enabled={isAuthenticated}>
+      <BrowserRouter>
+        <NuqsAdapter>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/chat" element={<ChatWorkspace />} />
+            <Route path="/chat/:threadId" element={<ChatWorkspace />} />
+            <Route
+              path="/*"
+              element={
+                <ProtectedRoute>
+                  <Layout>
+                    <Routes>
+                      <Route path="/" element={<DashboardPage />} />
+                      <Route path="/library" element={<SeriesListPage />} />
+                      <Route
+                        path="/library/:comicId/issue/:issueId"
+                        element={<IssueDetailPage />}
+                      />
+                      <Route
+                        path="/library/:comicId"
+                        element={<SeriesDetailPage />}
+                      />
+                      <Route
+                        path="/series/:comicId"
+                        element={<SeriesRedirect />}
+                      />
+                      <Route path="/series" element={<SeriesListRedirect />} />
+                      <Route path="/search" element={<SearchPage />} />
+                      <Route path="/releases" element={<ReleasesPage />} />
+                      <Route
+                        path="/upcoming"
+                        element={<Navigate to="/releases?view=mine" replace />}
+                      />
+                      <Route
+                        path="/weekly"
+                        element={<Navigate to="/releases?view=all" replace />}
+                      />
+                      <Route path="/wanted" element={<WantedPage />} />
+                      <Route path="/story-arcs" element={<StoryArcsPage />} />
+                      <Route
+                        path="/story-arcs/:storyArcId"
+                        element={<StoryArcDetailPage />}
+                      />
+                      <Route path="/activity" element={<ActivityPage />} />
+                      <Route path="/import" element={<ImportPage />} />
+                      <Route path="/settings" element={<SettingsPage />} />
+                      <Route path="*" element={<Navigate to="/" replace />} />
+                    </Routes>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+          </Routes>
+        </NuqsAdapter>
+      </BrowserRouter>
+    </ServerEventsProvider>
   );
 }
 

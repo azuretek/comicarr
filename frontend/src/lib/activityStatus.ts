@@ -3,6 +3,8 @@
  * Pure composition — no React, no I/O.
  */
 
+import type { LiveConnectionState } from "@/lib/activityLive";
+
 export type ActivityApiState = "online" | "offline" | "checking";
 
 export interface ActivityStatusSnapshot {
@@ -17,6 +19,8 @@ export interface ActivityStatusSnapshot {
   inFlight: number;
   /** GET /api/activity/status → attention (unresolved band count) */
   attention: number;
+  /** SSE health from useServerEvents; only a prolonged loss is reported. */
+  live: LiveConnectionState;
 }
 
 export type StatusSegmentRole =
@@ -57,7 +61,9 @@ export function formatQuietStatus(s: ActivityStatusSnapshot): QuietStatusMeta {
   segments.push({ role: "api", text: apiText(s) });
   segments.push({ role: "separator", text: "·" });
 
-  if (s.api === "offline" && s.librarySeries === null) {
+  // Counts sourced from a server we cannot reach are stale, whichever channel
+  // proved it — a prolonged SSE loss says so sooner than the 30s health poll.
+  if (s.live === "lost" || (s.api === "offline" && s.librarySeries === null)) {
     segments.push({
       role: "activity",
       text: "unreachable",
@@ -108,9 +114,15 @@ export function liveAnnouncement(
   next: ActivityStatusSnapshot,
 ): string {
   if (!prev) {
+    if (next.live === "lost") return "Server unreachable";
     if (next.api === "offline") return "API offline";
     if (next.attention > 0) return `${next.attention} need attention`;
     return "";
+  }
+  // Reachability outranks every count: stale numbers are not worth announcing.
+  if (prev.live !== next.live) {
+    if (next.live === "lost") return "Server unreachable";
+    if (prev.live === "lost") return "Reconnected";
   }
   if (prev.api !== next.api) {
     if (next.api === "offline") return "API offline";

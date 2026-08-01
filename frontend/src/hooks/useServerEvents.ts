@@ -1,36 +1,81 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/components/ui/toast";
-import { ACTIVITY_STATUS_QUERY_KEY } from "@/hooks/useActivityStatus";
-import type {
-  AddByIdEventData,
-  SchedulerMessageEventData,
-  ConfigCheckEventData,
-  SearchProgressEventData,
-  SearchCompleteEventData,
-  MessageEventData,
-} from "@/types";
+import {
+  ACTIVITY_STATUS_QUERY_KEY,
+  type ActivityStatusResponse,
+} from "@/hooks/useActivityStatus";
+import {
+  ACTIVITY_COALESCE_MS,
+  ACTIVITY_INVALIDATION_KEYS,
+  NO_TROUBLE,
+  collateralKeys,
+  comicAddedDetail,
+  latchOnAttention,
+  latchOnEvent,
+  parseActivityEvent,
+  type LiveConnectionState,
+  type TroubleLatch,
+} from "@/lib/activityLive";
+
+export type { LiveConnectionState };
+
+/** Reconnect backoff ceiling — a sleeping tab must not hammer the server. */
+export const MAX_RECONNECT_DELAY_MS = 64_000;
+
+/**
+ * How long the socket must stay down before the status chrome calls it.
+ * Below this a drop is silent: the 30s polls still carry every surface, so
+ * a blip is not worth alarming the operator about (ADR §8, brief disconnect).
+ */
+export const PROLONGED_LOSS_MS = 60_000;
 
 type UseServerEventsReturn = {
   isConnected: boolean;
   isReconnecting: boolean;
+  /** Connection has been down long enough for the status chrome to say so. */
+  connectionLost: boolean;
+  live: LiveConnectionState;
 };
 
 /**
- * Hook to manage Server-Sent Events (SSE) connection for real-time updates.
- * Auth is handled by the JWT cookie — no separate SSE key needed.
+ * The app's one EventSource (ADR §8 — per-tab, never a second stream).
+ *
+ * `activity` is the only narrative channel. Its payload drives coalesced
+ * invalidation and the enter-trouble toast latch; it is never accumulated
+ * into a list, because every activity surface is query-backed. Auth rides
+ * the JWT cookie, so no separate SSE key is needed.
  */
 export function useServerEvents(enabled = true): UseServerEventsReturn {
   const queryClient = useQueryClient();
   const { addToast } = useToast();
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const lossTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const coalesceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectDelayRef = useRef(1000); // Start with 1 second
   const hasConnectedRef = useRef(false); // Track if we've connected before
+  const latchRef = useRef<TroubleLatch>(NO_TROUBLE);
+
+  // The latch re-arms on what the operator can actually see, so it follows the
+  // derived attention count rather than the stream. Reading the cache instead
+  // of observing the query keeps this hook from adding a second fetcher.
+  useEffect(() => {
+    if (!enabled) return;
+    const syncLatch = () => {
+      const status = queryClient.getQueryData<ActivityStatusResponse>(
+        ACTIVITY_STATUS_QUERY_KEY,
+      );
+      latchRef.current = latchOnAttention(latchRef.current, status?.attention);
+    };
+    syncLatch();
+    return queryClient.getQueryCache().subscribe(syncLatch);
+  }, [enabled, queryClient]);
 
   useEffect(() => {
     if (!enabled) {
@@ -39,12 +84,61 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
 
     let isMounted = true;
 
-    const invalidateActivityStatus = () => {
-      queryClient.invalidateQueries({ queryKey: ACTIVITY_STATUS_QUERY_KEY });
+    // Collateral caches touched by the current burst, deduplicated by key.
+    // Effect-local: a re-subscribe starts a new burst with nothing pending.
+    const pendingCollateral = new Map<string, string[]>();
+
+    /**
+     * Refetch the narrative feed and every projection derived beside it, as
+     * one batch. Also flushes whatever collateral caches the coalesced burst
+     * touched (series/arc adds and refreshes).
+     */
+    const invalidateActivitySurfaces = () => {
+      if (coalesceTimeoutRef.current) {
+        clearTimeout(coalesceTimeoutRef.current);
+        coalesceTimeoutRef.current = null;
+      }
+      for (const queryKey of ACTIVITY_INVALIDATION_KEYS) {
+        queryClient.invalidateQueries({ queryKey });
+      }
+      for (const queryKey of pendingCollateral.values()) {
+        queryClient.invalidateQueries({ queryKey });
+      }
+      pendingCollateral.clear();
+    };
+
+    /**
+     * One invalidation pass per window, however many events land in it — a run
+     * that grabs forty issues costs one refetch round, not forty.
+     */
+    const scheduleActivityInvalidation = () => {
+      if (coalesceTimeoutRef.current) return;
+      coalesceTimeoutRef.current = setTimeout(() => {
+        coalesceTimeoutRef.current = null;
+        invalidateActivitySurfaces();
+      }, ACTIVITY_COALESCE_MS);
+    };
+
+    const markDisconnected = ({ retry }: { retry: boolean }) => {
+      setIsConnected(false);
+      setIsReconnecting(retry);
+
+      // Prolonged loss, not a blip, is what the status chrome reports.
+      if (!lossTimeoutRef.current) {
+        lossTimeoutRef.current = setTimeout(() => {
+          lossTimeoutRef.current = null;
+          if (isMounted) setConnectionLost(true);
+        }, PROLONGED_LOSS_MS);
+      }
     };
 
     const setupEventSource = () => {
       if (!isMounted) return;
+
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
 
       // Clean up existing connection
       if (eventSourceRef.current) {
@@ -61,9 +155,17 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
         console.log("[SSE] Connection established");
         setIsConnected(true);
         setIsReconnecting(false);
+        setConnectionLost(false);
+        if (lossTimeoutRef.current) {
+          clearTimeout(lossTimeoutRef.current);
+          lossTimeoutRef.current = null;
+        }
 
         // Only verify session on reconnect, not initial connection
         if (hasConnectedRef.current) {
+          // No stream resume: the gap is closed by refetching, not replaying.
+          invalidateActivitySurfaces();
+
           fetch("/api/auth/check-session")
             .then((r) => r.json())
             .then((data) => {
@@ -82,8 +184,7 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
       evtSource.onerror = () => {
         console.error("[SSE] Connection error");
         evtSource.close();
-        setIsConnected(false);
-        setIsReconnecting(true);
+        markDisconnected({ retry: isMounted });
 
         // Attempt to reconnect with exponential backoff
         if (isMounted) {
@@ -93,169 +194,38 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
             setupEventSource();
           }, delay);
 
-          // Increase delay for next reconnect, max 64 seconds
-          reconnectDelayRef.current = Math.min(delay * 2, 64000);
+          reconnectDelayRef.current = Math.min(
+            delay * 2,
+            MAX_RECONNECT_DELAY_MS,
+          );
         }
       };
 
-      // Event: addbyid - When a new series is added
-      evtSource.addEventListener("addbyid", (e: MessageEvent) => {
-        if (!e.data) return;
+      // Event: activity — the one narrative channel (Activity Center ADR §8).
+      evtSource.addEventListener("activity", (e: MessageEvent) => {
+        const event = parseActivityEvent(e.data);
+        if (!event) return;
 
-        try {
-          const data: AddByIdEventData = JSON.parse(e.data);
-          console.log("[SSE] addbyid event:", data);
-
-          // Don't invalidate cache for mid-message events (progress updates)
-          if (data.status === "mid-message-event") {
-            return;
-          }
-
-          // Invalidate series cache if tables='both' or 'tables'
-          if (data.tables === "both" || data.tables === "tables") {
-            queryClient.invalidateQueries({ queryKey: ["series"] });
-            // Also invalidate specific series detail if we have comicid
-            if (data.comicid) {
-              queryClient.invalidateQueries({
-                queryKey: ["series", data.comicid],
-              });
-            }
-          }
-
-          // Dispatch custom event for ComicCard to handle navigation
-          // Only dispatch when import is complete (tables is truthy and not 'None')
-          if (
-            data.comicid &&
-            (data.status === "success" || data.status === "failure") &&
-            data.tables &&
-            data.tables !== "None"
-          ) {
-            window.dispatchEvent(
-              new CustomEvent("comic-added", { detail: JSON.stringify(data) }),
-            );
-          }
-
-          // Show success toast with series name (only when import is complete)
-          if (
-            data.comicname &&
-            data.status === "success" &&
-            data.tables &&
-            data.tables !== "None"
-          ) {
-            addToast({
-              type: "success",
-              title: "Series Added",
-              description: `${data.comicname} (${data.seriesyear || "Unknown"}) has been added successfully.`,
-            });
-          }
-        } catch (error) {
-          console.error("[SSE] Error parsing addbyid event:", error);
+        for (const queryKey of collateralKeys(event)) {
+          pendingCollateral.set(queryKey.join("/"), queryKey);
         }
-      });
+        scheduleActivityInvalidation();
 
-      // Event: scheduler_message - Background task notifications
-      evtSource.addEventListener("scheduler_message", (e: MessageEvent) => {
-        if (!e.data) return;
-
-        try {
-          const data: SchedulerMessageEventData = JSON.parse(e.data);
-          console.log("[SSE] scheduler_message event:", data);
-
-          if (data.message) {
-            addToast({
-              type: data.status === "success" ? "success" : "error",
-              title:
-                data.status === "success" ? "Task Complete" : "Task Failed",
-              description: data.message,
-            });
-          }
-        } catch (error) {
-          console.error("[SSE] Error parsing scheduler_message event:", error);
+        // Search cards settle their add button on this; it is a UI handshake,
+        // not narrative, so it fires per-event rather than coalesced.
+        const detail = comicAddedDetail(event);
+        if (detail) {
+          window.dispatchEvent(new CustomEvent("comic-added", { detail }));
         }
-      });
 
-      // Event: config_check - Configuration validation messages
-      evtSource.addEventListener("config_check", (e: MessageEvent) => {
-        if (!e.data) return;
-
-        try {
-          const data: ConfigCheckEventData = JSON.parse(e.data);
-          console.log("[SSE] config_check event:", data);
-
-          // Invalidate config cache
-          queryClient.invalidateQueries({ queryKey: ["config"] });
-
-          // Note: Original implementation shows a modal dialog
-          // For now, we'll just log it. Could add a modal later if needed.
-        } catch (error) {
-          console.error("[SSE] Error parsing config_check event:", error);
-        }
-      });
-
-      // Event: search_progress - Live search progress updates
-      evtSource.addEventListener("search_progress", (e: MessageEvent) => {
-        if (!e.data) return;
-
-        try {
-          const data: SearchProgressEventData = JSON.parse(e.data);
-          console.log("[SSE] search_progress event:", data);
-          // Do not invalidate activity status here — progress is high-frequency.
-          // search_complete + activity + 30s poll cover open-work refresh.
-        } catch (error) {
-          console.error("[SSE] Error parsing search_progress event:", error);
-        }
-      });
-
-      // Event: search_complete - Search completion notification
-      evtSource.addEventListener("search_complete", (e: MessageEvent) => {
-        if (!e.data) return;
-
-        try {
-          const data: SearchCompleteEventData = JSON.parse(e.data);
-          console.log("[SSE] search_complete event:", data);
-          invalidateActivityStatus();
-
-          const resultCount = data.result_count || 0;
+        const { latch, toast } = latchOnEvent(latchRef.current, event);
+        latchRef.current = latch;
+        if (toast) {
           addToast({
-            type: "success",
-            title: "Search Complete",
-            description: `Found ${resultCount} result${resultCount !== 1 ? "s" : ""}.`,
+            type: "error",
+            title: toast.title,
+            description: toast.description,
           });
-        } catch (error) {
-          console.error("[SSE] Error parsing search_complete event:", error);
-        }
-      });
-
-      // Event: activity — narrative/open-work updates (Activity Center).
-      // Full toast latch lands with the live-updates ticket; status poll works alone.
-      evtSource.addEventListener("activity", () => {
-        invalidateActivityStatus();
-      });
-
-      // Event: storyarc_added - Story arc add/refresh completion
-      evtSource.addEventListener("storyarc_added", (e: MessageEvent) => {
-        if (!e.data) return;
-
-        try {
-          const data = JSON.parse(e.data) as {
-            status: string;
-            storyarcname?: string;
-            message?: string;
-          };
-          queryClient.invalidateQueries({ queryKey: ["storyArcs"] });
-
-          if (data.message) {
-            addToast({
-              type: data.status === "success" ? "success" : "error",
-              title:
-                data.status === "success"
-                  ? "Story Arc Updated"
-                  : "Story Arc Error",
-              description: data.message,
-            });
-          }
-        } catch (error) {
-          console.error("[SSE] Error parsing storyarc_added event:", error);
         }
       });
 
@@ -273,7 +243,19 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
         }
       });
 
-      // Event: shutdown - Server shutdown notification
+      // Event: restart - Server is coming back; ride the normal backoff home.
+      evtSource.addEventListener("restart", () => {
+        console.log("[SSE] Server restarting");
+
+        addToast({
+          type: "error",
+          title: "Server Restarting",
+          description: "Comicarr is restarting. Reconnecting automatically…",
+        });
+      });
+
+      // Event: shutdown - Server is going away; drop the backoff ladder.
+      // A returning operator can still force a retry via visibility/focus.
       evtSource.addEventListener("shutdown", () => {
         console.log("[SSE] Server shutting down");
 
@@ -284,94 +266,25 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
         });
 
         evtSource.close();
-      });
-
-      // Event: message - Default/generic message handler
-      evtSource.addEventListener("message", (e: MessageEvent) => {
-        if (!e.data) return;
-
-        // Check for end-of-stream marker
-        if (e.data === "END-OF-STREAM") {
-          evtSource.close();
-          return;
-        }
-
-        try {
-          const data: MessageEventData = JSON.parse(e.data);
-          console.log("[SSE] message event:", data);
-
-          // Don't invalidate cache or show toast for mid-message events (progress updates)
-          if (data.status === "mid-message-event") {
-            return;
-          }
-
-          // Handle cache invalidation based on 'tables' field
-          if (data.tables === "both") {
-            queryClient.invalidateQueries({ queryKey: ["series"] });
-            queryClient.invalidateQueries({ queryKey: ["wanted"] });
-            invalidateActivityStatus();
-            // Also invalidate specific series detail if we have comicid
-            if (data.comicid) {
-              queryClient.invalidateQueries({
-                queryKey: ["series", data.comicid],
-              });
-            }
-          } else if (data.tables === "tables") {
-            queryClient.invalidateQueries({ queryKey: ["series"] });
-            invalidateActivityStatus();
-          } else if (data.tables === "tabs") {
-            queryClient.invalidateQueries({ queryKey: ["series"] });
-            queryClient.invalidateQueries({ queryKey: ["wanted"] });
-            queryClient.invalidateQueries({ queryKey: ["upcoming"] });
-            invalidateActivityStatus();
-          }
-
-          // Dispatch custom event for ComicCard to handle navigation
-          // (handles case where addbyid events come through generic message channel)
-          if (
-            data.comicid &&
-            (data.status === "success" || data.status === "failure") &&
-            data.tables &&
-            data.tables !== "None"
-          ) {
-            window.dispatchEvent(
-              new CustomEvent("comic-added", { detail: JSON.stringify(data) }),
-            );
-          }
-
-          // Show toast notification based on status
-          if (data.message) {
-            // Show specific "Series Added" toast for comic-added events
-            if (
-              data.comicname &&
-              data.status === "success" &&
-              data.tables &&
-              data.tables !== "None"
-            ) {
-              addToast({
-                type: "success",
-                title: "Series Added",
-                description: `${data.comicname} (${data.seriesyear || "Unknown"}) has been added successfully.`,
-              });
-            } else if (data.status === "success") {
-              addToast({
-                type: "success",
-                title: "Success",
-                description: data.message,
-              });
-            } else if (data.status === "failure") {
-              addToast({
-                type: "error",
-                title: "Error",
-                description: data.message,
-              });
-            }
-          }
-        } catch (error) {
-          console.error("[SSE] Error parsing message event:", error);
-        }
+        markDisconnected({ retry: false });
       });
     };
+
+    /**
+     * A backgrounded tab can be parked on the 64s ceiling when the operator
+     * comes back. Returning to the tab is a signal the server may be up, so
+     * retry now and reset the ladder instead of serving stale data.
+     */
+    const retryIfDisconnected = () => {
+      if (!isMounted || document.hidden) return;
+      const current = eventSourceRef.current;
+      if (current && current.readyState !== EventSource.CLOSED) return;
+      reconnectDelayRef.current = 1000;
+      setupEventSource();
+    };
+
+    document.addEventListener("visibilitychange", retryIfDisconnected);
+    window.addEventListener("focus", retryIfDisconnected);
 
     setupEventSource();
 
@@ -379,9 +292,20 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
     return () => {
       isMounted = false;
 
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
+      document.removeEventListener("visibilitychange", retryIfDisconnected);
+      window.removeEventListener("focus", retryIfDisconnected);
+
+      for (const timer of [
+        reconnectTimeoutRef,
+        lossTimeoutRef,
+        coalesceTimeoutRef,
+      ]) {
+        if (timer.current) {
+          clearTimeout(timer.current);
+          timer.current = null;
+        }
       }
+      pendingCollateral.clear();
 
       if (eventSourceRef.current) {
         console.log("[SSE] Closing connection");
@@ -391,5 +315,11 @@ export function useServerEvents(enabled = true): UseServerEventsReturn {
     };
   }, [enabled, queryClient, addToast]);
 
-  return { isConnected, isReconnecting };
+  const live: LiveConnectionState = connectionLost
+    ? "lost"
+    : isConnected
+      ? "connected"
+      : "reconnecting";
+
+  return { isConnected, isReconnecting, connectionLost, live };
 }

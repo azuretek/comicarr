@@ -151,7 +151,7 @@ function AddButton({
           }
         }
       } catch (error) {
-        console.error("Error parsing addbyid event:", error);
+        console.error("Error parsing comic-added event:", error);
       }
     };
 
