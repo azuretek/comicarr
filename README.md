@@ -180,7 +180,7 @@ cd frontend && npm ci && cd ..
 python3 Comicarr.py --nolaunch   # backend on :8090
 
 # separate terminal — frontend HMR (proxies API to :8090)
-cd frontend && npm run dev
+cd frontend && npm run dev   # https://comicarr.localhost:1355 (portless)
 ```
 
 ## Attribution

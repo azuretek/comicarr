@@ -15,6 +15,10 @@ import {
 } from "@/hooks/useActivity";
 import { useDebounce } from "@/hooks/use-debounce";
 import { TimelineView } from "@/components/activity/timeline";
+import { AttentionPrototypeHost } from "@/components/activity/prototype-attention/AttentionPrototypeHost";
+import {
+  parseVariant,
+} from "@/components/activity/prototype-attention/PrototypeSwitcher";
 import { DataTable } from "@/components/data-table/DataTable";
 import { useTableState } from "@/components/data-table/useTableState";
 import { useServerPage } from "@/components/data-table/useServerPage";
@@ -117,6 +121,14 @@ export default function ActivityPage() {
 
   const scope_type = searchParams.get("scope_type");
   const scope_id = searchParams.get("scope_id");
+
+  // PROTOTYPE #526 — gated by ?variant=A|B|C; never shown without the param.
+  const protoVariant = !import.meta.env.PROD
+    ? parseVariant(searchParams.get("variant"))
+    : null;
+  if (protoVariant) {
+    return <AttentionPrototypeHost variant={protoVariant} />;
+  }
 
   const setView = (view: ActivityView) => {
     setSearchParams((current) => {

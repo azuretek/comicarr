@@ -70,15 +70,20 @@ If a hook rewrites files, stage the changes and commit again. Avoid `git commit 
 
 ```bash
 cd frontend
-npm run dev     # Start dev server with HMR
-npm run lint    # Run ESLint
+npm run dev        # https://comicarr.localhost:1355 (portless + HMR)
+npm run dev:vite   # raw Vite on localhost:5173 if needed
+npm run lint       # Run ESLint
 npm run typecheck  # Run TypeScript checks
-npm run build   # Production build
+npm run build      # Production build
 ```
 
-When using `npm run dev` with a separately running backend, Comicarr defaults
-to port **8090**. The Vite proxy targets `http://localhost:8090` (override with
-`VITE_API_PROXY_TARGET` if needed).
+The default `dev` script goes through [portless](https://github.com/vercel-labs/portless)
+(`https://comicarr.localhost:1355`) so other local apps can keep their own named
+URLs without stealing port 5173. First HTTPS session may need `npx portless trust`.
+
+When using the Vite dev server with a separately running backend, Comicarr
+defaults to port **8090**. The Vite proxy targets `http://localhost:8090`
+(override with `VITE_API_PROXY_TARGET` if needed).
 
 ### Running Tests
 

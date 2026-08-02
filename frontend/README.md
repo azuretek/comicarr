@@ -6,7 +6,8 @@ the FastAPI application from `frontend/dist`.
 ## Common Commands
 
 ```bash
-npm run dev
+npm run dev        # https://comicarr.localhost:1355 (portless — preferred)
+npm run dev:vite   # raw Vite on localhost:5173 (escape hatch)
 npm run lint
 npm run format:check
 npm run typecheck
@@ -14,11 +15,18 @@ npm run test:run
 npm run build
 ```
 
+`npm run dev` uses [portless](https://github.com/vercel-labs/portless) so the
+frontend keeps a stable name (`https://comicarr.localhost:1355`) instead of
+competing for port 5173 with other local projects. The proxy listens on
+unprivileged port **1355** (no sudo). First HTTPS session may need
+`npx portless trust`. Use `dev:vite` only when something needs a bare host:port.
+
 ## Backend during dev
 
-When using `npm run dev` with a separately running backend, Comicarr defaults
-to port 8090. The Vite proxy targets `http://localhost:8090` (override with
-`VITE_API_PROXY_TARGET` if needed).
+When using the Vite dev server with a separately running backend, Comicarr
+defaults to port 8090. The Vite proxy targets `http://localhost:8090`
+(override with `VITE_API_PROXY_TARGET` if needed). API traffic still goes
+through the Vite origin, so the browser only talks to `comicarr.localhost`.
 
 ## E2E Tests
 

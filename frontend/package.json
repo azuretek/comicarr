@@ -3,8 +3,12 @@
   "private": true,
   "version": "0.24.1",
   "type": "module",
+  "portless": {
+    "name": "comicarr"
+  },
   "scripts": {
-    "dev": "vite",
+    "dev": "PORTLESS_PORT=1355 portless run vite",
+    "dev:vite": "vite",
     "build": "vite build",
     "lint": "eslint .",
     "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,css,json}\" \"tests/e2e/**/*.{ts,tsx,js,jsx,mjs}\" \"playwright.config.ts\"",
@@ -75,6 +79,7 @@
     "globals": "^17.7.0",
     "happy-dom": "^20.11.0",
     "msw": "^2.13.4",
+    "portless": "^0.15.5",
     "postcss": "^8.5.23",
     "prettier": "^3.8.4",
     "tailwindcss": "^4.1.18",
