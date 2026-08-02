@@ -21,7 +21,8 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 | Install with pip (unlocked) | `pip install .` |
 | Install (frontend) | `cd frontend && npm ci` |
 | Run app | `python3 Comicarr.py --nolaunch` |
-| Dev frontend | `cd frontend && npm run dev` |
+| Dev frontend | `cd frontend && npm run dev` → **https://comicarr.localhost:1355** (portless) |
+| Dev frontend (raw Vite) | `cd frontend && npm run dev:vite` → localhost:5173 |
 | Build frontend | `cd frontend && npm run build` |
 | Test backend | `pytest tests/unit -v` |
 | Test frontend | `cd frontend && npm run test:run` |
@@ -39,7 +40,9 @@ Agent-oriented project guide for Comicarr. Prefer retrieval-led reasoning: consu
 | Add dependency | `uv add <package>` |
 | Add dev dep | `uv add --optional dev <package>` |
 
-When using Vite (`npm run dev`) with a separate backend process, the proxy targets `http://localhost:8090`. Override with `VITE_API_PROXY_TARGET` if needed.
+When using Vite with a separate backend process, the proxy targets `http://localhost:8090`. Override with `VITE_API_PROXY_TARGET` if needed.
+
+**Local frontend URL:** `npm run dev` runs through [portless](https://github.com/vercel-labs/portless) at **https://comicarr.localhost:1355** (proxy on unprivileged port 1355 — no sudo). Other projects can use their own names without stealing 5173. First HTTPS session may need `npx portless trust` once. Optional clean URL without `:1355`: `sudo npx portless proxy start --https` then set `PORTLESS_PORT=443` (or stop the 1355 proxy and re-run). Escape hatch: `npm run dev:vite` for bare `localhost:PORT` (feval uses this).
 
 ## Architecture
 
