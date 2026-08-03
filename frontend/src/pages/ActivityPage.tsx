@@ -16,9 +16,7 @@ import {
 import { useDebounce } from "@/hooks/use-debounce";
 import { TimelineView } from "@/components/activity/timeline";
 import { AttentionPrototypeHost } from "@/components/activity/prototype-attention/AttentionPrototypeHost";
-import {
-  parseVariant,
-} from "@/components/activity/prototype-attention/PrototypeSwitcher";
+import { parseVariant } from "@/components/activity/prototype-attention/PrototypeSwitcher";
 import { DataTable } from "@/components/data-table/DataTable";
 import { useTableState } from "@/components/data-table/useTableState";
 import { useServerPage } from "@/components/data-table/useServerPage";

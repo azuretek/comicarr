@@ -27,7 +27,9 @@ export function VariantC() {
   const ranked = useMemo(() => rankByNewest(MOCK_GROUPS), []);
 
   if (route === "attention") {
-    return <AttentionRoute groups={ranked} onBack={() => setRoute("activity")} />;
+    return (
+      <AttentionRoute groups={ranked} onBack={() => setRoute("activity")} />
+    );
   }
 
   const preview = ranked.slice(0, PREVIEW_CAP);
@@ -41,8 +43,16 @@ export function VariantC() {
       />
       <TabRow>
         <Tab active label="Timeline" onClick={() => undefined} />
-        <Tab active={false} label="Direct Downloads" onClick={() => undefined} />
-        <Tab active={false} label="Download History" onClick={() => undefined} />
+        <Tab
+          active={false}
+          label="Direct Downloads"
+          onClick={() => undefined}
+        />
+        <Tab
+          active={false}
+          label="Download History"
+          onClick={() => undefined}
+        />
       </TabRow>
 
       <section
@@ -80,7 +90,11 @@ export function VariantC() {
         </div>
         <div className="flex gap-2 overflow-x-auto px-5 pb-3">
           {preview.map((g) => (
-            <Card key={g.group_key} group={g} onOpen={() => setRoute("attention")} />
+            <Card
+              key={g.group_key}
+              group={g}
+              onOpen={() => setRoute("attention")}
+            />
           ))}
           {more > 0 && (
             <button
@@ -161,9 +175,9 @@ function AttentionRoute({
   groups: MockGroup[];
   onBack: () => void;
 }) {
-  const [stageFilter, setStageFilter] = useState<"all" | "failed" | "manual_review">(
-    "all",
-  );
+  const [stageFilter, setStageFilter] = useState<
+    "all" | "failed" | "manual_review"
+  >("all");
   const [age, setAge] = useState<"all" | "7d" | "30d">("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
@@ -235,7 +249,8 @@ function AttentionRoute({
           <option value="30d">Last 30 days</option>
         </select>
         <span className="font-mono text-[10px] text-muted-foreground">
-          vs Download History: only unresolved · group actions · no import ledger
+          vs Download History: only unresolved · group actions · no import
+          ledger
         </span>
       </div>
 
@@ -256,9 +271,7 @@ function AttentionRoute({
             className="rounded border px-2 py-1 font-mono text-[10px]"
             style={{ borderColor: "var(--border)" }}
             onClick={() => {
-              setToast(
-                `Search again · ${Math.min(25, memberN)} of ${memberN}`,
-              );
+              setToast(`Search again · ${Math.min(25, memberN)} of ${memberN}`);
               setSelected(new Set());
             }}
           >
