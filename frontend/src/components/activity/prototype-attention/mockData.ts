@@ -28,17 +28,22 @@ export type MockGroup = {
 
 /** Operator-facing phrases for admitted base tokens (draft for #526). */
 export const REASON_PHRASES: Record<string, string> = {
-  downloaded_invalid_artifact_command: "downloaded file failed post-process checks",
-  invalid_recovered_postprocess_command: "recovered download has a bad post-process command",
+  downloaded_invalid_artifact_command:
+    "downloaded file failed post-process checks",
+  invalid_recovered_postprocess_command:
+    "recovered download has a bad post-process command",
   postprocess_error: "post-processing failed",
   invalid_postprocess_command: "post-process command is invalid",
   recovered_postprocess_error: "recovered download failed post-processing",
   ddl_artifact_state_persistence_error: "could not save download state (DDL)",
-  torrent_artifact_state_persistence_error: "could not save download state (torrent)",
+  torrent_artifact_state_persistence_error:
+    "could not save download state (torrent)",
   nzb_artifact_state_persistence_error: "could not save download state (NZB)",
-  reserved_without_persisted_acceptance: "download reserved but not fully accepted",
+  reserved_without_persisted_acceptance:
+    "download reserved but not fully accepted",
   route_acceptance_missing_identity: "acceptance missing identity fields",
-  submission_outcome_unknown: "submission result unknown — check the downloader",
+  submission_outcome_unknown:
+    "submission result unknown — check the downloader",
   route_not_restart_safe: "route is not safe to resume after restart",
   download_failed_no_auto_handling: "download failed — auto-handling is off",
   submission_rejected: "submission was rejected",
@@ -82,7 +87,13 @@ function group(
     newest_updated_at: newest,
     oldest_updated_at: oldest,
     available_actions: actions,
-    members: members(series, Math.min(n, 8), stage, `${comicid}-${base_reason}`, newest),
+    members: members(
+      series,
+      Math.min(n, 8),
+      stage,
+      `${comicid}-${base_reason}`,
+      newest,
+    ),
   };
 }
 
@@ -271,17 +282,23 @@ export const MOCK_GROUPS: MockGroup[] = [
 ];
 
 export const TOTAL_GROUPS = MOCK_GROUPS.length;
-export const TOTAL_MEMBERS = MOCK_GROUPS.reduce((s, g) => s + g.member_count, 0);
+export const TOTAL_MEMBERS = MOCK_GROUPS.reduce(
+  (s, g) => s + g.member_count,
+  0,
+);
 
 export function rankByVolumeThenNewest(groups: MockGroup[]): MockGroup[] {
   return [...groups].sort((a, b) => {
-    if (b.member_count !== a.member_count) return b.member_count - a.member_count;
+    if (b.member_count !== a.member_count)
+      return b.member_count - a.member_count;
     return b.newest_updated_at.localeCompare(a.newest_updated_at);
   });
 }
 
 export function rankByNewest(groups: MockGroup[]): MockGroup[] {
-  return [...groups].sort((a, b) => b.newest_updated_at.localeCompare(a.newest_updated_at));
+  return [...groups].sort((a, b) =>
+    b.newest_updated_at.localeCompare(a.newest_updated_at),
+  );
 }
 
 export function actionLabel(id: string): string {
