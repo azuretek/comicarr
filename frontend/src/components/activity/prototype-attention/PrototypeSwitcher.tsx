@@ -26,6 +26,10 @@ export function parseVariant(raw: string | null): VariantKey | null {
 export function PrototypeSwitcher() {
   if (import.meta.env.PROD) return null;
 
+  return <DevelopmentPrototypeSwitcher />;
+}
+
+function DevelopmentPrototypeSwitcher() {
   const [params, setParams] = useSearchParams();
   const current = parseVariant(params.get("variant")) ?? "A";
 
@@ -111,7 +115,10 @@ export function PrototypeSwitcher() {
       </button>
       <div className="min-w-[220px] text-center font-mono text-[11px]">
         <span className="font-semibold">{current}</span>
-        <span className="text-muted-foreground"> — {VARIANT_META[current]}</span>
+        <span className="text-muted-foreground">
+          {" "}
+          — {VARIANT_META[current]}
+        </span>
       </div>
       <button
         type="button"

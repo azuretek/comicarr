@@ -62,8 +62,16 @@ export function VariantB() {
       />
       <TabRow>
         <Tab active label="Timeline" onClick={() => undefined} />
-        <Tab active={false} label="Direct Downloads" onClick={() => undefined} />
-        <Tab active={false} label="Download History" onClick={() => undefined} />
+        <Tab
+          active={false}
+          label="Direct Downloads"
+          onClick={() => undefined}
+        />
+        <Tab
+          active={false}
+          label="Download History"
+          onClick={() => undefined}
+        />
       </TabRow>
 
       {/* One-line band — height ceiling is this strip only */}
@@ -284,7 +292,9 @@ function BulkBar({
       style={{ borderColor: "var(--border)" }}
     >
       {toast && (
-        <p className="mb-2 font-mono text-[11px] text-muted-foreground">{toast}</p>
+        <p className="mb-2 font-mono text-[11px] text-muted-foreground">
+          {toast}
+        </p>
       )}
       {confirmStop ? (
         <div>
