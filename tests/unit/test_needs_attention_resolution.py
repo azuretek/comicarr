@@ -335,16 +335,29 @@ def test_retry_blocked_does_not_stamp(monkeypatch):
     assert key in {r["release_key"] for r in journal.read_needs_attention()}
 
 
-def test_ignore_failed_stamps_and_sets_intent():
+def test_stop_wanting_failed_stamps_and_sets_intent():
+    _seed_issue(status="Failed")
+    key = _seed_failed_row()
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+    result = dl_service.resolve_needs_attention(ctx, key, "stop_wanting", audit_identity="op")
+    assert result["success"] is True
+    assert result["action"] == "stop_wanting"
+    assert _issue_row()["AcquisitionIntent"] == "ignored"
+    assert _issue_row()["Status"] == "Ignored"
+    # The durable stamp keeps its old spelling — renaming a persisted status
+    # would re-admit every row already stamped.
+    assert _journal_row(key)["status"] == journal.STATUS_IGNORED
+    assert _journal_row(key)["stage"] == journal.FAILED
+
+
+def test_retired_ignore_action_id_is_rejected():
     _seed_issue(status="Failed")
     key = _seed_failed_row()
     ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
     result = dl_service.resolve_needs_attention(ctx, key, "ignore", audit_identity="op")
-    assert result["success"] is True
-    assert _issue_row()["AcquisitionIntent"] == "ignored"
-    assert _issue_row()["Status"] == "Ignored"
-    assert _journal_row(key)["status"] == journal.STATUS_IGNORED
-    assert _journal_row(key)["stage"] == journal.FAILED
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert key in {r["release_key"] for r in journal.read_needs_attention()}
 
 
 def test_search_again_manual_review(monkeypatch):
@@ -453,6 +466,109 @@ def test_already_resolved_returns_409_without_side_effects(monkeypatch):
     assert enqueued == []
     assert _issue_row()["Status"] == "Failed"
     assert _journal_row(key)["status"] == journal.STATUS_RETRIED
+
+
+# ---------------------------------------------------------------------------
+# 7. Bulk fan-out (#525)
+# ---------------------------------------------------------------------------
+
+
+def test_batch_stop_wanting_clears_every_member():
+    _seed_issue(issueid="1001", comicid="C1", status="Failed")
+    _seed_issue(issueid="1002", comicid="C2", status="Failed")
+    keys = [
+        _seed_failed_row(key="1001|a", issueid="1001"),
+        _seed_failed_row(key="1002|b", issueid="1002"),
+    ]
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "stop_wanting", keys, audit_identity="op")
+
+    assert result["success"] is True
+    assert result["partial"] is False
+    assert result["succeeded"] == 2
+    assert result["failed"] == 0
+    assert result["capped"] is False
+    assert {r["release_key"] for r in result["results"]} == set(keys)
+    assert not {r["release_key"] for r in journal.read_needs_attention()} & set(keys)
+
+
+def test_batch_is_best_effort_and_reports_partials():
+    """One bad member must not cost its siblings their resolution."""
+    _seed_issue(issueid="1001", comicid="C1", status="Failed")
+    good = _seed_failed_row(key="1001|a", issueid="1001")
+    # No issueid on the row or in its payload — stop_wanting cannot resolve it.
+    orphan = journal.release_key("orphan", "p")
+    journal.record_transition(orphan, journal.SNATCHED, payload={"provider": "p"}, provider="p")
+    journal.mark_failed(orphan, "download_failed_no_auto_handling", provider="p")
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "stop_wanting", [good, orphan], audit_identity="op")
+
+    assert result["success"] is True
+    assert result["partial"] is True
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
+    by_key = {r["release_key"]: r for r in result["results"]}
+    assert by_key[good]["ok"] is True
+    assert by_key[orphan]["ok"] is False
+    assert by_key[orphan]["error"]
+    # The failed member stays on the band for another try; the sibling leaves.
+    on_band = {r["release_key"] for r in journal.read_needs_attention()}
+    assert orphan in on_band
+    assert good not in on_band
+
+
+def test_batch_caps_at_25_newest_first():
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+    keys = []
+    for index in range(30):
+        issueid = "20%02d" % index
+        _seed_issue(issueid=issueid, comicid="C%d" % index, status="Failed")
+        key = _seed_failed_row(key="%s|p" % issueid, issueid=issueid)
+        # Oldest first, so the cap has something meaningful to order.
+        with get_engine().begin() as conn:
+            conn.execute(
+                pipeline_journal.update()
+                .where(pipeline_journal.c.release_key == key)
+                .values(updated_date="2026-07-%02d 10:00:00" % (index + 1))
+            )
+        keys.append(key)
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "stop_wanting", keys, audit_identity="op")
+
+    assert result["requested"] == 30
+    assert result["processed"] == dl_service.BAND_BATCH_CAP == 25
+    assert result["capped"] is True
+    assert result["skipped_for_cap"] == 5
+    # Newest processed first: the five oldest are what got left behind.
+    still_on_band = {r["release_key"] for r in journal.read_needs_attention()}
+    assert still_on_band == set(keys[:5])
+
+
+def test_batch_rejects_unknown_action_and_empty_keys():
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    unknown = dl_service.resolve_needs_attention_batch(ctx, "nuke", ["k"], audit_identity="op")
+    assert unknown["success"] is False
+    assert unknown["status_code"] == 400
+
+    empty = dl_service.resolve_needs_attention_batch(ctx, "retry", [], audit_identity="op")
+    assert empty["success"] is False
+    assert empty["status_code"] == 400
+
+
+def test_batch_rejects_action_the_member_stage_disallows():
+    _seed_issue(status="Snatched")
+    key = _seed_manual_review_row()
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "retry", [key], audit_identity="op")
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert result["results"][0]["ok"] is False
+    assert key in {r["release_key"] for r in journal.read_needs_attention()}
 
 
 # ---------------------------------------------------------------------------

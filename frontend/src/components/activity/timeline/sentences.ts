@@ -193,23 +193,6 @@ export function runProgress(story: Story): string | null {
   return `${counts.resolved} of ${counts.accepted} resolved`;
 }
 
-/** Band phrasing — work queue, so it says what you must decide. */
-export function bandSentence(stage: string, label: string): string {
-  return stage === "manual_review"
-    ? `Stopped on ${label} — needs your decision`
-    : `Couldn't finish ${label}`;
-}
-
-export function bandLabel(item: {
-  subject_label?: string | null;
-  nzbname?: string | null;
-  issueid?: string | null;
-  release_key: string;
-}): string {
-  return (
-    item.subject_label?.trim() ||
-    item.nzbname?.trim() ||
-    (item.issueid ? `issue ${item.issueid}` : "") ||
-    item.release_key
-  );
-}
+// Band phrasing used to live here. It now comes from the server as
+// `reason_phrase` on each group, keyed off the same base token the grouping
+// keys off, so matching and wording cannot drift apart (#523/#526).

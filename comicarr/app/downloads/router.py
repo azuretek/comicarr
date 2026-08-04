@@ -142,6 +142,29 @@ def list_needs_attention(
     return dl_service.list_needs_attention(issueid=issueid)
 
 
+@router.post("/needs-attention/batch")
+def needs_attention_batch(
+    request_body: dict = None,
+    username: str = Depends(require_session),
+    ctx: AppContext = Depends(get_context),
+):
+    """Fan one action out over up to 25 band rows; report per-row outcomes.
+
+    Best-effort per row (#525): a mixed result is ``success: true`` with
+    ``partial: true`` and one ``results[]`` entry per key. Declared **before**
+    the ``{release_key:path}`` routes below so a literal ``batch`` segment can
+    never be read as a release key.
+    """
+    body = request_body or {}
+    result = dl_service.resolve_needs_attention_batch(
+        ctx,
+        body.get("action"),
+        body.get("release_keys") or [],
+        audit_identity=username,
+    )
+    return _resolution_response(result)
+
+
 @router.post("/needs-attention/{release_key:path}/retry")
 def needs_attention_retry(
     release_key: str,
@@ -164,14 +187,16 @@ def needs_attention_search_again(
     )
 
 
-@router.post("/needs-attention/{release_key:path}/ignore")
-def needs_attention_ignore(
+@router.post("/needs-attention/{release_key:path}/stop-wanting")
+def needs_attention_stop_wanting(
     release_key: str,
     username: str = Depends(require_session),
     ctx: AppContext = Depends(get_context),
 ):
-    """Ignore issue (AcquisitionIntent.IGNORED) and stamp status=ignored."""
-    return _resolution_response(dl_service.resolve_needs_attention(ctx, release_key, "ignore", audit_identity=username))
+    """Stop wanting the issue (AcquisitionIntent.IGNORED); stamp status=ignored."""
+    return _resolution_response(
+        dl_service.resolve_needs_attention(ctx, release_key, "stop_wanting", audit_identity=username)
+    )
 
 
 @router.post("/needs-attention/{release_key:path}/import")

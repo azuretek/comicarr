@@ -43,9 +43,11 @@ describe("formatQuietStatus", () => {
     expect(withAttention.line).toBe(
       "library: 412 series · api: online · 3 in flight · ⚠ 2 need attention",
     );
+    // Attention lands on the triage route — the only reason to click it is to
+    // work through the problems, not to read the timeline.
     expect(
       withAttention.segments.find((s) => s.role === "attention")?.href,
-    ).toBe("/activity");
+    ).toBe("/activity/attention");
 
     const noAttention = formatQuietStatus(snap({ inFlight: 3, attention: 0 }));
     expect(noAttention.line).toBe(

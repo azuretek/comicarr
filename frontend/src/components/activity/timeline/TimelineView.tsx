@@ -164,7 +164,7 @@ export function TimelineView({
   const timeline = useActivityTimeline({ scope_type, scope_id });
   const band = useActivityBand({ scope_type, scope_id });
 
-  const bandItems = band.data?.results ?? [];
+  const bandGroups = band.data?.results ?? [];
   const events = useMemo(
     () => timeline.data?.pages.flatMap((p) => p.results) ?? [],
     [timeline.data?.pages],
@@ -225,7 +225,7 @@ export function TimelineView({
   }
 
   // Empty state replaces toolbar on first run (no events, no band).
-  if (nodes.length === 0 && bandItems.length === 0) {
+  if (nodes.length === 0 && bandGroups.length === 0) {
     return (
       <>
         {scoped && (
@@ -243,7 +243,14 @@ export function TimelineView({
     // put and only the feed scrolls — the pager below it stays reachable
     // without scrolling to the end of the timeline.
     <div className="flex h-full min-h-0 flex-col">
-      <AttentionBand items={bandItems} />
+      <AttentionBand
+        groups={bandGroups}
+        total={band.data?.total ?? bandGroups.length}
+        memberTotal={band.data?.member_total ?? bandGroups.length}
+        previewCap={band.data?.preview_cap ?? 5}
+        scope_type={scope_type}
+        scope_id={scope_id}
+      />
 
       {scoped && (
         <div className="flex shrink-0 items-center gap-2 border-b border-border px-5 py-2 font-mono text-[11px] text-muted-foreground">

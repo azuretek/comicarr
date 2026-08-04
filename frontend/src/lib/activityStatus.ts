@@ -21,7 +21,7 @@ export interface ActivityStatusSnapshot {
    * (accepted|running run items + OPEN_STAGES journal)
    */
   inFlight: number;
-  /** GET /api/activity/status → attention (unresolved band count) */
+  /** GET /api/activity/status → attention (unresolved band *group* count) */
   attention: number;
   /** SSE health from useServerEvents; only a prolonged loss is reported. */
   live: LiveConnectionState;
@@ -97,8 +97,11 @@ export function formatQuietStatus(s: ActivityStatusSnapshot): QuietStatusMeta {
       segments.push({ role: "separator", text: "·" });
       segments.push({
         role: "attention",
+        // The count is *groups* — distinct problems, not journal rows — and it
+        // lands on the triage route rather than the timeline, because the only
+        // reason to click it is to work through them.
         text: `⚠ ${s.attention} need attention`,
-        href: "/activity",
+        href: "/activity/attention",
       });
     }
   }

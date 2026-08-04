@@ -18,6 +18,7 @@ from sqlalchemy import and_, func, or_, select, union
 
 from comicarr import db
 from comicarr.app.acquisition.models import ItemOutcome
+from comicarr.app.activity import grouping
 from comicarr.app.core.database import paginated_query
 from comicarr.app.downloads.journal import FAILED, MANUAL_REVIEW, OPEN_STAGES
 from comicarr.tables import acquisition_run_items, activity_events, annuals, issues, pipeline_journal
@@ -161,7 +162,7 @@ def list_attention_band(scope_type=None, scope_id=None):
 
 
 def count_attention_band(scope_type=None, scope_id=None):
-    """Count unresolved needs-attention journal rows (derived ledger only)."""
+    """Count unresolved needs-attention journal *rows* (derived ledger only)."""
     scope_type, scope_id = _normalize_scope(scope_type, scope_id)
     stmt = (
         select(func.count().label("attention_count")).select_from(pipeline_journal).where(unresolved_band_condition())
@@ -170,6 +171,22 @@ def count_attention_band(scope_type=None, scope_id=None):
         stmt = stmt.where(_band_scope_condition(scope_type, scope_id))
     row = db.select_one(stmt)
     return int((row or {}).get("attention_count", 0) or 0)
+
+
+def list_attention_groups(scope_type=None, scope_id=None):
+    """Group the unresolved band by ``(comicid, base_reason)``, newest first."""
+    return grouping.build_groups(list_attention_band(scope_type=scope_type, scope_id=scope_id))
+
+
+def count_attention_groups(scope_type=None, scope_id=None):
+    """Count band *groups* — the number the status line reports.
+
+    Runs the same builder as ``list_attention_groups`` rather than a separate
+    SQL expression. Grouping keys off ``payload_json``, which no portable
+    dialect expression can reach, so a second implementation would be the only
+    way the band and the status count could ever disagree (#524).
+    """
+    return len(list_attention_groups(scope_type=scope_type, scope_id=scope_id))
 
 
 def count_in_flight_run_items():
@@ -198,10 +215,14 @@ def get_open_work_counts():
     """Quiet-count DTO inputs from derived ledgers only.
 
     ``in_flight`` = accepted|running run items + OPEN_STAGES journal rows.
-    ``attention`` = unresolved band count.
+    ``attention`` = unresolved band **group** count — the number of distinct
+    problems, which is what the band shows and what the operator has to act on.
+    ``attention_members`` keeps the underlying row count available for copy that
+    needs "N issues across K problems".
     Never reads ``activity_events``.
     """
     return {
         "in_flight": count_in_flight_run_items() + count_open_journal_stages(),
-        "attention": count_attention_band(),
+        "attention": count_attention_groups(),
+        "attention_members": count_attention_band(),
     }

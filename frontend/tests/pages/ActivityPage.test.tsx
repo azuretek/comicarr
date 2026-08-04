@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "../mocks/server";
-import { render, screen, waitFor } from "../test-utils";
+import { render, screen, waitFor, within } from "../test-utils";
 import ActivityPage from "@/pages/ActivityPage";
 
 const queueItem = {
@@ -33,9 +33,39 @@ function emptyTimelineHandlers() {
       }),
     ),
     http.get("/api/activity/band", () =>
-      HttpResponse.json({ results: [], total: 0 }),
+      HttpResponse.json({
+        results: [],
+        total: 0,
+        member_total: 0,
+        preview_cap: 5,
+      }),
     ),
   ];
+}
+
+function bandGroup(overrides = {}) {
+  return {
+    group_key: "42|download_failed",
+    comicid: "42",
+    series_label: "Saga",
+    base_reason: "download_failed",
+    reason_phrase: "the download failed",
+    member_count: 1,
+    newest_updated_at: "2026-07-10 12:00:00",
+    oldest_updated_at: "2026-07-10 12:00:00",
+    stage: "failed",
+    available_actions: ["retry", "stop_wanting"],
+    members: [
+      {
+        release_key: "rk-failed-1",
+        issue_label: "Saga #9",
+        issueid: "iss-9",
+        stage: "failed",
+        updated_date: "2026-07-10 12:00:00",
+      },
+    ],
+    ...overrides,
+  };
 }
 
 describe("ActivityPage", () => {
@@ -57,10 +87,9 @@ describe("ActivityPage", () => {
     ).toBeNull();
   });
 
-  it("renders Variant A timeline rows, band actions, and scoped query params", async () => {
+  it("renders Variant A timeline rows, a bounded band preview, and scoped query params", async () => {
     let timelineUrl: URL | undefined;
     let bandUrl: URL | undefined;
-    const resolveCalls: string[] = [];
 
     server.use(
       http.get("/api/activity/timeline", ({ request }) => {
@@ -106,36 +135,24 @@ describe("ActivityPage", () => {
       }),
       http.get("/api/activity/band", ({ request }) => {
         bandUrl = new URL(request.url);
+        // Eight groups against a preview cap of five: the fold has to appear.
         return HttpResponse.json({
-          results: [
-            {
-              release_key: "rk-failed-1",
-              stage: "failed",
-              issueid: "iss-9",
-              nzbname: "Broken.cbz",
-              fail_reason: "download_failed",
-              updated_date: "2026-07-10 12:00:00",
-              status: null,
-            },
-          ],
-          total: 1,
+          results: Array.from({ length: 8 }, (_, i) =>
+            bandGroup({
+              group_key: `4${i}|download_failed`,
+              comicid: `4${i}`,
+              series_label: `Series ${i}`,
+              member_count: i + 1,
+              newest_updated_at: `2026-07-1${i} 12:00:00`,
+            }),
+          ),
+          total: 8,
+          member_total: 36,
+          preview_cap: 5,
         });
       }),
-      http.post(
-        "/api/downloads/needs-attention/:releaseKey/retry",
-        ({ params }) => {
-          resolveCalls.push(String(params.releaseKey));
-          return HttpResponse.json({
-            success: true,
-            status: "retried",
-            action: "retry",
-            release_key: params.releaseKey,
-          });
-        },
-      ),
     );
 
-    const user = userEvent.setup();
     render(<ActivityPage />, {
       route: "/activity?scope_type=series&scope_id=ser-1",
       useMemoryRouter: true,
@@ -163,12 +180,22 @@ describe("ActivityPage", () => {
     expect(bandUrl?.searchParams.get("scope_type")).toBe("series");
     expect(bandUrl?.searchParams.get("scope_id")).toBe("ser-1");
 
-    expect(screen.getByLabelText("Needs attention")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "retry" }));
-    await waitFor(() => {
-      expect(resolveCalls).toEqual(["rk-failed-1"]);
-    });
-    expect(await screen.findByText(/Retry started/)).toBeTruthy();
+    // The band is bounded: five cards plus a fold, never one row per problem.
+    // Ranking is the server's — the client shows the first `preview_cap` it is
+    // given and never re-sorts, so the band and the triage route agree.
+    const band = screen.getByLabelText("Needs attention");
+    expect(band).toBeTruthy();
+    expect(screen.getByText("8 need attention")).toBeTruthy();
+    expect(screen.getByText("36 issues · clears only by action")).toBeTruthy();
+    expect(screen.getByText("Series 4")).toBeTruthy();
+    expect(screen.queryByText("Series 5")).toBeNull();
+    expect(screen.getByText("+3")).toBeTruthy();
+
+    // The band routes; it never resolves. No action buttons live on it.
+    expect(within(band).queryByRole("button")).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "See all 8 →" }).getAttribute("href"),
+    ).toBe("/activity/attention?scope_type=series&scope_id=ser-1");
   });
 
   it("labels terminal and manual-review queue rows truthfully and only retries failed DDL work after confirmation", async () => {

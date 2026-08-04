@@ -172,9 +172,9 @@ def process_issue(comicid, folder, issueid=None):
 # Needs-attention band (R9 resolution actions — #483)
 # ---------------------------------------------------------------------------
 
-_FAILED_ACTIONS = frozenset({"retry", "ignore"})
-_MANUAL_REVIEW_ACTIONS = frozenset({"import", "search_again", "ignore"})
-_BAND_ACTIONS = _FAILED_ACTIONS | _MANUAL_REVIEW_ACTIONS
+# Hard cap on one bulk request (#525). Fixed in code, not configurable: a knob
+# that raises the 1am fan-out undoes the safety it exists for.
+BAND_BATCH_CAP = 25
 
 
 def list_needs_attention(*, issueid=None):
@@ -304,7 +304,13 @@ def _resolve_retry_or_search_again(ctx, row, release_key, *, action, audit_ident
     }
 
 
-def _resolve_ignore(row, release_key, *, audit_identity):
+def _resolve_stop_wanting(row, release_key, *, audit_identity):
+    """Mark the issue ignored in the library and stamp the row off the band.
+
+    The action id is ``stop_wanting`` (#525) because "ignore" read as
+    dismiss-this-alert; the durable journal stamp stays ``STATUS_IGNORED`` so
+    the unresolved predicate keeps matching every row already stamped.
+    """
     from comicarr.app.downloads import journal
     from comicarr.app.series import queries as series_queries
 
@@ -321,11 +327,11 @@ def _resolve_ignore(row, release_key, *, audit_identity):
     return {
         "success": True,
         "status": "ignored",
-        "action": "ignore",
+        "action": journal.ACTION_STOP_WANTING,
         "release_key": release_key,
         "issue_id": issue_id,
         "stamped": stamped,
-        "message": "Issue ignored",
+        "message": "Issue will not be searched again until you want it back",
     }
 
 
@@ -404,8 +410,8 @@ def resolve_needs_attention(
 ):
     """Apply one operator band exit without rewriting journal stage.
 
-    ``failed``: retry | ignore
-    ``manual_review``: import | search_again | ignore
+    ``failed``: retry | stop_wanting
+    ``manual_review``: import | search_again | stop_wanting
     """
     from comicarr.app.downloads import journal
 
@@ -418,7 +424,7 @@ def resolve_needs_attention(
         }
 
     action_name = str(action or "").strip().lower()
-    if action_name not in _BAND_ACTIONS:
+    if action_name not in journal.BAND_ACTIONS:
         return {
             "success": False,
             "status": "failed",
@@ -431,27 +437,21 @@ def resolve_needs_attention(
         return err
 
     stage = row.get("stage")
-    if stage == journal.FAILED and action_name not in _FAILED_ACTIONS:
+    legal = journal.STAGE_ACTIONS.get(stage, ())
+    if action_name not in legal:
         return {
             "success": False,
             "status": "failed",
-            "error": "Action %s is not valid for failed rows" % action_name,
-            "status_code": 409,
-        }
-    if stage == journal.MANUAL_REVIEW and action_name not in _MANUAL_REVIEW_ACTIONS:
-        return {
-            "success": False,
-            "status": "failed",
-            "error": "Action %s is not valid for manual_review rows" % action_name,
+            "error": "Action %s is not valid for %s rows" % (action_name, stage),
             "status_code": 409,
         }
 
     key = str(release_key).strip()
-    if action_name in {"retry", "search_again"}:
+    if action_name in {journal.ACTION_RETRY, journal.ACTION_SEARCH_AGAIN}:
         return _resolve_retry_or_search_again(ctx, row, key, action=action_name, audit_identity=audit_identity)
-    if action_name == "ignore":
-        return _resolve_ignore(row, key, audit_identity=audit_identity)
-    if action_name == "import":
+    if action_name == journal.ACTION_STOP_WANTING:
+        return _resolve_stop_wanting(row, key, audit_identity=audit_identity)
+    if action_name == journal.ACTION_IMPORT:
         return _resolve_import(row, key, nzb_name=nzb_name, nzb_folder=nzb_folder)
     return {
         "success": False,
@@ -459,6 +459,104 @@ def resolve_needs_attention(
         "error": "Unknown action",
         "status_code": 400,
     }
+
+
+def _batch_order(release_keys):
+    """Newest ``updated_date`` first, so a capped batch clears the fresh trouble.
+
+    Keys with no journal row keep their submitted position — they will fail
+    per-item in the resolver, and sorting them to the back would let a cap
+    silently swallow the very rows whose failure the operator needs to see.
+    """
+    from comicarr.app.downloads import journal
+
+    stamped = []
+    for index, key in enumerate(release_keys):
+        row = journal.read_one(key)
+        updated = (row or {}).get("updated_date")
+        stamped.append((updated is not None, str(updated or ""), index, key))
+    stamped.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[3] for item in stamped]
+
+
+def resolve_needs_attention_batch(ctx, action, release_keys, *, audit_identity):
+    """Fan one band action out over many rows — best effort, per row (#525).
+
+    No all-or-nothing transaction: each member runs the same path as the
+    single-row resolver, so a member that fails stays on the band while its
+    siblings leave it. The operator's goal on a restart burst is to clear what
+    can be cleared, not to fail sixteen rows because one orphan has no issueid.
+
+    At most ``BAND_BATCH_CAP`` keys are processed per request; the remainder is
+    reported as ``skipped_for_cap`` and left for another click.
+    """
+    from comicarr.app.downloads import journal
+
+    action_name = str(action or "").strip().lower()
+    if action_name not in journal.BAND_ACTIONS:
+        return {
+            "success": False,
+            "error": "Unknown action",
+            "status_code": 400,
+        }
+
+    keys = []
+    seen = set()
+    for raw in release_keys or []:
+        key = str(raw or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+
+    if not keys:
+        return {
+            "success": False,
+            "error": "No release_keys supplied",
+            "status_code": 400,
+        }
+
+    ordered = _batch_order(keys)
+    processed = ordered[:BAND_BATCH_CAP]
+    skipped = len(ordered) - len(processed)
+
+    results = []
+    succeeded = 0
+    for key in processed:
+        outcome = resolve_needs_attention(ctx, key, action_name, audit_identity=audit_identity)
+        ok = bool(outcome.get("success"))
+        if ok:
+            succeeded += 1
+        results.append(
+            {
+                "release_key": key,
+                "ok": ok,
+                "status": outcome.get("status"),
+                "error": None if ok else (outcome.get("error") or outcome.get("message")),
+                "status_code": None if ok else outcome.get("status_code"),
+            }
+        )
+
+    failed = len(processed) - succeeded
+    response = {
+        # Only a malformed request or a wholly failed batch is an overall
+        # failure; a mixed result is a success the operator can act on again.
+        "success": succeeded > 0,
+        "partial": succeeded > 0 and failed > 0,
+        "action": action_name,
+        "requested": len(ordered),
+        "processed": len(processed),
+        "succeeded": succeeded,
+        "failed": failed,
+        "capped": skipped > 0,
+        "skipped_for_cap": skipped,
+        "cap": BAND_BATCH_CAP,
+        "results": results,
+    }
+    if succeeded == 0:
+        response["status_code"] = 409
+        response["error"] = "No rows could be resolved"
+    return response
 
 
 # ---------------------------------------------------------------------------

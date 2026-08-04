@@ -58,6 +58,9 @@ const ImportPage = () => (
 const ActivityPage = () => (
   <RouteLoader load={() => import("@/pages/ActivityPage")} />
 );
+const AttentionPage = () => (
+  <RouteLoader load={() => import("@/pages/AttentionPage")} />
+);
 const ChatPage = () => <RouteLoader load={() => import("@/pages/ChatPage")} />;
 
 function ChatWorkspace() {
@@ -168,6 +171,10 @@ function AppContent() {
                         element={<StoryArcDetailPage />}
                       />
                       <Route path="/activity" element={<ActivityPage />} />
+                      <Route
+                        path="/activity/attention"
+                        element={<AttentionPage />}
+                      />
                       <Route path="/import" element={<ImportPage />} />
                       <Route path="/settings" element={<SettingsPage />} />
                       <Route path="*" element={<Navigate to="/" replace />} />

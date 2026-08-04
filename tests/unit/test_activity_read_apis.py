@@ -293,6 +293,266 @@ def test_band_series_scope_via_issue_and_annual_membership(activity_db):
 
 
 # ---------------------------------------------------------------------------
+# Band grouping (#524 key contract)
+# ---------------------------------------------------------------------------
+
+
+def _payload(**fields):
+    import json
+
+    return json.dumps(fields)
+
+
+def test_groups_key_on_comicid_and_base_reason(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(
+                    release_key="a1",
+                    issueid="iss-1",
+                    stage="manual_review",
+                    fail_reason="postprocess_error:OperationalError",
+                    payload_json=_payload(comicid="42", comicname="Saga", issuenumber="1"),
+                ),
+                # Same series + same base token, different composite suffix → one group.
+                _journal(
+                    release_key="a2",
+                    issueid="iss-2",
+                    stage="manual_review",
+                    fail_reason="postprocess_error:ValueError",
+                    payload_json=_payload(comicid="42", comicname="Saga", issuenumber="2"),
+                ),
+                # Same series, different base token → its own group.
+                _journal(
+                    release_key="a3",
+                    issueid="iss-3",
+                    stage="failed",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="42", comicname="Saga", issuenumber="3"),
+                ),
+            ],
+        )
+
+    groups = queries.list_attention_groups()
+    by_key = {group["group_key"]: group for group in groups}
+
+    assert set(by_key) == {"42|postprocess_error", "42|submission_rejected"}
+    assert by_key["42|postprocess_error"]["member_count"] == 2
+    assert by_key["42|postprocess_error"]["series_label"] == "Saga"
+    assert by_key["42|submission_rejected"]["member_count"] == 1
+    assert queries.count_attention_groups() == 2
+
+
+def test_groups_never_key_on_comicname(activity_db):
+    """A typographic apostrophe must not split one series into two groups."""
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(
+                    release_key="w1",
+                    issueid="iss-1",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="141907", comicname="Batman/Superman: World's Finest"),
+                ),
+                _journal(
+                    release_key="w2",
+                    issueid="iss-2",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="141907", comicname="Batman/Superman: World’s Finest"),
+                ),
+            ],
+        )
+
+    groups = queries.list_attention_groups()
+    assert len(groups) == 1
+    assert groups[0]["member_count"] == 2
+
+
+def test_rows_without_comicid_become_singletons(activity_db):
+    """No catch-all bucket: an unlabelled row is its own group, not a pile."""
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(release_key="orphan-1", issueid="iss-1", fail_reason="submission_rejected", payload_json=None),
+                _journal(release_key="orphan-2", issueid="iss-2", fail_reason="submission_rejected", payload_json=None),
+            ],
+        )
+
+    groups = queries.list_attention_groups()
+    assert len(groups) == 2
+    assert all(group["member_count"] == 1 for group in groups)
+    assert all(group["comicid"] is None for group in groups)
+
+
+def test_group_label_ladder_falls_back_to_series_id(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(
+                    release_key="nolabel",
+                    issueid="iss-1",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="18839"),
+                )
+            ],
+        )
+
+    assert queries.list_attention_groups()[0]["series_label"] == "Series 18839"
+
+
+def test_group_actions_are_the_stage_intersection(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(
+                    release_key="m1",
+                    issueid="iss-1",
+                    stage="failed",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="7", comicname="Mixed"),
+                ),
+                _journal(
+                    release_key="m2",
+                    issueid="iss-2",
+                    stage="manual_review",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="7", comicname="Mixed"),
+                ),
+                _journal(
+                    release_key="f1",
+                    issueid="iss-3",
+                    stage="failed",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="8", comicname="Pure"),
+                ),
+            ],
+        )
+
+    by_key = {group["group_key"]: group for group in queries.list_attention_groups()}
+
+    # Mixed stages offer no group primary action — selection only.
+    assert by_key["7|submission_rejected"]["stage"] == "mixed"
+    assert by_key["7|submission_rejected"]["available_actions"] == []
+
+    assert by_key["8|submission_rejected"]["stage"] == "failed"
+    assert by_key["8|submission_rejected"]["available_actions"] == ["retry", "stop_wanting"]
+
+
+def test_groups_rank_newest_first(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                # Bigger, but older: volume must not outrank recency.
+                _journal(
+                    release_key="old-1",
+                    issueid="iss-1",
+                    updated_date="2026-07-01 10:00:00",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="1", comicname="Old"),
+                ),
+                _journal(
+                    release_key="old-2",
+                    issueid="iss-2",
+                    updated_date="2026-07-01 11:00:00",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="1", comicname="Old"),
+                ),
+                _journal(
+                    release_key="new-1",
+                    issueid="iss-3",
+                    updated_date="2026-07-09 09:00:00",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="2", comicname="New"),
+                ),
+            ],
+        )
+
+    groups = queries.list_attention_groups()
+    assert [group["series_label"] for group in groups] == ["New", "Old"]
+    assert groups[1]["oldest_updated_at"] == "2026-07-01 10:00:00"
+    assert groups[1]["newest_updated_at"] == "2026-07-01 11:00:00"
+
+
+def test_scoped_band_filters_members_then_groups(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(insert(issues), [{"IssueID": "iss-1", "ComicID": "ser-1", "ComicName": "Saga"}])
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(
+                    release_key="in-scope",
+                    issueid="iss-1",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="42", comicname="Saga"),
+                ),
+                # Same group key, out of scope: must not join the scoped group.
+                _journal(
+                    release_key="out-of-scope",
+                    issueid="iss-9",
+                    fail_reason="submission_rejected",
+                    payload_json=_payload(comicid="42", comicname="Saga"),
+                ),
+            ],
+        )
+
+    groups = queries.list_attention_groups(scope_type="series", scope_id="ser-1")
+    assert len(groups) == 1
+    assert groups[0]["member_count"] == 1
+    assert groups[0]["members"][0]["release_key"] == "in-scope"
+
+
+def test_reason_phrase_matches_on_base_token(activity_db):
+    from comicarr.app.activity import queries
+
+    with activity_db.begin() as conn:
+        conn.execute(
+            insert(pipeline_journal),
+            [
+                _journal(
+                    release_key="phrase-1",
+                    issueid="iss-1",
+                    stage="manual_review",
+                    fail_reason="downloaded_invalid_artifact_command:PostProcessCommandError",
+                    payload_json=_payload(comicid="42", comicname="Saga"),
+                ),
+                _journal(
+                    release_key="phrase-2",
+                    issueid="iss-2",
+                    stage="manual_review",
+                    fail_reason="some_brand_new_token",
+                    payload_json=_payload(comicid="43", comicname="Other"),
+                ),
+            ],
+        )
+
+    by_label = {group["series_label"]: group for group in queries.list_attention_groups()}
+    # Composite families resolve — the whole point of keying on the base token.
+    assert by_label["Saga"]["reason_phrase"] == "downloaded file failed post-process checks"
+    # Unknown tokens degrade to prose, never a raw snake_case token.
+    assert by_label["Other"]["reason_phrase"] == "something went wrong"
+
+
+# ---------------------------------------------------------------------------
 # Open-work counts (authority rule)
 # ---------------------------------------------------------------------------
 
@@ -390,7 +650,7 @@ def test_open_work_idle_when_ledgers_empty(activity_db):
     from comicarr.app.activity import queries
 
     counts = queries.get_open_work_counts()
-    assert counts == {"in_flight": 0, "attention": 0}
+    assert counts == {"in_flight": 0, "attention": 0, "attention_members": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -415,11 +675,99 @@ def test_service_timeline_and_status_shapes(activity_db):
 
     band = service.get_attention_band()
     assert len(band["results"]) == 1
-    assert band["results"][0]["release_key"] == "band-1"
+    assert band["results"][0]["members"][0]["release_key"] == "band-1"
+    assert band["member_total"] == 1
 
     status = service.get_status()
     assert status["in_flight"] == 0
     assert status["attention"] == 1
+
+
+def test_band_endpoint_collapses_a_production_shaped_pile(activity_db):
+    """The wire shape the frontend types mirror, at the volume that broke it.
+
+    399 unresolved rows is what a real restart-replay left behind; the operator
+    complaint was that every one of them rendered above the timeline.
+    """
+    import json
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from comicarr.app.activity.router import router
+    from comicarr.app.core.security import require_session
+
+    rows = []
+    # One dominant series (a burst), plus a long tail of small ones.
+    for index in range(173):
+        rows.append(
+            _journal(
+                release_key="looney-%d" % index,
+                issueid="lt-%d" % index,
+                stage="manual_review",
+                stage_rank=55,
+                fail_reason="downloaded_invalid_artifact_command:PostProcessCommandError",
+                payload_json=json.dumps(
+                    {"comicid": "18839", "comicname": "Looney Tunes", "issuenumber": str(index)}
+                ),
+            )
+        )
+    for index in range(226):
+        rows.append(
+            _journal(
+                release_key="tail-%d" % index,
+                issueid="tl-%d" % index,
+                stage="manual_review",
+                stage_rank=55,
+                fail_reason="postprocess_error:OperationalError",
+                payload_json=json.dumps(
+                    {"comicid": "s%d" % (index % 38), "comicname": "Series %d" % (index % 38)}
+                ),
+            )
+        )
+
+    with activity_db.begin() as conn:
+        conn.execute(insert(pipeline_journal), rows)
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_session] = lambda: "operator"
+
+    with TestClient(app) as client:
+        band = client.get("/api/activity/band")
+        assert band.status_code == 200
+        body = band.json()
+
+        # 399 rows collapse to 39 groups — one per (series, base reason).
+        assert body["member_total"] == 399
+        assert body["total"] == 39
+        assert len(body["results"]) == 39
+        assert body["preview_cap"] == 5
+
+        first = body["results"][0]
+        assert set(first) >= {
+            "group_key",
+            "series_label",
+            "base_reason",
+            "reason_phrase",
+            "member_count",
+            "newest_updated_at",
+            "oldest_updated_at",
+            "stage",
+            "available_actions",
+            "members",
+        }
+
+        biggest = max(body["results"], key=lambda g: g["member_count"])
+        assert biggest["series_label"] == "Looney Tunes"
+        assert biggest["member_count"] == 173
+        assert biggest["reason_phrase"] == "downloaded file failed post-process checks"
+        assert biggest["available_actions"] == ["import", "search_again", "stop_wanting"]
+
+        # The status line reports the same 39 the band does.
+        status = client.get("/api/activity/status")
+        assert status.json()["attention"] == 39
+        assert status.json()["attention_members"] == 399
 
 
 def test_router_registers_session_protected_routes():

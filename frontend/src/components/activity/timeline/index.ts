@@ -10,18 +10,26 @@ export {
   storyHasTrouble,
 } from "./stories";
 export {
-  bandLabel,
-  bandSentence,
   reasonDetailLine,
   reasonPhrase,
   runProgress,
   sentenceFor,
   storyHeadline,
 } from "./sentences";
+export {
+  actionLabel,
+  stageAccent,
+  stageDescription,
+  stageLabel,
+  stopWantingConsequence,
+} from "./attentionStage";
 export type {
   Activity,
-  BandItem,
+  AttentionGroup,
+  AttentionMember,
+  BandAction,
   BandPage,
+  BandStage,
   FeedNode,
   Story,
   TimelineEvent,
