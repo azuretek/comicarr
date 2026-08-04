@@ -124,6 +124,18 @@ export default function AttentionPage() {
     selectedMembers.map(({ group }) => group.group_key),
   ).size;
 
+  // Every issue the current filters admit — what "select all" means here, so
+  // narrowing the filters first narrows what the checkbox grabs.
+  const filteredKeys = useMemo(
+    () =>
+      filtered.flatMap((group) =>
+        group.members.map((member) => member.release_key),
+      ),
+    [filtered],
+  );
+  const allSelected =
+    filteredKeys.length > 0 && selectedIssues === filteredKeys.length;
+
   const scoped = Boolean(scope_type?.trim() && scope_id?.trim());
 
   const clearGroupFocus = () => {
@@ -299,6 +311,22 @@ export default function AttentionPage() {
           <option value="7d">last 7 days</option>
           <option value="30d">last 30 days</option>
         </select>
+        {filteredKeys.length > 0 && (
+          <label className="flex cursor-pointer items-center gap-1.5 font-mono text-[10px] text-muted-foreground hover:text-foreground">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              ref={(node) => {
+                // Partial selection must not read as "none picked".
+                if (node)
+                  node.indeterminate = selectedIssues > 0 && !allSelected;
+              }}
+              onChange={() => setKeysSelected(filteredKeys, !allSelected)}
+              aria-label={`Select all ${filteredKeys.length} issues`}
+            />
+            select all {filteredKeys.length}
+          </label>
+        )}
         <span className="ml-auto font-mono text-[10px] text-muted-foreground">
           unresolved only · Download History keeps the full ledger
         </span>
