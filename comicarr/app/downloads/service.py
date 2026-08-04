@@ -1342,22 +1342,38 @@ def _finalize_ddl_download(item, ddzstat, release_key):
             ddzstat["link_type_failure"] = item.get("link_type")
 
     if not ddzstat.get("success"):
+        fail_payload = {
+            "issueid": item.get("issueid"),
+            "comicid": item.get("comicid"),
+            "provider": "DDL",
+            "ddl_id": item.get("id"),
+            "filename": item.get("filename"),
+            "ddl": True,
+        }
         journal.mark_failed(
             release_key,
             "ddl_download_or_artifact_validation_failed",
-            payload={
-                "issueid": item.get("issueid"),
-                "comicid": item.get("comicid"),
-                "provider": "DDL",
-                "ddl_id": item.get("id"),
-                "filename": item.get("filename"),
-                "ddl": True,
-            },
+            payload=fail_payload,
             issueid=item.get("issueid"),
             provider="DDL",
             downloader_type="ddl",
             nzbname=item.get("filename"),
         )
+        # Clause 2 (#541): release is dead — blocklist + re-want.
+        try:
+            from comicarr.app.activity.reconcile import reconcile_excluded
+
+            reconcile_excluded(
+                "ddl_download_or_artifact_validation_failed",
+                issueid=item.get("issueid"),
+                provider="DDL",
+                nzbname=item.get("filename"),
+                release_id=item.get("id"),
+                comicid=item.get("comicid"),
+                payload=fail_payload,
+            )
+        except Exception as e:
+            logger.error("[DOWNLOADS-DDL] band reconciliation after validation failure: %s" % e)
         return False
 
     nzb_name = ddzstat.get("filename") or os.path.basename(ddzstat["path"])
@@ -1496,6 +1512,23 @@ def ddl_downloader(queue):
                             downloader_type="ddl",
                             nzbname=filename,
                         )
+                        # Clause 2 (#541): attempt dead, release may be fine — re-want only.
+                        try:
+                            from comicarr.app.activity.reconcile import reconcile_excluded
+
+                            reconcile_excluded(
+                                "ddl-worker-rejected",
+                                issueid=issueid,
+                                provider="DDL",
+                                nzbname=filename,
+                                release_id=item_id,
+                                payload=journal_payload,
+                            )
+                        except Exception as recon_error:
+                            logger.error(
+                                "[DOWNLOADS-DDL] band reconciliation after worker reject %s: %s"
+                                % (item_id, recon_error)
+                            )
                 except Exception as journal_error:
                     logger.error(
                         "[DOWNLOADS-DDL] Unable to close journal for rejected DDL item %s: %s"
@@ -2199,6 +2232,21 @@ def _handle_torrent_monitor_result(item, snstat):
             nzbname=item.get("nzbname"),
             hash=item.get("hash"),
         )
+        # Clause 2 (#541): attempt lost, release may be fine — re-want only.
+        try:
+            from comicarr.app.activity.reconcile import reconcile_excluded
+
+            reconcile_excluded(
+                "torrent_hash_not_in_client",
+                issueid=item.get("issueid"),
+                provider=item.get("provider"),
+                nzbname=item.get("nzbname"),
+                hash=item.get("hash"),
+                comicid=item.get("comicid"),
+                payload=payload,
+            )
+        except Exception as e:
+            logger.error("[DOWNLOADS-WORKER] band reconciliation after missing torrent hash: %s" % e)
         return
 
     if status not in {"MONITOR FAIL", "MONITOR COMPLETE"}:

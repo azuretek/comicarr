@@ -16,7 +16,7 @@ Comicarr is built on the foundation of Mylar3 with a completely rebuilt React 19
 | Run app | `python3 Comicarr.py --nolaunch` |
 | Test backend | `pytest tests/unit -v` |
 | Lint modern backend | `npm run lint:modern` (`comicarr/app` + `Comicarr.py`) |
-| Check retired globals | `npm run lint:guards` (`scripts/check_retired_globals.py`) |
+| Check retired globals + fail_reason registry | `npm run lint:guards` (`scripts/check_retired_globals.py`, `scripts/check_fail_reason_registry.py`) |
 | Lint all (CI parity) | `npm run lint` |
 | Regenerate settings types | `npm run lint:fix:generated` (after editing the config registry) |
 
@@ -60,6 +60,7 @@ Conventional PR titles keep history readable, but they do not control releases. 
 - **Do NOT manually bump versions** - Changesets release automation handles this
 - **Do NOT call `useReactTable` directly** - `no-restricted-imports` allows it only in `frontend/src/components/data-table/useTableState.ts`. Call `useTableState`, which wraps it so `getRowId` is required and row identity can never fall back to TanStack's index default. Tables still awaiting migration are listed in an `overrides` allowlist in `eslint.config.js`; that list only ever shrinks — never add to it.
 - **Do NOT reintroduce `GLOBAL_MESSAGES`** - The pre-EventBus message bus is retired. Deleting the declaration cannot make its return fail (Python creates the attribute on first assignment), so `npm run lint:guards` scans source for it instead. Narrate through `comicarr.app.activity.events.record_activity`; that facade publishes the single `activity` SSE event after a durable commit. Add further retired names to `RETIRED_GLOBALS` in `scripts/check_retired_globals.py`. Contributor-only gate — no changeset.
+- **Every `fail_reason` base token must be classified** in `comicarr/app/activity/reasons.py` before merge (`scripts/check_fail_reason_registry.py` under `lint:guards`). Runtime is fail-open; CI is the gate. Excluding a token requires a reconciliation obligation (never leave `Snatched`). See ADR-0001 / #523 / #541.
 - **Do NOT add per-feature SSE event types** - `activity` is the only narrative channel; `ai_activity`, `restart`, and `shutdown` are the only other listeners in `useServerEvents`. The client invalidates queries from a payload and never accumulates the stream into a list.
 - **Do NOT finish without linting** - Run `npm run lint` (or `npm run lint:fix` then re-check) before considering work done; do not bypass hooks with `--no-verify`
 

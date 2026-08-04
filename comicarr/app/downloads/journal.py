@@ -543,6 +543,23 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
         )
         if quarantined.rowcount:
             logger.error("[JOURNAL] quarantined release_key=%s: %s" % (key, reason))
+            # Clause 2 (#541): re-want + log loudly. Quarantine already logged;
+            # re-want returns the issue to the acquisition cycle.
+            try:
+                from comicarr.app.activity.reconcile import reconcile_excluded
+
+                mapping = existing_row._mapping
+                reconcile_excluded(
+                    reason,
+                    issueid=mapping.get("issueid") or fields.get("issueid"),
+                    provider=mapping.get("provider") or fields.get("provider"),
+                    nzbname=mapping.get("nzbname") or fields.get("nzbname"),
+                    hash=mapping.get("hash") or fields.get("hash"),
+                    payload=existing_payload,
+                    conn=conn,
+                )
+            except Exception as e:
+                logger.error("[JOURNAL] band reconciliation after immutable conflict %s: %s" % (key, e))
         return False
 
     # Same-stage calls are not a new side-effect claim, but may safely fill in

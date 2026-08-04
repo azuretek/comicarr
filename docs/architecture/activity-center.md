@@ -61,8 +61,24 @@ Pinned **above** the chronological feed. Population:
 SELECT * FROM pipeline_journal
  WHERE stage IN ('failed', 'manual_review')
    AND (status IS NULL OR status NOT IN ('retried', 'ignored', 'imported'))
+   AND (fail_reason IS NULL OR fail_reason NOT IN (
+         -- NON_ACTIONABLE_FLAT from comicarr/app/activity/reasons.py
+         'download_gone', 'download_failed_researching',
+         'ddl_download_or_artifact_validation_failed', 'ddl-worker-rejected',
+         'torrent_hash_not_in_client', 'legacy_downloading_without_correlation',
+         'ambiguous_ddl_acceptance_after_restart'
+       ))
+   AND (fail_reason IS NULL OR fail_reason NOT LIKE 'immutable_payload_conflict:%')
  ORDER BY updated_date DESC
 ```
+
+Admission is the **two-clause actionability test** ([#523](https://github.com/frankieramirez/comicarr/issues/523),
+[ADR-0001](../adr/0001-band-actionability.md)): the band admits trouble only when
+the operator holds something the system lacks, and exclusion always reconciles
+the issue (re-want / blocklist) so nothing is left at `Snatched` with the band
+as its only recovery path ([#541](https://github.com/frankieramirez/comicarr/issues/541)).
+The live predicate lives in `unresolved_band_condition()`; the SQL above is the
+shape, not a second source of truth.
 
 Those rows are then **grouped server-side** before anything renders them
 ([Decide the grouping key and group-row contract](https://github.com/frankieramirez/comicarr/issues/524)):

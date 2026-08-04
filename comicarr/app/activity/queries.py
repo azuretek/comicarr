@@ -19,6 +19,7 @@ from sqlalchemy import and_, func, or_, select, union
 from comicarr import db
 from comicarr.app.acquisition.models import ItemOutcome
 from comicarr.app.activity import grouping
+from comicarr.app.activity.reasons import actionable_reason_condition
 from comicarr.app.core.database import paginated_query
 from comicarr.app.downloads.journal import FAILED, MANUAL_REVIEW, OPEN_STAGES
 from comicarr.tables import acquisition_run_items, activity_events, annuals, issues, pipeline_journal
@@ -119,10 +120,12 @@ def list_timeline_events(limit=None, offset=None, scope_type=None, scope_id=None
 
 
 def unresolved_band_condition():
-    """R9 needs-attention predicate (Activity Center ADR §2).
+    """R9 needs-attention predicate (Activity Center ADR §2 / #541).
 
-    ``stage IN ('failed', 'manual_review')`` and status is null or not a
-    resolution status (``retried`` / ``ignored`` / ``imported``).
+    ``stage IN ('failed', 'manual_review')``, status is null or not a
+    resolution status (``retried`` / ``ignored`` / ``imported``), and the
+    ``fail_reason`` base token is actionable (#523). Non-actionable reasons
+    leave the band only because their writers reconcile the issue (clause 2).
     """
     return and_(
         pipeline_journal.c.stage.in_(BAND_TROUBLE_STAGES),
@@ -130,6 +133,7 @@ def unresolved_band_condition():
             pipeline_journal.c.status.is_(None),
             pipeline_journal.c.status.notin_(BAND_RESOLVED_STATUSES),
         ),
+        actionable_reason_condition(pipeline_journal.c.fail_reason),
     )
 
 
