@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.26.0
+
+### Minor Changes
+
+- 2999227: Needs attention now has a "select all" checkbox in the filter bar, so every visible issue can be selected at once instead of checking cards one by one. It follows the active filters — narrow to Failed or the last 7 days first and only those issues are grabbed — and it shows a dash when only some are picked.
+- a85a8bc: The needs-attention band no longer asks you to babysit failures Comicarr can handle itself. After a restart, downloads that vanished from the client, bad DDL links, and similar dead ends are returned to the acquisition cycle automatically — blocklisted when the release is gone, re-wanted so the next sweep can find a different source — instead of stacking up as hundreds of red cards you can only "retry" by hand.
+
+  What still needs you stays on the band: files that downloaded but never made it into the library, downloads waiting on a decision only you can make, and failures where you turned auto-handling off. Those still group by series and cause, still open the Needs attention page, and still clear only when you act.
+
+  Under the hood every failure reason is classified once, in code. New reasons have to declare whether they belong on the band before they can merge, so the next bulk failure can't recreate the old pile.
+
 ## 0.25.0
 
 ### Minor Changes
