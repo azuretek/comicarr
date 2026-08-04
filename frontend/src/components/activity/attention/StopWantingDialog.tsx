@@ -16,50 +16,30 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import {
-  stopWantingConsequence,
-  type AttentionGroup,
-} from "@/components/activity/timeline";
+import { stopWantingConsequence } from "@/components/activity/timeline";
 
 export function StopWantingDialog({
-  groups,
+  count,
+  seriesLabel,
   busy,
   onConfirm,
   onCancel,
 }: {
-  groups: AttentionGroup[];
+  count: number;
+  seriesLabel?: string;
   busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const issues = groups.reduce((sum, group) => sum + group.member_count, 0);
-  const seriesLabel = groups.length === 1 ? groups[0].series_label : undefined;
-
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Stop wanting {issues} issues?</DialogTitle>
+          <DialogTitle>Stop wanting {count} issues?</DialogTitle>
           <DialogDescription>
-            {stopWantingConsequence(issues, seriesLabel)}
+            {stopWantingConsequence(count, seriesLabel)}
           </DialogDescription>
         </DialogHeader>
-
-        {groups.length > 1 && (
-          <ul className="max-h-40 space-y-1 overflow-auto text-[12px]">
-            {groups.map((group) => (
-              <li
-                key={group.group_key}
-                className="flex items-baseline gap-2 text-muted-foreground"
-              >
-                <span className="truncate">{group.series_label}</span>
-                <span className="ml-auto shrink-0 font-mono tabular-nums">
-                  ×{group.member_count}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
 
         <DialogFooter>
           <Button variant="outline" onClick={onCancel} disabled={busy}>

@@ -67,12 +67,17 @@ export type BandStage = "failed" | "manual_review" | "mixed";
 /** Operator exits, keyed by the stage that admits them (#525 naming). */
 export type BandAction = "retry" | "search_again" | "import" | "stop_wanting";
 
-/** One journal row inside a group. */
+/**
+ * One journal row inside a group. Members carry their own `available_actions`
+ * so a mixed-stage group is still workable row by row — the group offers no
+ * one-click action, but nothing in it is unreachable.
+ */
 export interface AttentionMember {
   release_key: string;
   issue_label: string;
   issueid?: string | null;
   stage: BandStage | string;
+  available_actions: BandAction[];
   updated_date: string;
 }
 
@@ -92,7 +97,10 @@ export interface AttentionGroup {
   newest_updated_at: string;
   oldest_updated_at: string;
   stage: BandStage | string;
-  /** Stage intersection — empty for mixed-stage groups (selection only). */
+  /**
+   * Stage intersection across members — empty for mixed-stage groups, whose
+   * rows are resolved by selecting members instead.
+   */
   available_actions: BandAction[];
   members: AttentionMember[];
 }

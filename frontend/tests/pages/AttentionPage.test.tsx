@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "../mocks/server";
-import { render, screen, waitFor } from "../test-utils";
+import { render, screen, waitFor, within } from "../test-utils";
 import AttentionPage from "@/pages/AttentionPage";
 
 interface BatchRequest {
@@ -28,6 +28,7 @@ function group(overrides = {}) {
         issue_label: "Saga #1",
         issueid: "iss-1",
         stage: "manual_review",
+        available_actions: ["import", "search_again", "stop_wanting"],
         updated_date: "2026-08-03 12:00:00",
       },
       {
@@ -35,11 +36,44 @@ function group(overrides = {}) {
         issue_label: "Saga #2",
         issueid: "iss-2",
         stage: "manual_review",
+        available_actions: ["import", "search_again", "stop_wanting"],
         updated_date: "2026-08-03 11:00:00",
       },
     ],
     ...overrides,
   };
+}
+
+/**
+ * A group whose members really are at different stages — the shape an older
+ * Comicarr could have left in `pipeline_journal`, since unresolved band rows
+ * are never pruned.
+ */
+function mixedGroup() {
+  return group({
+    group_key: "mixed|r",
+    series_label: "Mixed Series",
+    stage: "mixed",
+    available_actions: [],
+    members: [
+      {
+        release_key: "rk-review",
+        issue_label: "Mixed Series #1",
+        issueid: "iss-1",
+        stage: "manual_review",
+        available_actions: ["import", "search_again", "stop_wanting"],
+        updated_date: "2026-08-03 12:00:00",
+      },
+      {
+        release_key: "rk-failed",
+        issue_label: "Mixed Series #2",
+        issueid: "iss-2",
+        stage: "failed",
+        available_actions: ["retry", "stop_wanting"],
+        updated_date: "2026-08-03 11:00:00",
+      },
+    ],
+  });
 }
 
 function bandHandler(groups: ReturnType<typeof group>[]) {
@@ -163,24 +197,110 @@ describe("AttentionPage", () => {
   });
 
   it("offers no group action when a group's members are at mixed stages", async () => {
-    server.use(
-      bandHandler([group({ stage: "mixed", available_actions: [] })]),
-    );
+    server.use(bandHandler([mixedGroup()]));
 
     render(<AttentionPage />, {
       route: "/activity/attention",
       useMemoryRouter: true,
     });
 
-    await screen.findByText("Saga");
-    expect(screen.getByText("mixed stages — select rows to act")).toBeTruthy();
+    await screen.findByText("Mixed Series");
+    expect(
+      screen.getByText(
+        "these issues stopped at different stages — pick the ones you mean",
+      ),
+    ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // Rows are shown without a click — otherwise the group reads as a dead end.
+    expect(screen.getByText("Mixed Series #1")).toBeTruthy();
+    expect(screen.getByText("Mixed Series #2")).toBeTruthy();
+  });
+
+  it("resolves an individual row inside a mixed-stage group", async () => {
+    const requests: BatchRequest[] = [];
+    server.use(
+      bandHandler([mixedGroup()]),
+      http.post("/api/downloads/needs-attention/batch", async ({ request }) => {
+        const body = (await request.json()) as BatchRequest;
+        requests.push(body);
+        return HttpResponse.json({
+          success: true,
+          partial: false,
+          action: body.action,
+          requested: 1,
+          processed: 1,
+          succeeded: 1,
+          failed: 0,
+          capped: false,
+          skipped_for_cap: 0,
+          cap: 25,
+          results: [],
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<AttentionPage />, {
+      route: "/activity/attention",
+      useMemoryRouter: true,
+    });
+
+    await screen.findByText("Mixed Series");
+    // Pick only the `failed` row — Retry is legal for it and for nothing else.
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select Mixed Series #2" }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      expect(requests).toEqual([
+        { action: "retry", release_keys: ["rk-failed"] },
+      ]);
+    });
+  });
+
+  it("says so when a cross-stage selection shares no action", async () => {
+    server.use(bandHandler([mixedGroup()]));
+
+    const user = userEvent.setup();
+    render(<AttentionPage />, {
+      route: "/activity/attention",
+      useMemoryRouter: true,
+    });
+
+    await screen.findByText("Mixed Series");
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "Select all 2 in Mixed Series",
+      }),
+    );
+
+    // One group, both its rows — the bar counts problems and issues separately.
+    const bar = screen.getByRole("group", { name: "Selected issues" });
+    expect(within(bar).getByText("1 problem · 2 issues")).toBeTruthy();
+    // `stop_wanting` is the one action both stages admit, so it stays offered;
+    // Retry and Import do not, because they'd be illegal for half the rows.
+    expect(screen.getByRole("button", { name: "Stop wanting…" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Import" })).toBeNull();
   });
 
   it("surfaces the 25-row cap before the operator commits", async () => {
     server.use(
       bandHandler([
-        group({ member_count: 30, group_key: "big|r", series_label: "Looney Tunes" }),
+        group({
+          group_key: "big|r",
+          series_label: "Looney Tunes",
+          member_count: 30,
+          members: Array.from({ length: 30 }, (_, i) => ({
+            release_key: `lt-${i}`,
+            issue_label: `Looney Tunes #${i + 1}`,
+            issueid: `lt-iss-${i}`,
+            stage: "manual_review",
+            available_actions: ["import", "search_again", "stop_wanting"],
+            updated_date: "2026-08-03 12:00:00",
+          })),
+        }),
       ]),
     );
 
@@ -192,10 +312,14 @@ describe("AttentionPage", () => {
 
     await screen.findByText("Looney Tunes");
     await user.click(
-      screen.getByRole("checkbox", { name: "Select Looney Tunes" }),
+      screen.getByRole("checkbox", { name: "Select all 30 in Looney Tunes" }),
     );
 
-    expect(screen.getByText("25 at a time — the rest stay here")).toBeTruthy();
+    const bar = screen.getByRole("group", { name: "Selected issues" });
+    expect(within(bar).getByText("1 problem · 30 issues")).toBeTruthy();
+    expect(
+      within(bar).getByText("25 at a time — the rest stay here"),
+    ).toBeTruthy();
   });
 
   it("filters by stage without hiding the rest of the queue permanently", async () => {

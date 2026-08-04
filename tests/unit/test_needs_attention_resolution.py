@@ -583,11 +583,15 @@ def test_batch_keeps_unknown_keys_where_they_were_submitted():
 def test_reason_to_stage_is_a_function():
     """No base ``fail_reason`` token may be written at two different stages.
 
-    Band grouping keys on ``(comicid, base_reason)``, so this invariant is what
-    makes every group single-stage and its ``available_actions`` non-empty. If
-    a writer ever breaks it, mixed groups become reachable and the triage
-    surface needs member-level selection before they can be acted on
-    (``grouping._available_actions``).
+    Band grouping keys on ``(comicid, base_reason)``, so while this holds, a
+    *newly written* group is single-stage and gets group-level actions. It is
+    not a safety net: unresolved band rows are never pruned, so a database
+    written by an older Comicarr can still hold a mixed group today — which is
+    why members carry their own ``available_actions`` regardless.
+
+    Breaking this invariant is therefore a UX regression, not a correctness
+    one: mixed groups would stop being rare, and every one of them costs the
+    operator a row-by-row selection instead of one click.
     """
     import ast
     import collections

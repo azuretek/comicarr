@@ -446,11 +446,22 @@ def test_group_actions_are_the_stage_intersection(activity_db):
     by_key = {group["group_key"]: group for group in queries.list_attention_groups()}
 
     # Mixed stages offer no group primary action — selection only.
-    assert by_key["7|submission_rejected"]["stage"] == "mixed"
-    assert by_key["7|submission_rejected"]["available_actions"] == []
+    mixed = by_key["7|submission_rejected"]
+    assert mixed["stage"] == "mixed"
+    assert mixed["available_actions"] == []
 
-    assert by_key["8|submission_rejected"]["stage"] == "failed"
-    assert by_key["8|submission_rejected"]["available_actions"] == ["retry", "stop_wanting"]
+    # ...but every member still carries its own eligibility, so nothing in a
+    # mixed group is unreachable — the operator selects the rows they mean.
+    member_actions = {member["stage"]: member["available_actions"] for member in mixed["members"]}
+    assert member_actions == {
+        "failed": ["retry", "stop_wanting"],
+        "manual_review": ["import", "search_again", "stop_wanting"],
+    }
+
+    pure = by_key["8|submission_rejected"]
+    assert pure["stage"] == "failed"
+    assert pure["available_actions"] == ["retry", "stop_wanting"]
+    assert pure["members"][0]["available_actions"] == ["retry", "stop_wanting"]
 
 
 def test_groups_rank_newest_first(activity_db):

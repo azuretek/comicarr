@@ -118,8 +118,19 @@ Stage lattice is **never** rewritten by operator actions. R9 columns already on
 | `manual_review` | Import → `import`, Search again → `search_again`, Stop wanting → `stop_wanting` |
 
 A group's `available_actions` is the **intersection** across its members, and is empty
-for mixed-stage groups — selection only, because offering just the destructive half of
-two different obligations as one click is worse than making the operator pick rows.
+for mixed-stage groups — offering just the destructive half of two different obligations
+as one click is worse than making the operator pick rows.
+
+Every **member** also carries its own `available_actions`, derived from its own stage, so
+a mixed group is never a dead end. Triage selects by `release_key`; a group checkbox is
+shorthand for "all of its members"; bulk actions are the intersection over the selected
+*rows*. Mixed groups open expanded, because picking rows is the only way to act on them.
+
+Today's writers cannot produce a mixed group — reason → stage is a function, pinned by
+`test_reason_to_stage_is_a_function`. That is a UX guarantee, not a correctness one:
+unresolved band rows are **never pruned** (retention only touches resolved terminals,
+after 365 days), so a database written by an older Comicarr can still hold a group whose
+rows sit at different stages. Member-level eligibility is what keeps those rows workable.
 
 - `retry` / `search again` re-want and call a scoped `search_issue`; stamp
   `status='retried'`; do not reset the failed journal row's stage.

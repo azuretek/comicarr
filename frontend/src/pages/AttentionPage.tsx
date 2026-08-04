@@ -31,12 +31,25 @@ import {
   stageDescription,
   stageLabel,
   type AttentionGroup,
+  type AttentionMember,
   type BandAction,
 } from "@/components/activity/timeline";
 import { StopWantingDialog } from "@/components/activity/attention/StopWantingDialog";
 
 type StageFilter = "all" | "failed" | "manual_review";
 type AgeFilter = "all" | "7d" | "30d";
+
+/** A selected row, kept with its group so the bar can count both. */
+interface SelectedMember {
+  group: AttentionGroup;
+  member: AttentionMember;
+}
+
+interface StopWantingTarget {
+  releaseKeys: string[];
+  /** Named in the confirmation when the rows all come from one series. */
+  seriesLabel?: string;
+}
 
 const AGE_DAYS: Record<Exclude<AgeFilter, "all">, number> = {
   "7d": 7,
@@ -71,7 +84,7 @@ export default function AttentionPage() {
   const [age, setAge] = useState<AgeFilter>("all");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirming, setConfirming] = useState<AttentionGroup[] | null>(null);
+  const [confirming, setConfirming] = useState<StopWantingTarget | null>(null);
 
   const band = useActivityBand({ scope_type, scope_id });
   const batch = useBandBatchResolution();
@@ -92,14 +105,24 @@ export default function AttentionPage() {
     });
   }, [groups, stage, age, query]);
 
-  const selectedGroups = useMemo(
-    () => filtered.filter((group) => selected.has(group.group_key)),
-    [filtered, selected],
-  );
-  const selectedIssues = selectedGroups.reduce(
-    (sum, group) => sum + group.member_count,
-    0,
-  );
+  // Selection is keyed on release_key, not group_key. A group checkbox is
+  // shorthand for "all of its members" — which keeps a mixed-stage group
+  // workable, since its rows can be picked individually even though the group
+  // as a whole admits no single action.
+  const selectedMembers = useMemo(() => {
+    const rows: SelectedMember[] = [];
+    for (const group of filtered) {
+      for (const member of group.members) {
+        if (selected.has(member.release_key)) rows.push({ group, member });
+      }
+    }
+    return rows;
+  }, [filtered, selected]);
+
+  const selectedIssues = selectedMembers.length;
+  const selectedGroupCount = new Set(
+    selectedMembers.map(({ group }) => group.group_key),
+  ).size;
 
   const scoped = Boolean(scope_type?.trim() && scope_id?.trim());
 
@@ -115,19 +138,18 @@ export default function AttentionPage() {
     );
   };
 
-  const toggle = (groupKey: string) => {
+  const setKeysSelected = (releaseKeys: string[], picked: boolean) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(groupKey)) next.delete(groupKey);
-      else next.add(groupKey);
+      for (const key of releaseKeys) {
+        if (picked) next.add(key);
+        else next.delete(key);
+      }
       return next;
     });
   };
 
-  const runAction = async (action: BandAction, targets: AttentionGroup[]) => {
-    const releaseKeys = targets.flatMap((group) =>
-      group.members.map((member) => member.release_key),
-    );
+  const runAction = async (action: BandAction, releaseKeys: string[]) => {
     if (releaseKeys.length === 0) return;
     try {
       const result = await batch.mutateAsync({ action, releaseKeys });
@@ -147,15 +169,14 @@ export default function AttentionPage() {
     }
   };
 
-  const confirmStopWanting = (targets: AttentionGroup[]) => {
-    const issues = targets.reduce((sum, g) => sum + g.member_count, 0);
+  const confirmStopWanting = (releaseKeys: string[], seriesLabel?: string) => {
     // Single-row stop-wanting shares the consequence sentence; two or more
     // always confirms first (#525).
-    if (issues < 2) {
-      void runAction("stop_wanting", targets);
+    if (releaseKeys.length < 2) {
+      void runAction("stop_wanting", releaseKeys);
       return;
     }
-    setConfirming(targets);
+    setConfirming({ releaseKeys, seriesLabel });
   };
 
   if (band.isLoading && !band.data) {
@@ -283,8 +304,10 @@ export default function AttentionPage() {
         </span>
       </div>
 
-      {selectedGroups.length > 0 && (
+      {selectedIssues > 0 && (
         <div
+          role="group"
+          aria-label="Selected issues"
           className="flex shrink-0 flex-wrap items-center gap-2 border-b px-5 py-2"
           style={{
             borderColor: "var(--border)",
@@ -292,8 +315,8 @@ export default function AttentionPage() {
           }}
         >
           <span className="font-mono text-[11px]">
-            {selectedGroups.length}{" "}
-            {selectedGroups.length === 1 ? "problem" : "problems"} ·{" "}
+            {selectedGroupCount}{" "}
+            {selectedGroupCount === 1 ? "problem" : "problems"} ·{" "}
             {selectedIssues} {selectedIssues === 1 ? "issue" : "issues"}
           </span>
           {selectedIssues > 25 && (
@@ -304,23 +327,39 @@ export default function AttentionPage() {
               25 at a time — the rest stay here
             </span>
           )}
-          {sharedActions(selectedGroups).map((action) => (
-            <button
-              key={action}
-              type="button"
-              disabled={batch.isPending}
-              onClick={() =>
-                action === "stop_wanting"
-                  ? confirmStopWanting(selectedGroups)
-                  : void runAction(action, selectedGroups)
-              }
-              className="rounded-[4px] border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-60"
-              style={{ borderColor: "var(--border)" }}
-            >
-              {actionLabel(action)}
-              {action === "stop_wanting" ? "…" : ""}
-            </button>
-          ))}
+          {sharedActions(selectedMembers).length === 0 ? (
+            <span className="font-mono text-[10px] text-muted-foreground">
+              these rows are at different stages — no action fits all of them
+            </span>
+          ) : (
+            sharedActions(selectedMembers).map((action) => (
+              <button
+                key={action}
+                type="button"
+                disabled={batch.isPending}
+                onClick={() => {
+                  const keys = selectedMembers.map(
+                    ({ member }) => member.release_key,
+                  );
+                  if (action === "stop_wanting") {
+                    confirmStopWanting(
+                      keys,
+                      selectedGroupCount === 1
+                        ? selectedMembers[0].group.series_label
+                        : undefined,
+                    );
+                  } else {
+                    void runAction(action, keys);
+                  }
+                }}
+                className="rounded-[4px] border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-60"
+                style={{ borderColor: "var(--border)" }}
+              >
+                {actionLabel(action)}
+                {action === "stop_wanting" ? "…" : ""}
+              </button>
+            ))
+          )}
           <button
             type="button"
             onClick={() => setSelected(new Set())}
@@ -360,15 +399,15 @@ export default function AttentionPage() {
               <GroupPanel
                 key={group.group_key}
                 group={group}
-                selected={selected.has(group.group_key)}
+                selectedKeys={selected}
                 focused={group.group_key === focusedGroup}
                 busy={batch.isPending}
-                onToggle={() => toggle(group.group_key)}
+                onSelect={setKeysSelected}
                 onFocusSeen={clearGroupFocus}
-                onAction={(action) =>
+                onAction={(action, releaseKeys) =>
                   action === "stop_wanting"
-                    ? confirmStopWanting([group])
-                    : void runAction(action, [group])
+                    ? confirmStopWanting(releaseKeys, group.series_label)
+                    : void runAction(action, releaseKeys)
                 }
               />
             ))}
@@ -378,13 +417,14 @@ export default function AttentionPage() {
 
       {confirming && (
         <StopWantingDialog
-          groups={confirming}
+          count={confirming.releaseKeys.length}
+          seriesLabel={confirming.seriesLabel}
           busy={batch.isPending}
           onCancel={() => setConfirming(null)}
           onConfirm={() => {
-            const targets = confirming;
+            const { releaseKeys } = confirming;
             setConfirming(null);
-            void runAction("stop_wanting", targets);
+            void runAction("stop_wanting", releaseKeys);
           }}
         />
       )}
@@ -392,39 +432,50 @@ export default function AttentionPage() {
   );
 }
 
-/** Actions every selected group allows — mixed selections offer none. */
-function sharedActions(groups: AttentionGroup[]): BandAction[] {
-  if (groups.length === 0) return [];
-  return groups
-    .map((group) => group.available_actions)
-    .reduce((shared, actions) =>
+/**
+ * Actions every selected *row* allows. Intersecting members rather than groups
+ * is what lets a selection spanning two stages still offer whatever both admit
+ * — and say so plainly when nothing does.
+ */
+function sharedActions(rows: SelectedMember[]): BandAction[] {
+  if (rows.length === 0) return [];
+  return rows
+    .map(({ member }) => member.available_actions)
+    .reduce((shared: BandAction[], actions: BandAction[]) =>
       shared.filter((action) => actions.includes(action)),
     );
 }
 
 function GroupPanel({
   group,
-  selected,
+  selectedKeys,
   focused,
   busy,
-  onToggle,
+  onSelect,
   onFocusSeen,
   onAction,
 }: {
   group: AttentionGroup;
-  selected: boolean;
+  selectedKeys: Set<string>;
   focused: boolean;
   busy: boolean;
-  onToggle: () => void;
+  onSelect: (releaseKeys: string[], picked: boolean) => void;
   onFocusSeen: () => void;
-  onAction: (action: BandAction) => void;
+  onAction: (action: BandAction, releaseKeys: string[]) => void;
 }) {
+  const memberKeys = group.members.map((member) => member.release_key);
+  const pickedCount = memberKeys.filter((key) => selectedKeys.has(key)).length;
+  const allPicked = pickedCount === memberKeys.length && pickedCount > 0;
+  const mixedStages = group.available_actions.length === 0;
+
   // Arriving from a band card expands that group. `useState(focused)` would
   // only read the prop once, so a second card click — same mounted list, new
   // `?group=` — would land on a collapsed panel. An override that starts unset
-  // lets focus drive until the operator says otherwise.
+  // lets focus drive until the operator says otherwise. A mixed group opens by
+  // default: picking rows is the only way to act on it, so hiding them behind
+  // a click would make it look like a dead end.
   const [override, setOverride] = useState<boolean | null>(null);
-  const expanded = override ?? focused;
+  const expanded = override ?? (focused || mixedStages);
   const accent = stageAccent(group.stage);
 
   return (
@@ -441,9 +492,13 @@ function GroupPanel({
         <input
           type="checkbox"
           className="mt-1"
-          checked={selected}
-          onChange={onToggle}
-          aria-label={`Select ${group.series_label}`}
+          checked={allPicked}
+          ref={(node) => {
+            // Some rows picked, not all — the box must not read as "none".
+            if (node) node.indeterminate = pickedCount > 0 && !allPicked;
+          }}
+          onChange={() => onSelect(memberKeys, !allPicked)}
+          aria-label={`Select all ${group.member_count} in ${group.series_label}`}
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -478,9 +533,10 @@ function GroupPanel({
           </div>
 
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            {group.available_actions.length === 0 ? (
+            {mixedStages ? (
               <span className="font-mono text-[10px] text-muted-foreground">
-                mixed stages — select rows to act
+                these issues stopped at different stages — pick the ones you
+                mean
               </span>
             ) : (
               group.available_actions.map((action) => (
@@ -488,7 +544,7 @@ function GroupPanel({
                   key={action}
                   type="button"
                   disabled={busy}
-                  onClick={() => onAction(action)}
+                  onClick={() => onAction(action, memberKeys)}
                   className="rounded-[4px] border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-60"
                   style={{ borderColor: "var(--border)" }}
                 >
@@ -522,9 +578,27 @@ function GroupPanel({
               {group.members.map((member) => (
                 <li
                   key={member.release_key}
-                  className="flex items-baseline gap-2 text-[11px] text-muted-foreground"
+                  className="flex items-center gap-2 text-[11px] text-muted-foreground"
                 >
+                  <input
+                    type="checkbox"
+                    checked={selectedKeys.has(member.release_key)}
+                    onChange={(e) =>
+                      onSelect([member.release_key], e.target.checked)
+                    }
+                    aria-label={`Select ${member.issue_label}`}
+                  />
                   <span className="truncate">{member.issue_label}</span>
+                  {/* Only worth naming when the group can't speak for it. */}
+                  {mixedStages && (
+                    <span
+                      className="shrink-0 font-mono text-[9px] uppercase"
+                      style={{ color: stageAccent(member.stage) }}
+                      title={stageDescription(member.stage)}
+                    >
+                      {stageLabel(member.stage)}
+                    </span>
+                  )}
                   <span className="ml-auto shrink-0">
                     <RelativeTime value={member.updated_date} />
                   </span>

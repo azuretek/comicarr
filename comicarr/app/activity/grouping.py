@@ -101,19 +101,29 @@ def member_label(row, payload):
     return _short_release_key(row.get("release_key"))
 
 
+def member_actions(stage):
+    """Stage-legal actions for a single journal row.
+
+    Members carry their own eligibility so a mixed-stage group stays workable:
+    the group offers no one-click action, but each row can still be selected
+    and resolved by whatever its own stage admits.
+    """
+    return list(journal.STAGE_ACTIONS.get(stage, ()))
+
+
 def _available_actions(stages):
     """Intersection of stage-legal actions across a group's members.
 
     Mixed-stage groups get **no** group-level actions: the intersection would be
     ``stop_wanting`` alone, and offering only the destructive half of two
     different obligations as a one-click group button is worse than making the
-    operator select the rows they mean (#524).
+    operator select the rows they mean (#524). Those rows are reachable through
+    ``member_actions`` — a group with no group-level action is never a dead end.
 
-    In practice a mixed group cannot occur — reason → stage is a function, so
-    every member of a ``(comicid, base_reason)`` group shares a stage. This is a
-    guard, not a live path, and ``test_reason_to_stage_is_a_function`` fails if
-    that ever stops being true. If it does, this surface needs member-level
-    selection before mixed groups become reachable and unactionable.
+    Today's writers cannot produce a mixed group (reason → stage is a function,
+    pinned by ``test_reason_to_stage_is_a_function``), but rows written by older
+    versions are never pruned while unresolved, so a real database can still
+    hold one. The mixed branch is a live path for historical data, not dead code.
     """
     if len(stages) != 1:
         return []
@@ -150,6 +160,7 @@ def build_groups(rows):
             "issue_label": member_label(row, payload),
             "issueid": _text(row.get("issueid")) or _text(payload.get("issueid")),
             "stage": row.get("stage"),
+            "available_actions": member_actions(row.get("stage")),
             "updated_date": row.get("updated_date"),
         }
 
