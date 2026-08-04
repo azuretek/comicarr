@@ -221,10 +221,10 @@ function SegmentView({
   if (segment.role === "attention") {
     return (
       <Link
-        to={segment.href ?? "/activity"}
+        to={segment.href ?? "/activity/attention"}
         className="font-semibold hover:underline"
         style={{ color: "var(--status-error)" }}
-        title="Needs attention → Activity"
+        title="Needs attention → work through them"
       >
         {segment.text}
       </Link>

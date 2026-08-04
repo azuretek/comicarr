@@ -12,7 +12,7 @@
 Endpoints:
 
 * ``GET /api/activity/timeline`` — narrative events, newest first
-* ``GET /api/activity/band`` — needs-attention journal rows (R9 predicate)
+* ``GET /api/activity/band`` — needs-attention groups (R9 predicate, grouped)
 * ``GET /api/activity/status`` — derived open-work counts (never narrative)
 
 **Pagination choice:** timeline pages *events* ordered by ``created_at``.
@@ -65,10 +65,11 @@ def get_attention_band(
     scope_type: str | None = Query(None, max_length=32),
     scope_id: str | None = Query(None, max_length=255),
 ):
-    """Return unresolved needs-attention pipeline_journal rows.
+    """Return unresolved needs-attention rows grouped by series and reason.
 
     Predicate: stage in (failed, manual_review) and status is null or not in
-    (retried, ignored, imported). When scoped, intersected with that scope.
+    (retried, ignored, imported). When scoped, members are filtered by that
+    scope **then** grouped, so a scoped view never invents a cross-scope group.
     """
     try:
         return service.get_attention_band(scope_type=scope_type, scope_id=scope_id)

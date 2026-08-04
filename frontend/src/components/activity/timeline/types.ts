@@ -62,21 +62,47 @@ export interface TimelineEvent {
   counts?: RunCounts | null;
 }
 
+export type BandStage = "failed" | "manual_review" | "mixed";
+
+/** Operator exits, keyed by the stage that admits them (#525 naming). */
+export type BandAction = "retry" | "search_again" | "import" | "stop_wanting";
+
 /**
- * Needs-attention band row from pipeline_journal (derived ledger, not narrative).
- * Field names match the journal row shape from GET /api/activity/band.
+ * One journal row inside a group. Members carry their own `available_actions`
+ * so a mixed-stage group is still workable row by row — the group offers no
+ * one-click action, but nothing in it is unreachable.
  */
-export interface BandItem {
+export interface AttentionMember {
   release_key: string;
-  stage: "failed" | "manual_review" | string;
+  issue_label: string;
   issueid?: string | null;
-  provider?: string | null;
-  nzbname?: string | null;
-  fail_reason?: string | null;
+  stage: BandStage | string;
+  available_actions: BandAction[];
   updated_date: string;
-  status?: string | null;
-  /** Optional display helpers when present on an enriched DTO. */
-  subject_label?: string | null;
+}
+
+/**
+ * A needs-attention *group* from GET /api/activity/band — the unit the operator
+ * acts on. Identity is `(comicid, base_reason)`, or a singleton release key when
+ * the payload carries no comicid (#524). The server owns grouping, labels, and
+ * `reason_phrase`; the client never re-derives group identity.
+ */
+export interface AttentionGroup {
+  group_key: string;
+  comicid: string | null;
+  series_label: string;
+  base_reason: string | null;
+  reason_phrase: string;
+  member_count: number;
+  newest_updated_at: string;
+  oldest_updated_at: string;
+  stage: BandStage | string;
+  /**
+   * Stage intersection across members — empty for mixed-stage groups, whose
+   * rows are resolved by selecting members instead.
+   */
+  available_actions: BandAction[];
+  members: AttentionMember[];
 }
 
 /**
@@ -107,6 +133,11 @@ export interface TimelinePage {
 }
 
 export interface BandPage {
-  results: BandItem[];
+  results: AttentionGroup[];
+  /** Group count — the same number the status line reports. */
   total: number;
+  /** Journal rows behind those groups. */
+  member_total: number;
+  /** Groups the band shows before folding into the triage route. */
+  preview_cap: number;
 }

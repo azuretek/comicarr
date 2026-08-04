@@ -335,16 +335,29 @@ def test_retry_blocked_does_not_stamp(monkeypatch):
     assert key in {r["release_key"] for r in journal.read_needs_attention()}
 
 
-def test_ignore_failed_stamps_and_sets_intent():
+def test_stop_wanting_failed_stamps_and_sets_intent():
+    _seed_issue(status="Failed")
+    key = _seed_failed_row()
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+    result = dl_service.resolve_needs_attention(ctx, key, "stop_wanting", audit_identity="op")
+    assert result["success"] is True
+    assert result["action"] == "stop_wanting"
+    assert _issue_row()["AcquisitionIntent"] == "ignored"
+    assert _issue_row()["Status"] == "Ignored"
+    # The durable stamp keeps its old spelling — renaming a persisted status
+    # would re-admit every row already stamped.
+    assert _journal_row(key)["status"] == journal.STATUS_IGNORED
+    assert _journal_row(key)["stage"] == journal.FAILED
+
+
+def test_retired_ignore_action_id_is_rejected():
     _seed_issue(status="Failed")
     key = _seed_failed_row()
     ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
     result = dl_service.resolve_needs_attention(ctx, key, "ignore", audit_identity="op")
-    assert result["success"] is True
-    assert _issue_row()["AcquisitionIntent"] == "ignored"
-    assert _issue_row()["Status"] == "Ignored"
-    assert _journal_row(key)["status"] == journal.STATUS_IGNORED
-    assert _journal_row(key)["stage"] == journal.FAILED
+    assert result["success"] is False
+    assert result["status_code"] == 400
+    assert key in {r["release_key"] for r in journal.read_needs_attention()}
 
 
 def test_search_again_manual_review(monkeypatch):
@@ -453,6 +466,246 @@ def test_already_resolved_returns_409_without_side_effects(monkeypatch):
     assert enqueued == []
     assert _issue_row()["Status"] == "Failed"
     assert _journal_row(key)["status"] == journal.STATUS_RETRIED
+
+
+# ---------------------------------------------------------------------------
+# 7. Bulk fan-out (#525)
+# ---------------------------------------------------------------------------
+
+
+def test_batch_stop_wanting_clears_every_member():
+    _seed_issue(issueid="1001", comicid="C1", status="Failed")
+    _seed_issue(issueid="1002", comicid="C2", status="Failed")
+    keys = [
+        _seed_failed_row(key="1001|a", issueid="1001"),
+        _seed_failed_row(key="1002|b", issueid="1002"),
+    ]
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "stop_wanting", keys, audit_identity="op")
+
+    assert result["success"] is True
+    assert result["partial"] is False
+    assert result["succeeded"] == 2
+    assert result["failed"] == 0
+    assert result["capped"] is False
+    assert {r["release_key"] for r in result["results"]} == set(keys)
+    assert not {r["release_key"] for r in journal.read_needs_attention()} & set(keys)
+
+
+def test_batch_is_best_effort_and_reports_partials():
+    """One bad member must not cost its siblings their resolution."""
+    _seed_issue(issueid="1001", comicid="C1", status="Failed")
+    good = _seed_failed_row(key="1001|a", issueid="1001")
+    # No issueid on the row or in its payload — stop_wanting cannot resolve it.
+    orphan = journal.release_key("orphan", "p")
+    journal.record_transition(orphan, journal.SNATCHED, payload={"provider": "p"}, provider="p")
+    journal.mark_failed(orphan, "download_failed_no_auto_handling", provider="p")
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "stop_wanting", [good, orphan], audit_identity="op")
+
+    assert result["success"] is True
+    assert result["partial"] is True
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
+    by_key = {r["release_key"]: r for r in result["results"]}
+    assert by_key[good]["ok"] is True
+    assert by_key[orphan]["ok"] is False
+    assert by_key[orphan]["error"]
+    # The failed member stays on the band for another try; the sibling leaves.
+    on_band = {r["release_key"] for r in journal.read_needs_attention()}
+    assert orphan in on_band
+    assert good not in on_band
+
+
+def test_batch_caps_at_25_newest_first():
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+    keys = []
+    for index in range(30):
+        issueid = "20%02d" % index
+        _seed_issue(issueid=issueid, comicid="C%d" % index, status="Failed")
+        key = _seed_failed_row(key="%s|p" % issueid, issueid=issueid)
+        # Oldest first, so the cap has something meaningful to order.
+        with get_engine().begin() as conn:
+            conn.execute(
+                pipeline_journal.update()
+                .where(pipeline_journal.c.release_key == key)
+                .values(updated_date="2026-07-%02d 10:00:00" % (index + 1))
+            )
+        keys.append(key)
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "stop_wanting", keys, audit_identity="op")
+
+    assert result["requested"] == 30
+    assert result["processed"] == dl_service.BAND_BATCH_CAP == 25
+    assert result["capped"] is True
+    assert result["skipped_for_cap"] == 5
+    # Newest processed first: the five oldest are what got left behind.
+    still_on_band = {r["release_key"] for r in journal.read_needs_attention()}
+    assert still_on_band == set(keys[:5])
+
+
+def test_batch_keeps_unknown_keys_where_they_were_submitted():
+    """A cap must not quietly eat the keys whose failure the operator needs.
+
+    Unknown keys fail per-item and that failure is the useful output. Ranking
+    them behind every dated row would let a capped batch drop them silently.
+    """
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+    _seed_issue(issueid="1001", comicid="C1", status="Failed")
+    _seed_issue(issueid="1002", comicid="C2", status="Failed")
+
+    older = _seed_failed_row(key="1001|old", issueid="1001")
+    newer = _seed_failed_row(key="1002|new", issueid="1002")
+    with get_engine().begin() as conn:
+        conn.execute(
+            pipeline_journal.update()
+            .where(pipeline_journal.c.release_key == older)
+            .values(updated_date="2026-07-01 10:00:00")
+        )
+        conn.execute(
+            pipeline_journal.update()
+            .where(pipeline_journal.c.release_key == newer)
+            .values(updated_date="2026-07-20 10:00:00")
+        )
+
+    # Unknown keys both before and between the dated rows.
+    submitted = ["ghost-a", older, "ghost-b", newer]
+    ordered = dl_service._batch_order(submitted)
+
+    assert ordered[0] == "ghost-a"
+    assert ordered[2] == "ghost-b"
+    # The two dated slots are filled newest-first.
+    assert [ordered[1], ordered[3]] == [newer, older]
+
+
+def test_reason_to_stage_is_a_function():
+    """No base ``fail_reason`` token may be written at two different stages.
+
+    Band grouping keys on ``(comicid, base_reason)``, so while this holds, a
+    *newly written* group is single-stage and gets group-level actions. It is
+    not a safety net: unresolved band rows are never pruned, so a database
+    written by an older Comicarr can still hold a mixed group today — which is
+    why members carry their own ``available_actions`` regardless.
+
+    Breaking this invariant is therefore a UX regression, not a correctness
+    one: mixed groups would stop being rare, and every one of them costs the
+    operator a row-by-row selection instead of one click.
+    """
+    import ast
+    import collections
+    import pathlib
+
+    stage_of_writer = {"mark_failed": journal.FAILED, "mark_manual_review": journal.MANUAL_REVIEW}
+    stages_by_token = collections.defaultdict(set)
+    unresolved = []
+
+    # Derived from the installed package, not the working directory, so the
+    # scan cannot silently cover nothing when pytest runs from elsewhere.
+    package_root = pathlib.Path(comicarr.__file__).resolve().parent
+    repo_root = package_root.parent
+
+    for path in package_root.rglob("*.py"):
+        if "_vendor" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name not in stage_of_writer or len(node.args) < 2:
+                continue
+            reason = node.args[1]
+            token = None
+            if isinstance(reason, ast.Constant) and isinstance(reason.value, str):
+                token = reason.value
+            elif isinstance(reason, ast.JoinedStr) and reason.values:
+                head = reason.values[0]
+                token = head.value if isinstance(head, ast.Constant) else None
+            elif isinstance(reason, ast.BinOp) and isinstance(reason.left, ast.Constant):
+                token = reason.left.value
+            if not isinstance(token, str):
+                # Parameterized helper — recorded so a new one cannot slip in
+                # unnoticed, but its tokens are pinned by its own callers.
+                unresolved.append("%s:%d" % (path.relative_to(repo_root), node.lineno))
+                continue
+            stages_by_token[token.split(":", 1)[0]].add(stage_of_writer[name])
+
+    assert stages_by_token, "found no mark_failed / mark_manual_review call sites — scan is broken"
+
+    crossovers = {token: stages for token, stages in stages_by_token.items() if len(stages) > 1}
+    assert not crossovers, "base tokens written at more than one stage: %s" % crossovers
+
+    # Each parameterized writer must keep feeding exactly one stage. Update this
+    # list only alongside a check that its callers do not cross stages.
+    assert sorted(unresolved) == [
+        "comicarr/app/downloads/handoff.py:156",
+        "comicarr/app/downloads/recovery_classify.py:571",
+        "comicarr/app/downloads/service.py:2120",
+        "comicarr/failed.py:114",
+    ], "a mark_* call site with a non-literal reason changed: %s" % sorted(unresolved)
+
+
+def test_batch_import_derives_paths_from_each_row_payload(tmp_path, monkeypatch):
+    """Batch import sends no per-key overrides — every row uses its own payload."""
+    _seed_issue()
+    root = tmp_path / "pp"
+    root.mkdir()
+    folder = root / "job"
+    folder.mkdir()
+    key = _seed_manual_review_row(nzb_folder=str(folder), nzb_name="Saga.001.cbz")
+    monkeypatch.setattr(
+        comicarr,
+        "CONFIG",
+        SimpleNamespace(
+            FAILED_DOWNLOAD_HANDLING=True,
+            FAILED_AUTO=False,
+            HIGHCOUNT=0,
+            DDL_LOCATION=str(tmp_path / "ddl"),
+            CACHE_DIR=str(tmp_path / "cache"),
+            DESTINATION_DIR=str(tmp_path / "library"),
+            MANUAL_PP_FOLDER=str(root),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(comicarr, "PP_QUEUE", queuelib.Queue(), raising=False)
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "import", [key], audit_identity="op")
+
+    assert result["success"] is True
+    assert result["succeeded"] == 1
+    assert _journal_row(key)["status"] == journal.STATUS_IMPORTED
+    queued = comicarr.PP_QUEUE.get_nowait()
+    assert queued["nzb_name"] == "Saga.001.cbz"
+    assert queued["nzb_folder"] == str(folder)
+
+
+def test_batch_rejects_unknown_action_and_empty_keys():
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    unknown = dl_service.resolve_needs_attention_batch(ctx, "nuke", ["k"], audit_identity="op")
+    assert unknown["success"] is False
+    assert unknown["status_code"] == 400
+
+    empty = dl_service.resolve_needs_attention_batch(ctx, "retry", [], audit_identity="op")
+    assert empty["success"] is False
+    assert empty["status_code"] == 400
+
+
+def test_batch_rejects_action_the_member_stage_disallows():
+    _seed_issue(status="Snatched")
+    key = _seed_manual_review_row()
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "retry", [key], audit_identity="op")
+
+    assert result["success"] is False
+    assert result["status_code"] == 409
+    assert result["results"][0]["ok"] is False
+    assert key in {r["release_key"] for r in journal.read_needs_attention()}
 
 
 # ---------------------------------------------------------------------------

@@ -46,7 +46,12 @@ amended by [Prototype the global one-line status indicator](https://github.com/f
 ### Tabs on `/activity`
 
 Order: **Timeline · Direct Downloads · Download History**. Timeline is the default
-landing view. No new nav item; the status indicator clicks through to `/activity`.
+landing view. No new nav item.
+
+`/activity/attention` is a **route beside these tabs, not a fourth tab** — adding one
+would change the order this section fixes, for a work queue that should be episodic.
+The status indicator's attention count clicks through to it; the `in flight` / `idle`
+segments still click through to `/activity`.
 
 ### Needs-attention band
 
@@ -59,29 +64,92 @@ SELECT * FROM pipeline_journal
  ORDER BY updated_date DESC
 ```
 
+Those rows are then **grouped server-side** before anything renders them
+([Decide the grouping key and group-row contract](https://github.com/frankieramirez/comicarr/issues/524)):
+
+- **Key: `(comicid, base_reason)`** from `payload_json`, or a singleton
+  `(release_key, base_reason)` when the payload carries no `comicid`. `base_reason` is
+  the substring before the first `:` — the same unit `activity/reasons.py` keys on.
+- **Labels are payload-first.** No join to `issues` / `annuals` / `comics`, and never a
+  key on `comicname` (a typographic apostrophe split one real series in two).
+- **List and count share one builder.** `list_attention_groups` and
+  `count_attention_groups` run the same code, so the band and the status line cannot
+  disagree. `GET /api/activity/status` reports `attention` as a **group** count, with
+  the row count beside it as `attention_members`.
+- Scoped views filter members **then** group — never a cross-scope group.
+
+The band itself is a **bounded preview that routes, never a workspace**
+([Prototype the bounded band preview and triage surface](https://github.com/frankieramirez/comicarr/issues/526)):
+at most 5 group cards in one fixed-height row, ranked newest-first with volume as a
+card attribute (`×N`), stage-coloured (failed = error, manual review = paused), folding
+into `/activity/attention` via "See all N →" and a trailing "+K more" card. The ceiling
+is the contract: the timeline's position on the page must not depend on how much has
+gone wrong.
+
 - Work queue, not notice board: rows clear only when an operator action moves the item.
-- Red + actions live **only** on the band; stream rows for the same trouble are muted
-  history with **no** actions
+- Red + actions live **only** on the band and its triage route; stream rows for the same
+  trouble are muted history with **no** actions
   ([Decide how failure, retry and degraded states read in the timeline](https://github.com/frankieramirez/comicarr/issues/432)).
 - Band coverage for download failures that never terminalized the journal is achieved by
   **writing** `journal.mark_failed` at those seams, not by widening the predicate
   ([Decide whether the needs-attention band covers journal-less failures](https://github.com/frankieramirez/comicarr/issues/457)).
+
+### Triage route (`/activity/attention`)
+
+The only surface where band trouble can be resolved. **Against Download History:**
+Attention shows unresolved, actionable groups and carries the resolution actions;
+History is the full ledger of every outcome and carries none. Audit vs work queue.
+
+- Facets: stage (all / failed / manual review), age (any / 7d / 30d), free-text over
+  series label and reason phrase.
+- Per-group checkboxes; the selection bar shows group count, issue count, and surfaces
+  the 25-row cap before the operator commits.
+- Honours the same `scope_type` / `scope_id` params as the band — a scoped entry from a
+  series page opens the same route, not a separate surface.
 
 ### Operator exits (`failed` / `manual_review`)
 
 Stage lattice is **never** rewritten by operator actions. R9 columns already on
 `pipeline_journal` (`status`, `retry_count`, `next_retry_at`) carry resolution:
 
-| Stage | Actions |
+| Stage | Actions (operator label → action id) |
 |---|---|
-| `failed` | `[retry]` `[ignore]` |
-| `manual_review` | `[import]` `[search again]` `[ignore]` |
+| `failed` | Retry → `retry`, Stop wanting → `stop_wanting` |
+| `manual_review` | Import → `import`, Search again → `search_again`, Stop wanting → `stop_wanting` |
+
+A group's `available_actions` is the **intersection** across its members, and is empty
+for mixed-stage groups — offering just the destructive half of two different obligations
+as one click is worse than making the operator pick rows.
+
+Every **member** also carries its own `available_actions`, derived from its own stage, so
+a mixed group is never a dead end. Triage selects by `release_key`; a group checkbox is
+shorthand for "all of its members"; bulk actions are the intersection over the selected
+*rows*. Mixed groups open expanded, because picking rows is the only way to act on them.
+
+Today's writers cannot produce a mixed group — reason → stage is a function, pinned by
+`test_reason_to_stage_is_a_function`. That is a UX guarantee, not a correctness one:
+unresolved band rows are **never pruned** (retention only touches resolved terminals,
+after 365 days), so a database written by an older Comicarr can still hold a group whose
+rows sit at different stages. Member-level eligibility is what keeps those rows workable.
 
 - `retry` / `search again` re-want and call a scoped `search_issue`; stamp
   `status='retried'`; do not reset the failed journal row's stage.
-- `ignore` → `AcquisitionIntent.IGNORED` + `status='ignored'`.
+- `stop wanting` → `AcquisitionIntent.IGNORED` + `status='ignored'`. The action id was
+  renamed from `ignore` end-to-end ([Decide bulk-action fan-out semantics and action naming](https://github.com/frankieramirez/comicarr/issues/525))
+  because "ignore" read as dismiss-this-alert; the **durable stamp keeps its
+  `ignored` spelling**, since renaming a persisted status would re-admit every row
+  already stamped. Two or more issues always require a consequence confirmation first;
+  there is no timed undo.
 - `import` → existing validated `POST /api/downloads/process`; stamp
   `status='imported'` **only on success**.
+
+**Bulk fan-out** — `POST /api/downloads/needs-attention/batch` with
+`{action, release_keys}`. Best-effort per row: each member runs the same path as the
+single-row resolver, so a member that fails stays on the band while its siblings leave
+it. At most **25** keys per request (fixed in code, newest `updated_date` first); the
+remainder comes back as `skipped_for_cap`. A mixed outcome is `success: true` with
+`partial: true` and a `results[]` entry per key, surfaced as a summary toast
+("Search again 13 of 16 — 3 still need attention"), never a blocking modal.
 - Same-provider retries can produce a byte-identical `release_key` and lose
   `record_transition`'s `won` guard — that bug must be fixed **before** `[retry]`
   ships ([Decide how an item exits manual_review and failed](https://github.com/frankieramirez/comicarr/issues/437)
@@ -267,7 +335,10 @@ GET /api/activity/timeline?scope_type=issue|annual|series&scope_id=<id>
 
 - Issue/annual: exact subject match.
 - Series: rollup via `parent_series_id` + series subject rows + series-scoped run events.
-- When scoped, the band is the open-trouble predicate **intersected** with that scope.
+- When scoped, the band is the open-trouble predicate **intersected** with that scope,
+  and grouping runs **after** that intersection so a scoped view never shows a group
+  containing members from outside the scope. `/activity/attention` takes the same two
+  params and honours them identically.
 - Deleted subjects: scoped deep-link empty/soft-404; global keeps `subject_label` history.
 - Detail pages deep-link only, e.g. `/activity?scope_type=series&scope_id=…`.
 

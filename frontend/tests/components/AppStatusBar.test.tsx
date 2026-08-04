@@ -81,7 +81,7 @@ describe("AppStatusBar", () => {
       screen
         .getByRole("link", { name: "⚠ 2 need attention" })
         .getAttribute("href"),
-    ).toBe("/activity");
+    ).toBe("/activity/attention");
   });
 
   it("shows unreachable after a prolonged live-channel loss", async () => {

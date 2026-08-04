@@ -87,6 +87,22 @@ STATUS_IGNORED = "ignored"
 STATUS_IMPORTED = "imported"
 RESOLVED_STATUSES = (STATUS_RETRIED, STATUS_IGNORED, STATUS_IMPORTED)
 
+# Operator exits, keyed by the stage that admits them (#525 naming). One
+# definition: the resolver validates against these and the group DTO derives
+# `available_actions` from the same sets, so a group can never offer an action
+# the resolver would then reject. `stop_wanting` replaces the old `ignore`
+# action id at every layer; the durable stamp stays `STATUS_IGNORED`, because
+# renaming a persisted status would silently re-admit every stamped row.
+ACTION_RETRY = "retry"
+ACTION_SEARCH_AGAIN = "search_again"
+ACTION_IMPORT = "import"
+ACTION_STOP_WANTING = "stop_wanting"
+
+FAILED_ACTIONS = (ACTION_RETRY, ACTION_STOP_WANTING)
+MANUAL_REVIEW_ACTIONS = (ACTION_IMPORT, ACTION_SEARCH_AGAIN, ACTION_STOP_WANTING)
+STAGE_ACTIONS = {FAILED: FAILED_ACTIONS, MANUAL_REVIEW: MANUAL_REVIEW_ACTIONS}
+BAND_ACTIONS = frozenset(FAILED_ACTIONS) | frozenset(MANUAL_REVIEW_ACTIONS)
+
 # Fresh re-snatch stages that may supersede a terminal `failed` row under the
 # same release_key (same issue|provider). DDL handoff writes RESERVED first;
 # NZB/torrent snatch (updater.foundsearch) writes SNATCHED directly.

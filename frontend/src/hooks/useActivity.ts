@@ -7,9 +7,11 @@ import {
 import { apiRequest } from "@/lib/api";
 import {
   ACTIVITY_BAND_QUERY_KEY,
+  ACTIVITY_STATUS_QUERY_KEY,
   ACTIVITY_TIMELINE_QUERY_KEY,
 } from "@/lib/activityKeys";
 import type {
+  BandAction,
   BandPage,
   TimelinePage,
 } from "@/components/activity/timeline/types";
@@ -26,8 +28,8 @@ export type ActivityScope = {
   scope_id?: string | null;
 };
 
-export type BandResolutionAction =
-  "retry" | "search-again" | "ignore" | "import";
+/** Wire ids (#525). The URL segment is the same id with `_` swapped for `-`. */
+export type BandResolutionAction = BandAction;
 
 interface BandResolutionResult {
   success: boolean;
@@ -36,6 +38,28 @@ interface BandResolutionResult {
   status?: string;
   action?: string;
   release_key?: string;
+}
+
+export interface BandBatchResultRow {
+  release_key: string;
+  ok: boolean;
+  status?: string | null;
+  error?: string | null;
+}
+
+export interface BandBatchResult {
+  success: boolean;
+  partial: boolean;
+  action: BandResolutionAction;
+  requested: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  capped: boolean;
+  skipped_for_cap: number;
+  cap: number;
+  results: BandBatchResultRow[];
+  error?: string;
 }
 
 export interface HistoryItem {
@@ -192,8 +216,9 @@ export function useActivityTimeline(options: ActivityScope = {}) {
 }
 
 /**
- * Needs-attention band from pipeline_journal (derived, never narrative).
- * Polls every 30s while mounted.
+ * Needs-attention groups from pipeline_journal (derived, never narrative).
+ * The server groups by `(comicid, base_reason)` — the client renders what it
+ * is given and never re-derives group identity (#524). Polls every 30s.
  */
 export function useActivityBand(scope: ActivityScope = {}) {
   const scope_type = scope.scope_type?.trim() || undefined;
@@ -228,7 +253,7 @@ export function useBandResolution() {
     mutationFn: async ({ releaseKey, action }) => {
       const result = await apiRequest<BandResolutionResult>(
         "POST",
-        `/api/downloads/needs-attention/${encodeURIComponent(releaseKey)}/${action}`,
+        `/api/downloads/needs-attention/${encodeURIComponent(releaseKey)}/${action.replace("_", "-")}`,
       );
       if (!result.success) {
         throw new Error(
@@ -241,6 +266,44 @@ export function useBandResolution() {
       void queryClient.invalidateQueries({ queryKey: ACTIVITY_BAND_QUERY_KEY });
       void queryClient.invalidateQueries({
         queryKey: ACTIVITY_TIMELINE_QUERY_KEY,
+      });
+    },
+  });
+}
+
+/**
+ * Fan one action out over many release keys (#525).
+ *
+ * A partial result is *not* an error: the server resolves what it can and
+ * reports the rest per row, so this resolves with the multi-status body and
+ * lets the caller phrase "Retried 13 of 16". Only a malformed request or a
+ * wholly failed batch rejects.
+ */
+export function useBandBatchResolution() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    BandBatchResult,
+    Error,
+    { releaseKeys: string[]; action: BandResolutionAction }
+  >({
+    mutationFn: async ({ releaseKeys, action }) => {
+      const result = await apiRequest<BandBatchResult>(
+        "POST",
+        "/api/downloads/needs-attention/batch",
+        { action, release_keys: releaseKeys },
+      );
+      if (!result.success) {
+        throw new Error(result.error || `Unable to ${action} these items.`);
+      }
+      return result;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ACTIVITY_BAND_QUERY_KEY });
+      void queryClient.invalidateQueries({
+        queryKey: ACTIVITY_TIMELINE_QUERY_KEY,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ACTIVITY_STATUS_QUERY_KEY,
       });
     },
   });
