@@ -471,12 +471,16 @@ def _batch_order(release_keys):
     from comicarr.app.downloads import journal
 
     stamped = []
-    for index, key in enumerate(release_keys):
+    for key in release_keys:
         row = journal.read_one(key)
         updated = (row or {}).get("updated_date")
-        stamped.append((updated is not None, str(updated or ""), index, key))
-    stamped.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [item[3] for item in stamped]
+        stamped.append((updated is not None, str(updated or ""), key))
+
+    # Rank only the dated rows, then pour them back into the slots dated rows
+    # already occupied. A no-row key keeps whatever position it was submitted
+    # in, so the cap cannot quietly eat it before it can report why it failed.
+    ranked = iter(sorted((item for item in stamped if item[0]), key=lambda item: item[1], reverse=True))
+    return [next(ranked)[2] if item[0] else item[2] for item in stamped]
 
 
 def resolve_needs_attention_batch(ctx, action, release_keys, *, audit_identity):

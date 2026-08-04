@@ -108,6 +108,12 @@ def _available_actions(stages):
     ``stop_wanting`` alone, and offering only the destructive half of two
     different obligations as a one-click group button is worse than making the
     operator select the rows they mean (#524).
+
+    In practice a mixed group cannot occur — reason → stage is a function, so
+    every member of a ``(comicid, base_reason)`` group shares a stage. This is a
+    guard, not a live path, and ``test_reason_to_stage_is_a_function`` fails if
+    that ever stops being true. If it does, this surface needs member-level
+    selection before mixed groups become reachable and unactionable.
     """
     if len(stages) != 1:
         return []

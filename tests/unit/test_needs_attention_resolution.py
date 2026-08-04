@@ -546,6 +546,139 @@ def test_batch_caps_at_25_newest_first():
     assert still_on_band == set(keys[:5])
 
 
+def test_batch_keeps_unknown_keys_where_they_were_submitted():
+    """A cap must not quietly eat the keys whose failure the operator needs.
+
+    Unknown keys fail per-item and that failure is the useful output. Ranking
+    them behind every dated row would let a capped batch drop them silently.
+    """
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+    _seed_issue(issueid="1001", comicid="C1", status="Failed")
+    _seed_issue(issueid="1002", comicid="C2", status="Failed")
+
+    older = _seed_failed_row(key="1001|old", issueid="1001")
+    newer = _seed_failed_row(key="1002|new", issueid="1002")
+    with get_engine().begin() as conn:
+        conn.execute(
+            pipeline_journal.update()
+            .where(pipeline_journal.c.release_key == older)
+            .values(updated_date="2026-07-01 10:00:00")
+        )
+        conn.execute(
+            pipeline_journal.update()
+            .where(pipeline_journal.c.release_key == newer)
+            .values(updated_date="2026-07-20 10:00:00")
+        )
+
+    # Unknown keys both before and between the dated rows.
+    submitted = ["ghost-a", older, "ghost-b", newer]
+    ordered = dl_service._batch_order(submitted)
+
+    assert ordered[0] == "ghost-a"
+    assert ordered[2] == "ghost-b"
+    # The two dated slots are filled newest-first.
+    assert [ordered[1], ordered[3]] == [newer, older]
+
+
+def test_reason_to_stage_is_a_function():
+    """No base ``fail_reason`` token may be written at two different stages.
+
+    Band grouping keys on ``(comicid, base_reason)``, so this invariant is what
+    makes every group single-stage and its ``available_actions`` non-empty. If
+    a writer ever breaks it, mixed groups become reachable and the triage
+    surface needs member-level selection before they can be acted on
+    (``grouping._available_actions``).
+    """
+    import ast
+    import collections
+    import pathlib
+
+    stage_of_writer = {"mark_failed": journal.FAILED, "mark_manual_review": journal.MANUAL_REVIEW}
+    stages_by_token = collections.defaultdict(set)
+    unresolved = []
+
+    # Derived from the installed package, not the working directory, so the
+    # scan cannot silently cover nothing when pytest runs from elsewhere.
+    package_root = pathlib.Path(comicarr.__file__).resolve().parent
+    repo_root = package_root.parent
+
+    for path in package_root.rglob("*.py"):
+        if "_vendor" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name not in stage_of_writer or len(node.args) < 2:
+                continue
+            reason = node.args[1]
+            token = None
+            if isinstance(reason, ast.Constant) and isinstance(reason.value, str):
+                token = reason.value
+            elif isinstance(reason, ast.JoinedStr) and reason.values:
+                head = reason.values[0]
+                token = head.value if isinstance(head, ast.Constant) else None
+            elif isinstance(reason, ast.BinOp) and isinstance(reason.left, ast.Constant):
+                token = reason.left.value
+            if not isinstance(token, str):
+                # Parameterized helper — recorded so a new one cannot slip in
+                # unnoticed, but its tokens are pinned by its own callers.
+                unresolved.append("%s:%d" % (path.relative_to(repo_root), node.lineno))
+                continue
+            stages_by_token[token.split(":", 1)[0]].add(stage_of_writer[name])
+
+    assert stages_by_token, "found no mark_failed / mark_manual_review call sites — scan is broken"
+
+    crossovers = {token: stages for token, stages in stages_by_token.items() if len(stages) > 1}
+    assert not crossovers, "base tokens written at more than one stage: %s" % crossovers
+
+    # Each parameterized writer must keep feeding exactly one stage. Update this
+    # list only alongside a check that its callers do not cross stages.
+    assert sorted(unresolved) == [
+        "comicarr/app/downloads/handoff.py:156",
+        "comicarr/app/downloads/recovery_classify.py:571",
+        "comicarr/app/downloads/service.py:2120",
+        "comicarr/failed.py:114",
+    ], "a mark_* call site with a non-literal reason changed: %s" % sorted(unresolved)
+
+
+def test_batch_import_derives_paths_from_each_row_payload(tmp_path, monkeypatch):
+    """Batch import sends no per-key overrides — every row uses its own payload."""
+    _seed_issue()
+    root = tmp_path / "pp"
+    root.mkdir()
+    folder = root / "job"
+    folder.mkdir()
+    key = _seed_manual_review_row(nzb_folder=str(folder), nzb_name="Saga.001.cbz")
+    monkeypatch.setattr(
+        comicarr,
+        "CONFIG",
+        SimpleNamespace(
+            FAILED_DOWNLOAD_HANDLING=True,
+            FAILED_AUTO=False,
+            HIGHCOUNT=0,
+            DDL_LOCATION=str(tmp_path / "ddl"),
+            CACHE_DIR=str(tmp_path / "cache"),
+            DESTINATION_DIR=str(tmp_path / "library"),
+            MANUAL_PP_FOLDER=str(root),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(comicarr, "PP_QUEUE", queuelib.Queue(), raising=False)
+    ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
+
+    result = dl_service.resolve_needs_attention_batch(ctx, "import", [key], audit_identity="op")
+
+    assert result["success"] is True
+    assert result["succeeded"] == 1
+    assert _journal_row(key)["status"] == journal.STATUS_IMPORTED
+    queued = comicarr.PP_QUEUE.get_nowait()
+    assert queued["nzb_name"] == "Saga.001.cbz"
+    assert queued["nzb_folder"] == str(folder)
+
+
 def test_batch_rejects_unknown_action_and_empty_keys():
     ctx = AppContext(config=comicarr.CONFIG, provider_blocklist={})
 
