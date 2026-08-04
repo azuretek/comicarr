@@ -643,7 +643,7 @@ def test_reason_to_stage_is_a_function():
     assert sorted(unresolved) == [
         "comicarr/app/downloads/handoff.py:156",
         "comicarr/app/downloads/recovery_classify.py:571",
-        "comicarr/app/downloads/service.py:2120",
+        "comicarr/app/downloads/service.py:2153",
         "comicarr/failed.py:114",
     ], "a mark_* call site with a non-literal reason changed: %s" % sorted(unresolved)
 

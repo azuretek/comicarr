@@ -577,8 +577,25 @@ def apply_verdict(row, verdict, conn=None):
         provider=row.get("provider"),
         downloader_type=row.get("downloader_type"),
     )
+    # Clause 2 (#541): download_gone is non-actionable — blocklist the release
+    # and re-want so the issue is not stranded at Snatched with nothing watching.
+    try:
+        from comicarr.app.activity.reconcile import reconcile_excluded
+
+        reconcile_excluded(
+            FAIL_REASON_GONE,
+            issueid=row.get("issueid"),
+            provider=row.get("provider"),
+            nzbname=row.get("nzbname") or (payload or {}).get("nzbname") or (payload or {}).get("filename"),
+            release_id=ddl_id,
+            hash=row.get("hash"),
+            payload=payload,
+            conn=conn,
+        )
+    except Exception as e:
+        logger.error("[RECOVERY-CLASSIFY] band reconciliation after GONE failed for %s: %s" % (rkey, e))
     logger.warn(
-        "[RECOVERY-CLASSIFY] %s marked failed (reason=%s) — payload retained "
-        "for future manual retry (R9); replay will NOT re-queue it." % (rkey, FAIL_REASON_GONE)
+        "[RECOVERY-CLASSIFY] %s marked failed (reason=%s) — release blocklisted and "
+        "issue re-wanted when resolvable (#541); replay will NOT re-queue it." % (rkey, FAIL_REASON_GONE)
     )
     return True

@@ -87,22 +87,38 @@ def _reconcile_legacy_ddl_downloading():
             nzbname=ddl_row.get("filename"),
             discriminant=ddl_id,
         )
+        legacy_payload = {
+            "issueid": ddl_row.get("issueid"),
+            "comicid": ddl_row.get("comicid"),
+            "provider": "DDL",
+            "ddl_id": ddl_id,
+            "filename": ddl_row.get("filename"),
+            "ddl": True,
+        }
         journal.mark_manual_review(
             rkey,
             "legacy_downloading_without_correlation",
-            payload={
-                "issueid": ddl_row.get("issueid"),
-                "comicid": ddl_row.get("comicid"),
-                "provider": "DDL",
-                "ddl_id": ddl_id,
-                "filename": ddl_row.get("filename"),
-                "ddl": True,
-            },
+            payload=legacy_payload,
             issueid=ddl_row.get("issueid"),
             provider="DDL",
             downloader_type="ddl",
             nzbname=ddl_row.get("filename"),
         )
+        # Clause 2 (#541): re-want only if an issue resolves (usually none).
+        try:
+            from comicarr.app.activity.reconcile import reconcile_excluded
+
+            reconcile_excluded(
+                "legacy_downloading_without_correlation",
+                issueid=ddl_row.get("issueid"),
+                provider="DDL",
+                nzbname=ddl_row.get("filename"),
+                release_id=ddl_id,
+                comicid=ddl_row.get("comicid"),
+                payload=legacy_payload,
+            )
+        except Exception as e:
+            logger.error("[RECOVERY] band reconciliation after legacy DDL review %s: %s" % (ddl_id, e))
         db.upsert("ddl_info", {"status": "Manual Review"}, {"ID": ddl_id})
         reviewed += 1
     return reviewed
@@ -859,9 +875,23 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
                 from comicarr.app.downloads import queries as dl_queries
 
                 dl_queries.update_ddl_status(ddl_id, "Manual Review")
+            # Clause 2 (#541): attempt ambiguous, no external client to inspect — re-want only.
+            try:
+                from comicarr.app.activity.reconcile import reconcile_excluded
+
+                reconcile_excluded(
+                    "ambiguous_ddl_acceptance_after_restart",
+                    issueid=row.get("issueid"),
+                    provider=row.get("provider"),
+                    nzbname=row.get("nzbname") or (payload or {}).get("filename") or (payload or {}).get("nzbname"),
+                    release_id=ddl_id,
+                    payload=payload,
+                )
+            except Exception as e:
+                logger.error("[RECOVERY] band reconciliation after ambiguous DDL %s: %s" % (rkey, e))
             logger.warn(
                 "[RECOVERY] %s -> MANUAL REVIEW (ambiguous DDL acceptance after restart); "
-                "no duplicate sender call." % rkey
+                "no duplicate sender call; issue re-wanted when resolvable (#541)." % rkey
             )
         else:
             comicarr.NZB_QUEUE.put(item)
@@ -891,7 +921,13 @@ def replay_pipeline(probes=None):
 
     Returns a small summary dict (counts) for logging/tests.
     """
-    summary = {"reconstructed": 0, "legacy_ddl_review": 0, "open": 0, "actions": {}}
+    summary = {
+        "reconstructed": 0,
+        "legacy_ddl_review": 0,
+        "band_reconcile": None,
+        "open": 0,
+        "actions": {},
+    }
 
     if getattr(comicarr, "ACQUISITION_WORKERS_BLOCKED", False):
         summary["actions"]["blocked"] = 1
@@ -904,6 +940,15 @@ def replay_pipeline(probes=None):
         summary["legacy_ddl_review"] = _reconcile_legacy_ddl_downloading()
     except Exception as e:
         logger.error("[RECOVERY] legacy DDL reconciliation failed; continuing: %s" % type(e).__name__)
+
+    # #541: re-want / blocklist issues stranded by excluded fail_reasons written
+    # before clause-2 reconciliation existed. Idempotent; safe every boot.
+    try:
+        from comicarr.app.activity.reconcile import reconcile_existing_excluded_rows
+
+        summary["band_reconcile"] = reconcile_existing_excluded_rows()
+    except Exception as e:
+        logger.error("[RECOVERY] band actionability one-shot failed; continuing: %s" % type(e).__name__)
 
     # 1. Anchor reconstruction FIRST (U2 residual window).
     try:
