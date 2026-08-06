@@ -7,18 +7,28 @@ import type { InstallType } from "@/types/version";
 
 export const GHCR_IMAGE = "ghcr.io/frankieramirez/comicarr";
 
+/**
+ * The git/release line carries a `v` prefix: git tags, GitHub release pages.
+ */
+export function asGitTag(latestVersion: string): string {
+  return latestVersion.startsWith("v") ? latestVersion : `v${latestVersion}`;
+}
+
+/**
+ * The registry line does not: .github/workflows/release.yml pushes
+ * `${GHCR_IMAGE}:${version}` from package.json, bare semver. Carrying the `v`
+ * into a pull reference 404s (#545), so the two lines never share a helper.
+ */
+export function asRegistryTag(latestVersion: string): string {
+  return latestVersion.replace(/^v/, "");
+}
+
 export function releaseTagUrl(latestVersion: string): string {
-  const tag = latestVersion.startsWith("v")
-    ? latestVersion
-    : `v${latestVersion}`;
-  return `https://github.com/frankieramirez/comicarr/releases/tag/${tag}`;
+  return `https://github.com/frankieramirez/comicarr/releases/tag/${asGitTag(latestVersion)}`;
 }
 
 export function pinImageTag(latestVersion: string): string {
-  const tag = latestVersion.startsWith("v")
-    ? latestVersion
-    : `v${latestVersion}`;
-  return `${GHCR_IMAGE}:${tag}`;
+  return `${GHCR_IMAGE}:${asRegistryTag(latestVersion)}`;
 }
 
 export interface UpdateGuidance {
@@ -33,9 +43,7 @@ export function getUpdateGuidance(
   installType: InstallType | null | undefined,
   latestVersion: string,
 ): UpdateGuidance {
-  const tag = latestVersion.startsWith("v")
-    ? latestVersion
-    : `v${latestVersion}`;
+  const tag = asGitTag(latestVersion);
   const pinned = pinImageTag(latestVersion);
   const kind = (installType || "source").toLowerCase();
 
@@ -48,7 +56,7 @@ export function getUpdateGuidance(
         ["docker compose pull", "docker compose up -d"].join("\n"),
         `docker pull ${pinned}`,
       ],
-      note: "Prefer Compose when you use a compose file. The plain pull pins the image to this release — not floating :latest.",
+      note: `Prefer Compose when you use a compose file — it recreates the container, which a pull alone never does. To stay on this release rather than floating :latest, set image: ${pinned} in the compose file before pulling.`,
     };
   }
 

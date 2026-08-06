@@ -61,7 +61,15 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/frankieramirez/comi
 docker compose up -d
 ```
 
-Multi-architecture images (`amd64`, `arm64`) are published to `ghcr.io/frankieramirez/comicarr`.
+Multi-architecture images (`amd64`, `arm64`) are published to `ghcr.io/frankieramirez/comicarr` — GHCR is the only registry Comicarr publishes to.
+
+To pin a release instead of tracking `:latest`, note that **image tags are bare semver — they drop the `v` that GitHub releases and git tags carry**. Release `v0.26.0` is image tag `0.26.0`:
+
+```bash
+docker pull ghcr.io/frankieramirez/comicarr:0.26.0
+```
+
+Under Compose, change the `image:` line to the pinned tag and run `docker compose up -d` — pulling on its own does not move a running container off `:latest`.
 
 See the [installation guide](https://comicarr.com/docs/installation) for Docker Compose configuration, volume details, environment variables, and platform-specific notes.
 
