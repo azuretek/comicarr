@@ -164,6 +164,19 @@ How it works:
 
 Version files (`package.json`, `pyproject.toml`, `frontend/package.json`, and lockfiles) are updated automatically — never edit versions by hand outside release automation.
 
+### Registries
+
+One build pushes identical tags to both registries:
+
+| Registry | Reference | Role |
+| -------- | --------- | ---- |
+| GitHub Container Registry | `ghcr.io/frankieramirez/comicarr` | canonical — what docs and in-app update instructions point at |
+| Docker Hub | `comicarr/comicarr` | mirror — what the website advertises |
+
+**Registry tags are bare semver** (`0.26.0`). Only git tags and GitHub Releases carry the `v` prefix. Conflating the two produces a reference that does not resolve; `asRegistryTag` / `asGitTag` in `frontend/src/lib/updateGuidance.ts` keep the two lines apart.
+
+The Docker Hub push needs the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repo secrets. When they are absent the release still succeeds and publishes to GHCR only, logging a workflow warning — a missing or expired token degrades the mirror, never the release. Run `scripts/setup-dockerhub-publishing.sh` to provision or rotate them; the token needs **Read, Write, Delete** scope, because the description-sync step rejects narrower ones.
+
 ### Writing a changeset (operator-facing)
 
 Changeset summary text is copied into `CHANGELOG.md` and shown to operators in-app (What's New / update notes) with only a **mechanical** transform — strip commit hashes, drop bucket headings, flatten links. There is **no** editorial filter in the app. Write every entry as if an operator will read it after upgrading.
