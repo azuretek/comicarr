@@ -78,7 +78,12 @@ To pin a release instead of tracking `:latest`, note that **image tags are bare 
 docker pull ghcr.io/frankieramirez/comicarr:0.26.0
 ```
 
-Under Compose, change the `image:` line to the pinned tag and run `docker compose up -d` — pulling on its own does not move a running container off `:latest`.
+Pulling on its own never moves a running container to the new image — you have to recreate it:
+
+- **Compose:** change the `image:` line to the pinned tag, then `docker compose up -d`.
+- **Standalone:** `docker stop comicarr && docker rm comicarr`, then re-run the `docker run` command above with the pinned tag.
+
+Your config and library are mounted volumes, so both paths leave them untouched.
 
 See the [installation guide](https://comicarr.com/docs/installation) for Docker Compose configuration, volume details, environment variables, and platform-specific notes.
 

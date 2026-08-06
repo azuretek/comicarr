@@ -39,7 +39,24 @@ describe("updateGuidance", () => {
     // only warms the local cache, so the recreate still resolves :latest.
     const g = getUpdateGuidance("docker", "0.21.0");
     expect(g.note).not.toMatch(/plain pull pins/i);
-    expect(g.note).toMatch(/image:/);
+    // Naming the field is not enough — the note has to carry the value the
+    // operator is meant to paste into it, and the recreate that applies it.
+    expect(g.note).toContain("image: ghcr.io/frankieramirez/comicarr:0.21.0");
+    expect(g.commands[0]).toContain("docker compose up -d");
+  });
+
+  it("gives standalone installs a recreate, not just a pull", () => {
+    // A pull leaves the running container on its old image whether or not
+    // Compose is involved. The non-Compose block must replace the container.
+    const g = getUpdateGuidance("docker", "0.21.0");
+    const standalone = g.commands.find((c) => !c.includes("docker compose"));
+    expect(standalone).toBeDefined();
+    expect(standalone).toContain("docker pull ghcr.io/frankieramirez/comicarr:0.21.0");
+    expect(standalone).toContain("docker stop");
+    expect(standalone).toContain("docker rm");
+    // Original run flags (volumes, ports) are unknowable here, so the note
+    // must hand the recreate back to the operator rather than invent them.
+    expect(g.note).toMatch(/docker run/i);
   });
 
   it("git guidance checks out tag not branch pull", () => {

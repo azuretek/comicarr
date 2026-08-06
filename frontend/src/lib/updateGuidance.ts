@@ -54,9 +54,16 @@ export function getUpdateGuidance(
         "Pull the notified release and recreate the container on the host. Comicarr cannot replace its own container.",
       commands: [
         ["docker compose pull", "docker compose up -d"].join("\n"),
-        `docker pull ${pinned}`,
+        // Stop and rm because a pull replaces the image, never the running
+        // container. The recreate itself belongs to the operator: their
+        // original volume, port, and env flags are not knowable from here.
+        [
+          `docker pull ${pinned}`,
+          "docker stop comicarr",
+          "docker rm comicarr",
+        ].join("\n"),
       ],
-      note: `Prefer Compose when you use a compose file — it recreates the container, which a pull alone never does. To stay on this release rather than floating :latest, set image: ${pinned} in the compose file before pulling.`,
+      note: `Compose: set image: ${pinned} in the compose file before pulling — a pull alone never moves a running container off :latest. Standalone: after the stop and rm, re-run your original docker run with ${pinned}. Your config and library are mounted volumes and survive either path.`,
     };
   }
 
