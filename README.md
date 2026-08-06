@@ -61,7 +61,16 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/frankieramirez/comi
 docker compose up -d
 ```
 
-Multi-architecture images (`amd64`, `arm64`) are published to `ghcr.io/frankieramirez/comicarr` — GHCR is the only registry Comicarr publishes to.
+### Registries
+
+Multi-architecture images (`amd64`, `arm64`) are published to two registries with identical tags, from the same build:
+
+| Registry | Image reference | |
+| -------- | --------------- | - |
+| GitHub Container Registry | `ghcr.io/frankieramirez/comicarr` | canonical |
+| Docker Hub | `comicarr/comicarr` | mirror |
+
+Either works. GHCR does not rate-limit anonymous pulls; Docker Hub does.
 
 To pin a release instead of tracking `:latest`, note that **image tags are bare semver — they drop the `v` that GitHub releases and git tags carry**. Release `v0.26.0` is image tag `0.26.0`:
 
