@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.26.1
+
+### Patch Changes
+
+- 0376408: Comicarr images are now published to Docker Hub as `comicarr/comicarr`, mirroring the existing GHCR images tag for tag from the same build. `docker pull comicarr/comicarr:latest` works, matching what the website has been advertising. Nothing changes for existing installs — `ghcr.io/frankieramirez/comicarr` remains the canonical reference and is still what the update instructions point at, since GHCR does not rate-limit anonymous pulls.
+- 5dc0876: Fixed the `docker pull` command in the update-available popover, which pointed at an image tag that does not exist. Comicarr publishes bare-semver tags (`0.26.0`), but the popover copied a `v`-prefixed reference (`ghcr.io/frankieramirez/comicarr:v0.26.0`) that fails with a manifest-not-found error. The surrounding advice was also incomplete: pulling an image never moves a running container onto it, but the popover implied a plain pull was enough. Both paths are now spelled out — set the pinned tag in your compose file and `up -d`, or stop and remove the container and re-run it. The README says the same.
+
 ## 0.26.0
 
 ### Minor Changes
