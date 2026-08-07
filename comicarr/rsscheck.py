@@ -17,7 +17,6 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Comicarr.  If not, see <http://www.gnu.org/licenses/>.
 
-import gzip
 import os
 import random
 import re
@@ -25,7 +24,6 @@ import sys
 import time
 import urllib.parse
 from datetime import datetime
-from io import StringIO
 
 import feedparser
 import requests
@@ -1594,32 +1592,15 @@ def torsend2client(seriesname, issue, seriesyear, linkit, site, pubhash=None):
                         else:
                             r = scraper.get(redir_url, stream=True)
         except Exception as e:
+            # Must return, not fall through: every line below dereferences `r`,
+            # which this branch leaves unbound. Falling through raised NameError
+            # out of the sender, and perform_handoff routes a raising sender to
+            # manual review (submission_outcome_unknown) — the ambiguity lane for
+            # "it may have landed". Nothing was sent here, so this is a clean
+            # pre-submission failure and belongs on the "fail" path, which the
+            # caller hands to Failed Download Handling.
             logger.warn("Error fetching data from %s (%s): %s" % (site, url, e))
-        #    if site == '32P':
-        #        logger.info('[TOR2CLIENT-32P] Retrying with 32P')
-        #        if comicarr.CONFIG.MODE_32P == 1:
-
-        #            logger.info('[TOR2CLIENT-32P] Attempting to re-authenticate against 32P and poll new keys as required.')
-        #            feed32p = auth32p.info32p(reauthenticate=True)
-        #            feedinfo = feed32p.authenticate()
-
-        #            if feedinfo == "disable":
-        #                helpers.disable_provider('32P')
-        #                return "fail"
-
-        #            logger.debug('[TOR2CLIENT-32P] Creating CF Scraper')
-        #            scraper = cfscrape.create_scraper()
-
-        #            try:
-        #                r = scraper.get(url, params=payload, verify=verify, allow_redirects=True)
-        #            except Exception, e:
-        #                logger.warn('[TOR2CLIENT-32P] Unable to GET %s (%s): %s' % (site, url, e))
-        #                return "fail"
-        #        else:
-        #            logger.warn('[TOR2CLIENT-32P] Unable to authenticate using existing RSS Feed given. Make sure that you have provided a CURRENT feed from 32P')
-        #            return "fail"
-        #    else:
-        #        return "fail"
+            return "fail"
 
         if not filepath.startswith("magnet:"):
             if any([site == "DEM", site == "WWT"]) and any(
@@ -1646,11 +1627,12 @@ def torsend2client(seriesname, issue, seriesyear, linkit, site, pubhash=None):
                     except Exception:
                         return "fail"
 
-            if any([site == "DEM", site == "WWT"]):
-                if r.headers.get("Content-Encoding") == "gzip":
-                    buf = StringIO(r.content)
-                    f = gzip.GzipFile(fileobj=buf)
-
+            # A DEM/WWT gzip branch used to sit here. It built a GzipFile over
+            # StringIO(r.content) — a TypeError on bytes — and then discarded it,
+            # because `f` is immediately rebound by the open() below and the body
+            # is written straight from r.iter_content(). requests already decodes
+            # Content-Encoding: gzip transparently, so the branch was both broken
+            # and unnecessary.
             with open(filepath, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024):
                     if chunk:  # filter out keep-alive new chunks
