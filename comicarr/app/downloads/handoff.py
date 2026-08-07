@@ -101,8 +101,35 @@ def reserve(release_key, route, payload=None, **fields):
         **fields,
     )
     if not won:
-        raise HandoffReservationError("durable handoff reservation was not acquired")
+        raise HandoffReservationError(_reservation_refusal(release_key))
     return normalized
+
+
+def _reservation_refusal(release_key):
+    """Explain a lost reservation using the row that blocked it.
+
+    A refused reservation used to surface only as a bare
+    HandoffReservationError, so the most common cause — an unresolved
+    manual_review row holding the release_key terminal — read in the log as an
+    unexplained handoff failure repeating every search cycle (#562). The row is
+    the explanation, so read it once, here, where it is cheap.
+    """
+    from comicarr.app.downloads import journal
+
+    default = "durable handoff reservation was not acquired"
+    try:
+        current = journal.read_one(release_key) or {}
+    except Exception:
+        return default
+    stage = current.get("stage")
+    if stage != journal.MANUAL_REVIEW:
+        return default
+    detail = "%s awaiting operator review (%s)" % (release_key, current.get("fail_reason") or "no reason recorded")
+    logger.warn(
+        "[HANDOFF] reservation refused: %s. This release stays blocked for this "
+        "provider until the needs-attention band entry is resolved." % detail
+    )
+    return "handoff blocked: %s" % detail
 
 
 def _acceptance_identity(route, response):
