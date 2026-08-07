@@ -19,7 +19,6 @@
 
 
 import datetime
-import errno
 import os
 import pathlib
 import re
@@ -1346,31 +1345,21 @@ def NZB_SEARCH(
                         break
                     except requests.exceptions.ConnectionError as e:
                         logger.warn("Connection error trying to retrieve data from %s: %s" % (nzbprov, e))
-                        logger.warn("[%s]Connection error trying to retrieve data from %s: %s" % (errno, nzbprov, e))
-                        if any(
-                            [
-                                errno.ETIMEDOUT,
-                                errno.ECONNREFUSED,
-                                errno.EHOSTDOWN,
-                                errno.EHOSTUNREACH,
-                            ]
-                        ):
+                        if helpers.provider_unreachable(e):
                             helpers.disable_provider(tmpprov, "Connection Refused.")
                         is_info["foundc"]["status"] = False
                         break
                     except requests.exceptions.RequestException as e:
-                        logger.warn("[%s]General Error fetching data from %s: %s" % (errno.errorcode, nzbprov, e))
-                        if any(
-                            [
-                                errno.ETIMEDOUT,
-                                errno.ECONNREFUSED,
-                                errno.EHOSTDOWN,
-                                errno.EHOSTUNREACH,
-                            ]
-                        ):
+                        logger.warn("General Error fetching data from %s: %s" % (nzbprov, e))
+                        if helpers.provider_unreachable(e):
                             helpers.disable_provider(tmpprov, "Connection Refused.")
                             logger.warn("Aborting search due to Provider unavailability")
-                            is_info["foundc"]["status"] = False
+                        else:
+                            logger.warn(
+                                "%s answered with an error - skipping this provider for this search, "
+                                "but leaving it enabled." % nzbprov
+                            )
+                        is_info["foundc"]["status"] = False
                         break
                     is_info["foundc"]["lastrun"] = time.time()
                     logger.info(

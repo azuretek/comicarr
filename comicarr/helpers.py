@@ -113,6 +113,7 @@ from comicarr.app.search.service import (  # noqa: F401
     ignored_publisher_check,
     newznab_test,
     parse_32pfeed,
+    provider_unreachable,
     search_queue,
     torrent_create,
     torrentinfo,
