@@ -36,7 +36,7 @@ import json
 import re
 import time
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from comicarr import db, logger
@@ -103,10 +103,30 @@ MANUAL_REVIEW_ACTIONS = (ACTION_IMPORT, ACTION_SEARCH_AGAIN, ACTION_STOP_WANTING
 STAGE_ACTIONS = {FAILED: FAILED_ACTIONS, MANUAL_REVIEW: MANUAL_REVIEW_ACTIONS}
 BAND_ACTIONS = frozenset(FAILED_ACTIONS) | frozenset(MANUAL_REVIEW_ACTIONS)
 
-# Fresh re-snatch stages that may supersede a terminal `failed` row under the
-# same release_key (same issue|provider). DDL handoff writes RESERVED first;
-# NZB/torrent snatch (updater.foundsearch) writes SNATCHED directly.
+# Fresh re-snatch stages that may supersede a supersedable terminal row under
+# the same release_key (same issue|provider). DDL handoff writes RESERVED
+# first; NZB/torrent snatch (updater.foundsearch) writes SNATCHED directly.
 _RESNATCH_STAGES = (RESERVED, SNATCHED)
+
+# Terminal stages a re-snatch may supersede. `failed` is always supersedable:
+# the attempt is closed and nothing is outstanding at the download client.
+#
+# `manual_review` is supersedable ONLY once an operator has resolved it (#562).
+# The asymmetry is deliberate. An unresolved manual_review row is an OPEN
+# obligation — it means "the client may already have this, go look" — and it is
+# on the needs-attention band precisely so a human does. Letting an automatic
+# re-snatch reset it would both hide the row and re-deliver a release the client
+# may already hold; on routes like watchdir, where every acceptance is manual
+# review by construction, every sweep would deliver another copy. Once the
+# operator has acted (retry / search again / import — the R9 stamp that takes
+# the row off the band), the obligation is discharged and the next grab must be
+# able to proceed. Before #562 it could not: the row stayed terminal, so the
+# operator's own retry wedged at reservation for that issue+provider forever.
+#
+# This widens the *stage gate* only. The reset is still reachable exclusively
+# from a fresh RESERVED/SNATCHED write, so it does not become an operator exit —
+# the boundary docs/architecture/activity-center.md draws is intact.
+_SUPERSEDABLE_TERMINALS = (FAILED, MANUAL_REVIEW)
 
 # Synthetic one-off IssueIDs are an unpersisted CONFIG.HIGHCOUNT counter that
 # starts at 900000 (see comicarr/updater.py:1214-1220). Such an IssueID is not
@@ -427,16 +447,20 @@ def _now():
     return now()
 
 
-def _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
+def _try_reset_terminal_attempt(conn, key, stage, new_rank, upd_values):
     """RE-SNATCH special case: a fresh RESERVED or SNATCHED write observed
-    against a terminal `failed` row is a NEW in-flight obligation that
-    legitimately supersedes the closed failed attempt — reset the row.
+    against a supersedable terminal row is a NEW in-flight obligation that
+    legitimately supersedes the closed attempt — reset the row.
+
+    Supersedable means a terminal `failed` row, or a `manual_review` row an
+    operator has already resolved. See ``_SUPERSEDABLE_TERMINALS`` for why the
+    two differ; an unresolved manual_review row is left terminal on purpose.
 
     WHY this does NOT weaken the monotonic stale-replay guard: replay never
     issues a fresh RESERVED/SNATCHED transition (the snatch seam and DDL
     handoff do, only from a real new grab; replay re-enqueues still
     non-terminal items, never a first-stage write). So a re-snatch stage
-    seen against a `failed` row is always a genuine new obligation, never a
+    seen against a terminal row is always a genuine new obligation, never a
     stale replay — resetting is correct here and the monotonic guard is left
     fully intact for every other stage.
 
@@ -447,29 +471,52 @@ def _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
     nothing (#483 / #437 amendment).
 
     This helper remains the re-snatch path only — operator band exits stamp
-    R9 status without calling it (#437 / #483).
+    R9 status without calling it (#437 / #483). Widening the stage gate does
+    not change that: nothing but a fresh RESERVED/SNATCHED write reaches here.
 
-    Returns True iff THIS call won the reset. The UPDATE is gated with
-    `WHERE stage = FAILED` so two concurrent re-snatch writers racing one
-    failed row yield exactly one True — the loser's gated UPDATE matches 0
-    rows and it falls back to the monotonic no-op.
+    Returns True iff THIS call won the reset. The UPDATE carries the same
+    stage/status predicate the caller matched on, so two concurrent re-snatch
+    writers racing one terminal row yield exactly one True — the loser's gated
+    UPDATE matches 0 rows and it falls back to the monotonic no-op.
     """
     if stage not in _RESNATCH_STAGES:
         return False
 
+    previous = conn.execute(select(pipeline_journal.c.stage).where(pipeline_journal.c.release_key == key)).scalar()
     reset = conn.execute(
         update(pipeline_journal)
         .where(pipeline_journal.c.release_key == key)
-        .where(pipeline_journal.c.stage == FAILED)
+        .where(_supersedable_terminal_predicate())
         .values(fail_reason=None, status=None, hash=None, **upd_values)
     )
     if reset.rowcount:
         logger.warn(
-            "[JOURNAL] release_key=%s reset from terminal failed -> %s "
-            "(new submission supersedes closed failed attempt)" % (key, stage)
+            "[JOURNAL] release_key=%s reset from terminal %s -> %s "
+            "(new submission supersedes closed attempt)" % (key, previous, stage)
         )
         return True
     return False
+
+
+def _supersedable_terminal_predicate():
+    """SQL for "this terminal row may be superseded by a fresh re-snatch"."""
+
+    return or_(
+        pipeline_journal.c.stage == FAILED,
+        and_(
+            pipeline_journal.c.stage == MANUAL_REVIEW,
+            pipeline_journal.c.status.in_(RESOLVED_STATUSES),
+        ),
+    )
+
+
+def _is_supersedable_terminal(mapping):
+    """Python mirror of :func:`_supersedable_terminal_predicate`."""
+
+    stage = mapping.get("stage")
+    if stage == FAILED:
+        return True
+    return stage == MANUAL_REVIEW and mapping.get("status") in RESOLVED_STATUSES
 
 
 def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
@@ -486,7 +533,7 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
         sanitize_payload(load_payload(existing_row._mapping.get("payload_json"))) if existing_row is not None else None
     )
     new_attempt = (
-        existing_row is not None and existing_row._mapping.get("stage") == FAILED and stage in _RESNATCH_STAGES
+        existing_row is not None and _is_supersedable_terminal(existing_row._mapping) and stage in _RESNATCH_STAGES
     )
     if new_attempt:
         # A new attempt must not inherit the previous client's acceptance id,
@@ -639,12 +686,12 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
             )
             if retry.rowcount:
                 return True
-            # The now-present row may be a terminal `failed` row (a concurrent
-            # writer inserted-then-failed it): the monotonic re-run matched 0,
-            # so this is the absent-of-monotonic-match branch for the
-            # failed-row case — apply the same gated re-snatch reset here so
-            # the P1-2 race path composes with the failed->snatched rule.
-            if _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
+            # The now-present row may be a supersedable terminal row (a
+            # concurrent writer inserted-then-terminalised it): the monotonic
+            # re-run matched 0, so this is the absent-of-monotonic-match branch
+            # for that case — apply the same gated re-snatch reset here so the
+            # P1-2 race path composes with the terminal->snatched rule.
+            if _try_reset_terminal_attempt(conn, key, stage, new_rank, upd_values):
                 return True
             logger.fdebug(
                 "[JOURNAL] first-writer race resolved: release_key=%s stage=%s "
@@ -654,9 +701,11 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
             return False
 
     # Row exists and is at/ahead of new_rank. The ONE legal exception to the
-    # monotonic no-op: a fresh RESERVED/SNATCHED write against a terminal
-    # `failed` row is a RE-SNATCH that supersedes the closed failed attempt.
-    if existing[0] == FAILED and _try_reset_failed_attempt(conn, key, stage, new_rank, upd_values):
+    # monotonic no-op: a fresh RESERVED/SNATCHED write against a supersedable
+    # terminal row is a RE-SNATCH that supersedes the closed attempt. The
+    # status half of "supersedable" is enforced by the helper's own gated
+    # UPDATE, so this stage check only avoids a pointless statement.
+    if existing[0] in _SUPERSEDABLE_TERMINALS and _try_reset_terminal_attempt(conn, key, stage, new_rank, upd_values):
         return True
 
     # Row exists and is at/ahead of new_rank — a regressing or post-terminal

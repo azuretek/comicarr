@@ -171,8 +171,26 @@ remainder comes back as `skipped_for_cap`. A mixed outcome is `success: true` wi
   ships ([Decide how an item exits manual_review and failed](https://github.com/frankieramirez/comicarr/issues/437)
   amendment from grouping).
 
-`_try_reset_failed_attempt` stays as-is for genuine re-snatch; it is not the operator
-path and is not extended to `manual_review`.
+`_try_reset_terminal_attempt` is the genuine-re-snatch path only; it is not the
+operator path. It supersedes a terminal `failed` row unconditionally, and a
+`manual_review` row **only once that row carries an R9 resolution stamp**
+([#562](https://github.com/frankieramirez/comicarr/issues/562)).
+
+The asymmetry is the point. An *unresolved* `manual_review` row is an open
+obligation — "the client may already have this, go look" — and it is on the band
+so a human does. Letting an automatic re-snatch reset it would hide the row and
+re-deliver a release the client may already hold; on a route like `watchdir`,
+where every acceptance is manual review by construction, every sweep would
+deliver another copy. So it still blocks — but `handoff.reserve` now names the
+row and its reason in the refusal instead of raising a bare reservation error.
+
+Once the operator has acted, the obligation is discharged and the next grab must
+proceed. Before #562 it could not: the stamp takes the row off the band without
+rewriting `stage`, so the operator's own `[retry]` / `[search again]` — which
+re-wants the issue and queues a search — then wedged at reservation for that
+issue+provider, forever. This widens the *stage gate* only; nothing but a fresh
+`RESERVED`/`SNATCHED` write reaches the helper, so it still cannot become an
+operator exit.
 
 ---
 

@@ -641,7 +641,7 @@ def test_reason_to_stage_is_a_function():
     # Each parameterized writer must keep feeding exactly one stage. Update this
     # list only alongside a check that its callers do not cross stages.
     assert sorted(unresolved) == [
-        "comicarr/app/downloads/handoff.py:156",
+        "comicarr/app/downloads/handoff.py:183",
         "comicarr/app/downloads/recovery_classify.py:571",
         "comicarr/app/downloads/service.py:2153",
         "comicarr/failed.py:114",

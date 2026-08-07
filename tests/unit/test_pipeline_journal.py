@@ -280,6 +280,115 @@ def test_two_concurrent_resnatch_writers_vs_one_failed_row_exactly_one_winner():
     assert _row(key)["fail_reason"] is None
 
 
+# ---------------------------------------------------------------------------
+# RE-SNATCH after terminal manual_review (#562 — the operator-exit wedge)
+# ---------------------------------------------------------------------------
+
+
+def test_unresolved_manual_review_still_blocks_a_resnatch(capture_logs):
+    """An unresolved manual_review row is an OPEN obligation on the band.
+
+    It means "the client may already have this, go look", so an automatic
+    re-snatch must not reset it — that would both hide the band row and
+    re-deliver a release the client may already hold.
+    """
+    key = journal.release_key("410", "prov")
+    journal.record_transition(key, journal.SNATCHED)
+    assert journal.mark_manual_review(key, "route_acceptance_missing_identity:qbittorrent") is True
+
+    won = journal.record_transition(key, journal.RESERVED, payload={"issueid": "410"})
+
+    assert won is False
+    row = _row(key)
+    assert row["stage"] == "manual_review"
+    assert row["fail_reason"] == "route_acceptance_missing_identity:qbittorrent"
+    assert "no-op" in capture_logs.text
+
+
+@pytest.mark.parametrize("resolution", journal.RESOLVED_STATUSES)
+def test_resolved_manual_review_no_longer_wedges_a_resnatch(resolution):
+    """Once the operator has acted, the obligation is discharged and the next
+    grab on the same issue+provider must proceed (#562).
+
+    Before this, the row stayed terminal at manual_review forever, so the
+    operator's own retry — which re-wants the issue and queues a search —
+    raised HandoffReservationError at reservation for that issue+provider.
+    """
+    key = journal.release_key("411", "prov")
+    journal.record_transition(key, journal.SNATCHED, payload={"issueid": "411", "hash": "oldgrab"})
+    journal.mark_manual_review(key, "submission_outcome_unknown:NameError")
+    assert journal.stamp_resolution(key, resolution) is True
+
+    payload = {"issueid": "411", "hash": "newgrab"}
+    won = journal.record_transition(key, journal.RESERVED, payload=payload)
+
+    assert won is True
+    row = _row(key)
+    assert row["stage"] == "reserved"
+    assert row["fail_reason"] is None
+    assert row["status"] is None
+    assert row["hash"] is None
+    # The new attempt carries its own identity and inherits none of the old one.
+    assert journal.load_payload(row["payload_json"]) == payload
+    assert len(_all_rows()) == 1
+
+
+def test_resolved_manual_review_resnatch_can_advance_normally():
+    """The reset row is an ordinary in-flight obligation afterwards."""
+    key = journal.release_key("412", "prov")
+    journal.record_transition(key, journal.SNATCHED)
+    journal.mark_manual_review(key, "route_not_restart_safe:watchdir")
+    journal.stamp_resolution(key, journal.STATUS_RETRIED)
+
+    assert journal.record_transition(key, journal.RESERVED) is True
+    assert journal.record_transition(key, journal.SNATCHED, payload={"nzo_id": "new-client-id"}) is True
+    assert journal.record_transition(key, journal.DOWNLOADED) is True
+    assert _row(key)["stage"] == "downloaded"
+
+
+def test_downloaded_against_resolved_manual_review_still_noop(capture_logs):
+    """Widening the gate is re-snatch-only: non-re-snatch stages stay no-ops."""
+    key = journal.release_key("413", "prov")
+    journal.record_transition(key, journal.SNATCHED)
+    journal.mark_manual_review(key, "submission_outcome_unknown:NameError")
+    journal.stamp_resolution(key, journal.STATUS_RETRIED)
+
+    assert journal.record_transition(key, journal.DOWNLOADED) is False
+    assert _row(key)["stage"] == "manual_review"
+    assert "no-op" in capture_logs.text
+
+
+def test_two_concurrent_resnatch_writers_vs_one_resolved_manual_review_row():
+    """Exactly-one-winner holds for the widened gate too."""
+    key = journal.release_key("414", "prov")
+    journal.record_transition(key, journal.SNATCHED)
+    journal.mark_manual_review(key, "submission_outcome_unknown:NameError")
+    journal.stamp_resolution(key, journal.STATUS_RETRIED)
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def writer():
+        try:
+            barrier.wait()
+            results.append(journal.record_transition(key, journal.RESERVED))
+        except Exception as e:  # noqa: BLE001 - test must observe any leak
+            errors.append(e)
+
+    t1 = threading.Thread(target=writer)
+    t2 = threading.Thread(target=writer)
+    t1.start()
+    t2.start()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    assert errors == [], "error leaked from concurrent re-snatch: %s" % errors
+    assert sorted(results) == [False, True], "exactly-one-winner broken: %s" % results
+    assert len(_all_rows()) == 1
+    assert _row(key)["stage"] == "reserved"
+
+
 def test_failed_retry_clears_old_acceptance_identity_before_new_acceptance():
     key = journal.release_key("retry-id", "nzb.su")
     journal.record_transition(
