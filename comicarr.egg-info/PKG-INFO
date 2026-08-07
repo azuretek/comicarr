@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: comicarr
-Version: 0.19.13
+Version: 0.26.1
 Summary: Automated Comic Book Manager
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
@@ -120,7 +120,29 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/frankieramirez/comi
 docker compose up -d
 ```
 
-Multi-architecture images (`amd64`, `arm64`) are published to `ghcr.io/frankieramirez/comicarr`.
+### Registries
+
+Multi-architecture images (`amd64`, `arm64`) are published to two registries with identical tags, from the same build:
+
+| Registry | Image reference | |
+| -------- | --------------- | - |
+| GitHub Container Registry | `ghcr.io/frankieramirez/comicarr` | canonical |
+| Docker Hub | `comicarr/comicarr` | mirror |
+
+Either works. GHCR does not rate-limit anonymous pulls; Docker Hub does.
+
+To pin a release instead of tracking `:latest`, note that **image tags are bare semver — they drop the `v` that GitHub releases and git tags carry**. Release `v0.26.0` is image tag `0.26.0`:
+
+```bash
+docker pull ghcr.io/frankieramirez/comicarr:0.26.0
+```
+
+Pulling on its own never moves a running container to the new image — you have to recreate it:
+
+- **Compose:** change the `image:` line to the pinned tag, then `docker compose up -d`.
+- **Standalone:** `docker stop comicarr && docker rm comicarr`, then re-run the `docker run` command above with the pinned tag.
+
+Your config and library are mounted volumes, so both paths leave them untouched.
 
 See the [installation guide](https://comicarr.com/docs/installation) for Docker Compose configuration, volume details, environment variables, and platform-specific notes.
 
@@ -239,7 +261,7 @@ cd frontend && npm ci && cd ..
 python3 Comicarr.py --nolaunch   # backend on :8090
 
 # separate terminal — frontend HMR (proxies API to :8090)
-cd frontend && npm run dev
+cd frontend && npm run dev   # https://comicarr.localhost:1355 (portless)
 ```
 
 ## Attribution

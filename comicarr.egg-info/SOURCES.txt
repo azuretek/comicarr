@@ -6,6 +6,7 @@ comicarr/auth32p.py
 comicarr/carepackage.py
 comicarr/cdh_mapping.py
 comicarr/cfscrape_compat.py
+comicarr/changelog_notes.py
 comicarr/cmtag.py
 comicarr/comicsync.py
 comicarr/config.py
@@ -52,6 +53,7 @@ comicarr/scanutil.py
 comicarr/search.py
 comicarr/search_filer.py
 comicarr/searchit.py
+comicarr/series_kind.py
 comicarr/series_metadata.py
 comicarr/tables.py
 comicarr/updater.py
@@ -155,7 +157,18 @@ comicarr/app/acquisition/evidence.py
 comicarr/app/acquisition/maintenance.py
 comicarr/app/acquisition/models.py
 comicarr/app/acquisition/policy.py
+comicarr/app/acquisition/retention.py
 comicarr/app/acquisition/runs.py
+comicarr/app/activity/__init__.py
+comicarr/app/activity/events.py
+comicarr/app/activity/grouping.py
+comicarr/app/activity/producers.py
+comicarr/app/activity/queries.py
+comicarr/app/activity/reasons.py
+comicarr/app/activity/reconcile.py
+comicarr/app/activity/retention.py
+comicarr/app/activity/router.py
+comicarr/app/activity/service.py
 comicarr/app/ai/__init__.py
 comicarr/app/ai/chat.py
 comicarr/app/ai/chat_images.py
@@ -182,10 +195,13 @@ comicarr/app/common/__init__.py
 comicarr/app/common/dates.py
 comicarr/app/common/filesystem.py
 comicarr/app/common/numbers.py
+comicarr/app/common/placement.py
 comicarr/app/common/redaction.py
 comicarr/app/common/remote_artifacts.py
 comicarr/app/common/strings.py
 comicarr/app/common/utilities.py
+comicarr/app/config/__init__.py
+comicarr/app/config/registry.py
 comicarr/app/core/__init__.py
 comicarr/app/core/context.py
 comicarr/app/core/database.py
@@ -244,6 +260,7 @@ comicarr/app/system/__init__.py
 comicarr/app/system/acquisition_repair.py
 comicarr/app/system/router.py
 comicarr/app/system/service.py
+comicarr/app/system/whats_new.py
 comicarr/app/weekly/__init__.py
 comicarr/app/weekly/queries.py
 comicarr/app/weekly/router.py

@@ -1225,7 +1225,7 @@ def updateComicLocation():
                 for cl in comloc:
                     ctrlVal = {"ComicID": cl["comicid"]}
                     newVal = {"ComicLocation": cl["comlocation"]}
-                    db.upsert("Comics", newVal, ctrlVal)
+                    db.upsert("comics", newVal, ctrlVal)
                     logger.fdebug("Updated : " + cl["origlocation"] + " .: TO :. " + cl["comlocation"])
                 logger.info(
                     "Updated " + str(len(comloc)) + " series to a new Comic Location as specified in the config.ini"

@@ -1345,7 +1345,7 @@ def upgrade_dynamic():
         for dl in dynamic_comiclist:
             CtrlVal = {"ComicID": dl["ComicID"]}
             newVal = {"DynamicComicName": dl["DynamicComicName"]}
-            db.upsert("Comics", newVal, CtrlVal)
+            db.upsert("comics", newVal, CtrlVal)
 
     # update the storyarcsdb to include the Dynamic Names (and any futher changes as required)
     dynamic_storylist = []

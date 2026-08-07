@@ -633,10 +633,10 @@ def dbUpdate(ComicIDList=None, calledfrom=None, sched=False):
                                                 + " #: "
                                                 + str(issue["Issue_Number"])
                                             )
-                                            db.upsert("Annuals", newVAL, ctrlVAL)
+                                            db.upsert("annuals", newVAL, ctrlVAL)
                                         else:
                                             # logger.fdebug('#' + str(issue['Issue_Number']) + ' writing issuedata: ' + str(newVAL))
-                                            db.upsert("Issues", newVAL, ctrlVAL)
+                                            db.upsert("issues", newVAL, ctrlVAL)
                                         fndissue.append({"IssueID": issue["IssueID"]})
                                         icount += 1
                                         break
@@ -770,9 +770,9 @@ def dbUpdate(ComicIDList=None, calledfrom=None, sched=False):
                             newVAL = {"Status": newi["Status"]}
                             # logger.fdebug('writing issuedata: ' + str(newVAL))
                             if newi["Annual"]:
-                                db.upsert("Annuals", newVAL, ctrlVAL)
+                                db.upsert("annuals", newVAL, ctrlVAL)
                             else:
-                                db.upsert("Issues", newVAL, ctrlVAL)
+                                db.upsert("issues", newVAL, ctrlVAL)
 
                     logger.info(
                         "I have added " + str(len(newiss)) + " new issues for this series that were not present before."
