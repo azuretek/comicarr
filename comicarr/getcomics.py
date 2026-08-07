@@ -20,7 +20,6 @@
 
 
 import datetime
-import errno
 import json
 import os
 import re
@@ -254,14 +253,7 @@ class GC(object):
             return "no results"
         except requests.exceptions.ConnectionError as e:
             logger.warn("[WARNING] Connection refused to DDL site, stopped by a small tank. Error returned as : %s" % e)
-            if any(
-                [
-                    errno.ETIMEDOUT,
-                    errno.ECONNREFUSED,
-                    errno.EHOSTDOWN,
-                    errno.EHOSTUNREACH,
-                ]
-            ):
+            if helpers.provider_unreachable(e):
                 helpers.disable_provider("DDL", "Connection Refused.")
             return "no results"
         except Exception as err:

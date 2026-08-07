@@ -15,6 +15,7 @@ rsscheck.py. Preserves ThreadPoolExecutor for parallel provider queries.
 """
 
 import datetime
+import errno
 import re
 import time
 import uuid
@@ -831,6 +832,58 @@ def block_provider_check(site, simple=True, force=False):
         return False
     else:
         return {"blocked": False, "remain": 0}
+
+
+# Socket errnos that mean the provider itself could not be reached. An HTTP
+# response of any status proves the opposite, so it is checked first.
+PROVIDER_DOWN_ERRNOS = frozenset(
+    {
+        errno.ETIMEDOUT,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.EHOSTDOWN,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+    }
+)
+
+
+def _nested_errno(exc, depth=0):
+    """Dig the OS-level errno out of a requests exception.
+
+    requests wraps urllib3 which wraps the original OSError, so the errno is
+    never on the exception we catch — it sits a few layers down in `args`,
+    `__cause__` or `__context__`.
+    """
+    if exc is None or depth > 6:
+        return None
+    code = getattr(exc, "errno", None)
+    if isinstance(code, int) and code:
+        return code
+    for nested in list(getattr(exc, "args", ()) or ()) + [exc.__cause__, exc.__context__]:
+        if isinstance(nested, BaseException):
+            code = _nested_errno(nested, depth + 1)
+            if code is not None:
+                return code
+    return None
+
+
+def provider_unreachable(exc):
+    """True when a requests exception means the provider is down, not just unhappy.
+
+    A rate-limit (429), an auth failure or any other HTTP error means the
+    provider answered — blocklisting it for an hour is the wrong response.
+    """
+    response = getattr(exc, "response", None)
+    if response is not None and getattr(response, "status_code", None):
+        return False
+    code = _nested_errno(exc)
+    if code is not None:
+        return code in PROVIDER_DOWN_ERRNOS
+    # No errno to inspect (DNS failure, SSL handshake, read timeout): trust the
+    # requests exception class instead.
+    return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
 
 
 def disable_provider(site, reason=None, delay=0):
