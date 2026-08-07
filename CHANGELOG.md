@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.26.3
+
+### Patch Changes
+
+- b672dfc: Fixed a failed torrent download landing in manual review — and permanently blocking that issue from that provider — when the .torrent file simply could not be fetched. If the tracker was unreachable, timed out, or returned something unusable, Comicarr crashed inside the send step instead of reporting a clean failure. Because a crash there means "we do not know whether the download client got this", the attempt was filed for manual review, which is terminal: every later attempt on the same issue and provider was then refused before it even reached the client, so the 6-hourly search retried into the same wall forever while telling you nothing useful. A fetch that never reaches the download client is now reported as an ordinary failure and goes to Failed Download Handling, so the release can be retried normally. This affects all five torrent clients (rTorrent, Deluge, qBittorrent, Transmission, uTorrent).
+- 6bfa938: Fixed Retry and Search again doing nothing for an issue that had landed in needs-attention. Once an attempt ended in manual review, that issue was permanently blocked from that provider: the retry re-wanted the issue and started a search, and the search then refused to hand anything to the download client — so the item quietly bounced back into needs-attention on the next cycle, forever, with nothing in the log to say why. Resolving a needs-attention item now genuinely releases it, so the next search can grab it again, however many times you need. An item you have _not_ resolved yet still blocks — it may be something your download client already has, and clearing it automatically would both hide it from you and download it twice — but the log now names the item and its reason instead of reporting an unexplained handoff failure.
+- e652bfe: Fixed series refresh failing outright whenever it had issue or location changes to write. Refreshing a series looked up its database table under the wrong name, so the moment a refresh found something to update — a new issue, a changed status, a relocated series folder — the write raised `Unknown table for upsert` and the whole run was recorded as failed. Refreshes that happened to find nothing to change appeared to succeed, which is why this could go unnoticed while every real update was being dropped. The same defect affected annuals, the bulk series-location update after a config change, and the dynamic-name maintenance pass. All of them now write correctly, so a refresh actually persists what it finds.
+
 ## 0.26.2
 
 ### Patch Changes
