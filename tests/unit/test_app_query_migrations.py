@@ -24,12 +24,12 @@ from comicarr.app.ai import story_arcs as ai_story_arcs
 from comicarr.app.dashboard import queries as dashboard_queries
 from comicarr.app.weekly import queries as weekly_queries
 from comicarr.tables import (
+    activity_events,
     ai_cache,
     ai_metadata_history,
     comics,
     issues,
     metadata,
-    snatched,
     storyarcs,
     weekly,
 )
@@ -399,39 +399,44 @@ def test_dashboard_helpers_keep_inclusive_cutoff_order_and_content_type_totals(q
     _seed_library(query_db)
     with query_db.begin() as conn:
         conn.execute(
-            insert(snatched),
+            insert(activity_events),
             [
                 {
-                    "IssueID": "boundary",
-                    "ComicID": "comic-alpha",
-                    "ComicName": "Alpha",
-                    "Issue_Number": "1",
-                    "Status": "Snatched",
-                    "Provider": "one",
-                    "DateAdded": "2026-06-10 12:00:00",
+                    "event_id": 1,
+                    "created_at": "2026-06-10 12:00:00",
+                    "activity": "grab",
+                    "status": "succeeded",
+                    "subject_type": "issue",
+                    "subject_id": "boundary",
+                    "subject_label": "Alpha #1",
+                    "provider": "one",
                 },
                 {
-                    "IssueID": "newest",
-                    "ComicID": "comic-alpha",
-                    "ComicName": "Alpha",
-                    "Issue_Number": "2",
-                    "Status": "Snatched",
-                    "Provider": "two",
-                    "DateAdded": "2026-06-10 12:00:01",
+                    "event_id": 2,
+                    "created_at": "2026-06-10 12:00:01",
+                    "activity": "grab",
+                    "status": "failed",
+                    "subject_type": "issue",
+                    "subject_id": "newest",
+                    "subject_label": "Alpha #2",
+                    "provider": "two",
                 },
                 {
-                    "IssueID": "old",
-                    "ComicID": "comic-alpha",
-                    "ComicName": "Alpha",
-                    "Issue_Number": "0",
-                    "Status": "Snatched",
-                    "Provider": "three",
-                    "DateAdded": "2026-06-10 11:59:59",
+                    "event_id": 3,
+                    "created_at": "2026-06-10 11:59:59",
+                    "activity": "grab",
+                    "status": "succeeded",
+                    "subject_type": "issue",
+                    "subject_id": "old",
+                    "subject_label": "Alpha #0",
+                    "provider": "three",
                 },
             ],
         )
+    # Inclusive cutoff + newest-first; a failure is visible the same way a success is.
     recent = dashboard_queries.get_recent_activity("2026-06-10 12:00:00")
-    assert [row["IssueID"] for row in recent] == ["newest", "boundary"]
+    assert [row["subject_id"] for row in recent] == ["newest", "boundary"]
+    assert recent[0]["status"] == "failed"
     assert dashboard_queries.get_library_stats() == {
         "total_series": 3,
         "total_issues": 7,

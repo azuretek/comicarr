@@ -362,29 +362,19 @@ const ISSUES_BY_COMIC = new Map<string, Issue[]>(
   COVERS.map((c) => [c.id, buildIssues(c)]),
 );
 
-function recentDownloads() {
+/** Narrative recent-activity fixture for the dashboard mock (not t_snatched). */
+function recentNarrativeEvents() {
   const now = new Date();
-  const items: Array<{
-    ComicName: string;
-    Issue_Number: string;
-    DateAdded: string;
-    Status: string;
-    Provider: string;
-    ComicID: string;
-    IssueID: string;
-    ComicImage: string | null;
-  }> = [];
   const sample = [COVERS[0], COVERS[1], COVERS[2], COVERS[3], COVERS[6]];
-  // The mock download queue is empty, so keep the activity feed in sync:
-  // no "Snatched" entries that would imply queued work.
-  const actions = [
-    "Downloaded",
-    "Downloaded",
-    "Post-Processed",
-    "Post-Processed",
-    "Downloaded",
-    "Downloaded",
-    "Post-Processed",
+  // Mixed successes and failures — the point of reading the narrative stream.
+  const cells: Array<{ activity: string; status: string }> = [
+    { activity: "download", status: "succeeded" },
+    { activity: "grab", status: "failed" },
+    { activity: "import", status: "succeeded" },
+    { activity: "download", status: "succeeded" },
+    { activity: "grab", status: "succeeded" },
+    { activity: "import", status: "failed" },
+    { activity: "download", status: "succeeded" },
   ];
   const providers = [
     "NZBgeek (Prowlarr)",
@@ -395,21 +385,22 @@ function recentDownloads() {
     "NZBgeek (Prowlarr)",
     "Local",
   ];
-  for (let i = 0; i < 7; i++) {
+  return cells.map((cell, i) => {
     const c = sample[i % sample.length];
+    const issueNum = c.have - (i % 3);
     const when = new Date(now.getTime() - i * 9 * 60 * 1000);
-    items.push({
-      ComicName: c.title,
-      Issue_Number: String(c.have - (i % 3)),
-      DateAdded: when.toISOString(),
-      Status: actions[i],
-      Provider: providers[i],
-      ComicID: c.id,
-      IssueID: `${c.id}-${c.have - (i % 3)}`,
-      ComicImage: coverSvgDataUri(c, 60, 90),
-    });
-  }
-  return items;
+    return {
+      event_id: i + 1,
+      created_at: when.toISOString(),
+      activity: cell.activity,
+      status: cell.status,
+      subject_type: "issue",
+      subject_id: `${c.id}-${issueNum}`,
+      subject_label: `${c.title} #${issueNum}`,
+      provider: providers[i],
+      parent_series_id: c.id,
+    };
+  });
 }
 
 function upcomingReleases() {
@@ -671,7 +662,7 @@ export function mockApiResponse(
     return dashboardLibraryPayload();
   }
   if (m === "GET" && url === "/api/dashboard/activity") {
-    return { days: 30, events: recentDownloads() };
+    return { days: 30, events: recentNarrativeEvents() };
   }
   if (m === "GET" && url === "/api/dashboard/upcoming") {
     return { releases: upcomingReleases() };

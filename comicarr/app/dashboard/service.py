@@ -73,7 +73,11 @@ def get_library_panel():
 
 
 def get_activity_panel():
-    """Return the bounded recent-activity preview and the window it covers."""
+    """Return the bounded narrative activity preview and the window it covers.
+
+    Source is the narrative stream (``activity_events``), not ``t_snatched`` —
+    so a failed attempt that never reached the snatched table still appears.
+    """
     cutoff = recent_activity_cutoff().strftime("%Y-%m-%d %H:%M:%S")
     return {
         "events": dashboard_queries.get_recent_activity(cutoff, limit=RECENT_ACTIVITY_PREVIEW_LIMIT) or [],

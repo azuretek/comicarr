@@ -9,12 +9,12 @@ import {
 import HealthBand from "@/components/dashboard/HealthBand";
 import InFlightLine from "@/components/dashboard/InFlightLine";
 import NeedsAttentionBand from "@/components/dashboard/NeedsAttentionBand";
+import RecentActivity from "@/components/dashboard/RecentActivity";
 import { panelState, type PanelState } from "@/lib/panelState";
 import { Kbd } from "@/components/ui/kbd";
 import RelativeTime from "@/components/ui/RelativeTime";
 import { useToast } from "@/components/ui/toast";
 import {
-  useDashboardActivity,
   useDashboardLibrary,
   useDashboardScanTargets,
   useDashboardUpcoming,
@@ -123,7 +123,6 @@ const ASK_SUGGESTIONS = [
 
 export default function DashboardPage() {
   const library = useDashboardLibrary();
-  const activity = useDashboardActivity();
   const upcoming = useDashboardUpcoming();
   const scanTargets = useDashboardScanTargets();
   const navigate = useNavigate();
@@ -149,8 +148,6 @@ export default function DashboardPage() {
   const { addToast } = useToast();
 
   const stats = library.data?.stats;
-  const activityEvents = activity.data?.events ?? [];
-  const activityDays = activity.data?.days ?? 30;
   const upcomingReleases = upcoming.data?.releases ?? [];
 
   const activeSeries = stats?.total_series ?? 0;
@@ -158,7 +155,6 @@ export default function DashboardPage() {
   const completion = stats?.completion_pct ?? 0;
 
   const libraryState = panelState(library, false);
-  const activityState = panelState(activity, activityEvents.length === 0);
   const upcomingState = panelState(upcoming, upcomingReleases.length === 0);
   const chatsState = panelState(chatThreadsQuery, recentChats.length === 0);
 
@@ -340,93 +336,8 @@ export default function DashboardPage() {
 
         {/* Operational summaries */}
         <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]">
-          {/* Recent history */}
-          <section className="px-5 py-4 lg:border-r lg:border-border">
-            <PanelHeader
-              title="Recent activity"
-              meta={`${countMeta(activityState, activityEvents.length, "event")} · ${activityDays} days`}
-              action={{
-                label: "open history →",
-                to: "/activity?view=history",
-              }}
-            />
-
-            <PanelBody
-              state={activityState}
-              label="Recent activity"
-              skeleton={<PanelSkeleton rows={5} />}
-              empty={
-                <>
-                  no activity in the last {activityDays} days —{" "}
-                  <Link
-                    to="/activity?view=history"
-                    className="hover:text-foreground"
-                  >
-                    open full history
-                  </Link>
-                </>
-              }
-              onRetry={() => void activity.refetch()}
-              isRetrying={activity.isFetching}
-            >
-              {() => (
-                <div className="font-mono text-[11px]">
-                  {activityEvents.map((d, i) => {
-                    // Status is title-case at the API; render and match as-is.
-                    const action = d.Status || "—";
-                    const color =
-                      action === "Downloaded"
-                        ? "var(--chart-4)"
-                        : action === "Post-Processed" || action === "Imported"
-                          ? "var(--status-active)"
-                          : action === "Snatched" || action === "Queued"
-                            ? "var(--status-paused)"
-                            : "var(--muted-foreground)";
-                    return (
-                      <div
-                        key={`${d.ComicID}-${d.IssueID}-${i}`}
-                        className="grid items-center gap-2 py-1.5"
-                        style={{
-                          gridTemplateColumns:
-                            "120px 90px minmax(180px, 1fr) 140px",
-                          borderTop:
-                            i > 0
-                              ? "1px solid var(--border-soft, var(--border))"
-                              : "none",
-                        }}
-                      >
-                        <RelativeTime value={d.DateAdded} />
-                        <span className="uppercase truncate" style={{ color }}>
-                          {action}
-                        </span>
-                        <div className="flex items-center gap-2 min-w-0">
-                          {d.ComicID && (
-                            <img
-                              src={`/api/metadata/art/${d.ComicID}`}
-                              alt=""
-                              className="w-4 h-6 object-cover rounded-[1px] shrink-0"
-                              onError={(e) => {
-                                e.currentTarget.style.visibility = "hidden";
-                              }}
-                            />
-                          )}
-                          <Link
-                            to={`/library/${d.ComicID}`}
-                            className="font-sans text-foreground truncate hover:text-[var(--primary)]"
-                          >
-                            {d.ComicName} #{d.Issue_Number}
-                          </Link>
-                        </div>
-                        <span className="text-muted-foreground truncate">
-                          {d.Provider || "—"}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </PanelBody>
-          </section>
+          {/* Narrative recent activity (dashboard-spec.md §3.4) */}
+          <RecentActivity />
 
           {/* This week */}
           <section className="px-5 py-4">

@@ -12,26 +12,25 @@
 from sqlalchemy import func, or_, select
 
 from comicarr import db
+from comicarr.tables import activity_events
 from comicarr.tables import comics as t_comics
-from comicarr.tables import snatched as t_snatched
 
 
 def get_recent_activity(cutoff, limit=10):
-    """Return the bounded, newest-first snatch preview at an inclusive cutoff."""
+    """Return a bounded newest-first narrative preview at an inclusive cutoff.
+
+    Ordered time slice of ``activity_events`` only — never a count, group, or
+    status filter over the narrative table (Activity Center ADR authority rule;
+    docs/architecture/dashboard-spec.md §3.4). Failures that never reached
+    ``t_snatched`` appear here the same way successes do.
+    """
     stmt = (
-        select(
-            t_snatched.c.ComicName,
-            t_snatched.c.Issue_Number,
-            t_snatched.c.DateAdded,
-            t_snatched.c.Status,
-            t_snatched.c.Provider,
-            t_snatched.c.ComicID,
-            t_snatched.c.IssueID,
-            t_comics.c.ComicImage,
+        select(activity_events)
+        .where(activity_events.c.created_at >= cutoff)
+        .order_by(
+            activity_events.c.created_at.desc(),
+            activity_events.c.event_id.desc(),
         )
-        .select_from(t_snatched.outerjoin(t_comics, t_snatched.c.ComicID == t_comics.c.ComicID))
-        .where(t_snatched.c.DateAdded >= cutoff)
-        .order_by(t_snatched.c.DateAdded.desc())
         .limit(int(limit))
     )
     return db.select_all(stmt)

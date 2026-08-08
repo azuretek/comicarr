@@ -78,10 +78,18 @@ class TestLibraryPanel:
 
 
 class TestActivityPanel:
-    """The bounded recent-activity preview."""
+    """The bounded narrative recent-activity preview."""
 
     def test_returns_events_and_the_window_they_cover(self, monkeypatch):
-        recent = [{"ComicName": "Spider-Man", "Issue_Number": "1", "IssueID": "200"}]
+        recent = [
+            {
+                "event_id": 1,
+                "activity": "grab",
+                "status": "failed",
+                "subject_label": "Spider-Man #1",
+                "subject_id": "200",
+            }
+        ]
         get_recent = MagicMock(return_value=recent)
         monkeypatch.setattr(service.dashboard_queries, "get_recent_activity", get_recent)
 
