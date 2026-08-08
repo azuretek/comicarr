@@ -57,23 +57,71 @@ describe("DashboardPage", () => {
     expect(screen.getByText("250")).toBeTruthy();
   });
 
-  it("renders the recent activity preview without a queue panel", async () => {
+  it("renders the recent activity preview from the narrative stream", async () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Recent activity")).toBeTruthy();
     });
 
-    await waitFor(() => {
-      expect(screen.getByText("Spider-Man #1")).toBeTruthy();
-    });
+    // Sentence voice from the Activity Center lexicon, not a snatched status.
+    expect(await screen.findByText(/Grabbed/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Spider-Man #1" })).toBeTruthy();
     expect(screen.getAllByText(/ago$/).length).toBeGreaterThan(0);
-    expect(screen.getByRole("link", { name: "open history →" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "open activity →" })).toBeTruthy();
 
     // Nothing on the page claims a queue depth any more.
     expect(screen.queryByText("Active queue")).toBeNull();
     expect(screen.queryByRole("link", { name: "open queue →" })).toBeNull();
     expect(screen.queryByText(/in queue/)).toBeNull();
+  });
+
+  it("shows a failed attempt that never reached the snatched table", async () => {
+    server.use(
+      http.get("/api/dashboard/activity", () =>
+        HttpResponse.json({
+          days: 30,
+          events: [
+            {
+              event_id: 10,
+              created_at: "2026-04-05T12:05:00",
+              activity: "grab",
+              status: "failed",
+              subject_type: "issue",
+              subject_id: "901",
+              subject_label: "Saga #12",
+              provider: "nzb",
+              parent_series_id: "42",
+            },
+            {
+              event_id: 11,
+              created_at: "2026-04-05T12:00:00",
+              activity: "import",
+              status: "succeeded",
+              subject_type: "issue",
+              subject_id: "101",
+              subject_label: "Spider-Man #1",
+              provider: "local",
+              parent_series_id: "1",
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(<DashboardPage />);
+
+    // Failure and success share the timeline; failure uses the "Couldn't" voice.
+    expect(await screen.findByText(/Couldn't grab/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Saga #12" })).toBeTruthy();
+    expect(screen.getByText(/Imported/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Spider-Man #1" })).toBeTruthy();
+
+    // Deep-link matches Activity Center subject routing.
+    expect(
+      (screen.getByRole("link", { name: "Saga #12" }) as HTMLAnchorElement)
+        .getAttribute("href"),
+    ).toBe("/library/42/issue/901");
   });
 
   it("reports in-flight work from the activity status endpoint", async () => {
@@ -244,7 +292,9 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/no activity in the last 30 days/)).toBeTruthy();
+      expect(
+        screen.getByText(/No activity in the last 30 days/),
+      ).toBeTruthy();
       expect(screen.getByText("nothing upcoming this week")).toBeTruthy();
     });
     expect(
@@ -254,7 +304,7 @@ describe("DashboardPage", () => {
     ).toBe(true);
   });
 
-  it("links the recent empty state to the full history", async () => {
+  it("links the recent empty state to the Activity Center", async () => {
     server.use(
       http.get("/api/dashboard/activity", () =>
         HttpResponse.json({ days: 30, events: [] }),
@@ -264,7 +314,7 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     expect(
-      await screen.findByRole("link", { name: "open full history" }),
+      await screen.findByRole("link", { name: "open full activity" }),
     ).toBeTruthy();
   });
 
@@ -281,7 +331,7 @@ describe("DashboardPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Recent activity unavailable")).toBeTruthy();
     });
-    expect(screen.queryByText(/no activity in the last 30 days/)).toBeNull();
+    expect(screen.queryByText(/No activity in the last 30 days/)).toBeNull();
 
     // Neighbours still render their own content.
     expect(screen.getByText("2 in flight")).toBeTruthy();
@@ -304,14 +354,15 @@ describe("DashboardPage", () => {
               days: 30,
               events: [
                 {
-                  ComicName: "Spider-Man",
-                  Issue_Number: "1",
-                  DateAdded: "2026-04-05T12:00:00",
-                  Status: "Snatched",
-                  Provider: "nzb",
-                  ComicID: "1",
-                  IssueID: "101",
-                  ComicImage: null,
+                  event_id: 1,
+                  created_at: "2026-04-05T12:00:00",
+                  activity: "grab",
+                  status: "succeeded",
+                  subject_type: "issue",
+                  subject_id: "101",
+                  subject_label: "Spider-Man #1",
+                  provider: "nzb",
+                  parent_series_id: "1",
                 },
               ],
             });
@@ -331,7 +382,7 @@ describe("DashboardPage", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Spider-Man #1")).toBeTruthy();
+      expect(screen.getByRole("link", { name: "Spider-Man #1" })).toBeTruthy();
     });
     expect(activityRequests).toBe(2);
     expect(upcomingRequests).toBe(1);

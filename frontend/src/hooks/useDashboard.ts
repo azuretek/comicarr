@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import type { TimelineEvent } from "@/components/activity/timeline/types";
 import { apiRequest } from "@/lib/api";
+import { ACTIVITY_TIMELINE_QUERY_KEY } from "@/lib/activityKeys";
 
 /**
  * One query per dashboard panel.
@@ -10,17 +12,6 @@ import { apiRequest } from "@/lib/api";
  * failure is scoped to that panel and retried there
  * (docs/architecture/dashboard-spec.md §5).
  */
-
-interface DashboardActivityEvent {
-  ComicName: string;
-  Issue_Number: string;
-  DateAdded: string;
-  Status: string;
-  Provider: string;
-  ComicID: string;
-  IssueID: string;
-  ComicImage: string | null;
-}
 
 interface DashboardUpcoming {
   ComicName: string;
@@ -42,8 +33,9 @@ interface DashboardLibraryResponse {
   stats: DashboardLibraryStats;
 }
 
-interface DashboardActivityResponse {
-  events: DashboardActivityEvent[];
+/** Narrative preview — same field contract as the Activity Center timeline. */
+export interface DashboardActivityResponse {
+  events: TimelineEvent[];
   days: number;
 }
 
@@ -68,10 +60,17 @@ export function useDashboardLibrary() {
   });
 }
 
-/** Recent activity preview, bounded to the window the response reports. */
+/**
+ * Recent activity preview from the narrative stream
+ * (docs/architecture/dashboard-spec.md §3.4).
+ *
+ * Keyed under the timeline vocabulary so an `activity` SSE event stales this
+ * panel with the Activity Center rather than leaving a snatched-shaped ghost
+ * until the next poll.
+ */
 export function useDashboardActivity() {
   return useQuery<DashboardActivityResponse>({
-    queryKey: ["dashboard", "activity"],
+    queryKey: [...ACTIVITY_TIMELINE_QUERY_KEY, "dashboard-preview"],
     queryFn: () =>
       apiRequest<DashboardActivityResponse>("GET", "/api/dashboard/activity"),
     staleTime: PANEL_STALE_TIME,
