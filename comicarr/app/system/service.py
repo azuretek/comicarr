@@ -28,6 +28,7 @@ import sys
 import threading
 from collections import namedtuple
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -273,6 +274,8 @@ def get_safe_config(ctx):
         val = getattr(ctx.config, key, None)
         if val is not None:
             result[key] = val
+    if "SAB_HOST" in result:
+        result["SAB_HOST"] = _safe_provider_host(result["SAB_HOST"])
 
     secret_indicators = {
         "api_key_set": "API_KEY",
@@ -284,6 +287,7 @@ def get_safe_config(ctx):
         "slack_webhook_url_set": "SLACK_WEBHOOK_URL",
         "mattermost_webhook_url_set": "MATTERMOST_WEBHOOK_URL",
         "discord_webhook_url_set": "DISCORD_WEBHOOK_URL",
+        "sab_apikey_set": "SAB_APIKEY",
     }
     for output_key, config_key in secret_indicators.items():
         result[output_key] = _secret_is_configured(getattr(ctx.config, config_key, None))
@@ -304,7 +308,73 @@ def get_safe_config(ctx):
     version = get_release_version()
     if version:
         result["version"] = version
+    result["newznab"] = _safe_provider_projection(ctx.config, "newznab")
+    result["torznab"] = _safe_provider_projection(ctx.config, "torznab")
     return result
+
+
+def _safe_provider_host(value):
+    """Return a provider URL without userinfo credentials."""
+    host = str(value or "")
+    try:
+        parsed = urlsplit(host)
+        if parsed.username or parsed.password:
+            safe_netloc = parsed.netloc.rsplit("@", 1)[-1]
+            host = urlunsplit((parsed.scheme, safe_netloc, parsed.path, parsed.query, parsed.fragment))
+    except ValueError:
+        return ""
+    return redact_sensitive_text(host)
+
+
+def _http_origin(value):
+    """Return a normalized HTTP origin for binding a stored credential."""
+    try:
+        parsed = urlsplit(str(value or ""))
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname.lower() if parsed.hostname else None
+        if scheme not in {"http", "https"} or not hostname:
+            return None
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, hostname, port
+
+
+def _safe_provider_projection(config, provider_type):
+    """Build the credential-free provider projection returned by the API."""
+    attr_name = "EXTRA_NEWZNABS" if provider_type == "newznab" else "EXTRA_TORZNABS"
+    enabled_key = "NEWZNAB" if provider_type == "newznab" else "ENABLE_TORZNAB"
+    rows = []
+    for entry in getattr(config, attr_name, None) or []:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 6:
+            continue
+        row = {
+            "name": str(entry[0] or ""),
+            "host": _safe_provider_host(entry[1]),
+            "verify": str(entry[2]).lower() in {"1", "true", "yes", "on"},
+            "categories": str(entry[4] or "").replace("#", ","),
+            "enabled": str(entry[5]).lower() in {"1", "true", "yes", "on"},
+            "api_key_set": _secret_is_configured(entry[3]),
+        }
+        if len(entry) >= 7:
+            try:
+                row["id"] = int(entry[6])
+            except (TypeError, ValueError):
+                pass
+        rows.append(row)
+    return {"enabled": bool(getattr(config, enabled_key, False)), "providers": rows}
+
+
+def get_provider_config(ctx):
+    """Return credential-free Newznab and Torznab settings for the UI."""
+    if not ctx.config:
+        return {"newznab": {"enabled": False, "providers": []}, "torznab": {"enabled": False, "providers": []}}
+    return {
+        "newznab": _safe_provider_projection(ctx.config, "newznab"),
+        "torznab": _safe_provider_projection(ctx.config, "torznab"),
+    }
 
 
 WRITABLE_CONFIG_KEYS = writable_keys()
@@ -329,6 +399,28 @@ def update_config(ctx, key_values):
     filtered = {k: v for k, v in key_values.items() if k in WRITABLE_CONFIG_KEYS}
     if not filtered:
         return {"success": False, "error": "No valid config keys provided"}
+
+    if "NZB_DOWNLOADER" in filtered:
+        nzb_downloader = filtered["NZB_DOWNLOADER"]
+        if isinstance(nzb_downloader, bool) or not isinstance(nzb_downloader, int) or not 0 <= nzb_downloader <= 3:
+            return {"success": False, "error": "NZB_DOWNLOADER must be an integer between 0 and 3"}
+
+    if "SAB_HOST" in filtered:
+        new_origin = _http_origin(filtered["SAB_HOST"])
+        if new_origin is None:
+            return {"success": False, "error": "SABnzbd server must be a valid HTTP or HTTPS URL"}
+        old_origin = _http_origin(getattr(ctx.config, "SAB_HOST", None))
+        stored_key = getattr(ctx.config, "SAB_APIKEY", None)
+        replacement_key = filtered.get("SAB_APIKEY")
+        if (
+            old_origin != new_origin
+            and _secret_is_configured(stored_key)
+            and not _secret_is_configured(replacement_key)
+        ):
+            return {
+                "success": False,
+                "error": "SABnzbd API key is required when changing the server origin",
+            }
 
     interval_changed = any(k in set(SCHEDULER_JOB_INTERVALS.values()) for k in filtered)
 
@@ -385,19 +477,70 @@ def update_providers(ctx, provider_data):
 
     provider_type = provider_data.get("type")
     providers = provider_data.get("providers", [])
+    object_payload = any(isinstance(row, dict) for row in providers) if isinstance(providers, list) else False
 
     if provider_type not in ("newznab", "torznab"):
         return {"success": False, "error": "Invalid provider type"}
     if not isinstance(providers, list):
         return {"success": False, "error": "Invalid provider list"}
+    if "enabled" in provider_data and not isinstance(provider_data["enabled"], bool):
+        return {"success": False, "error": "Provider enabled must be a boolean"}
 
     config_key = "EXTRA_NEWZNABS" if provider_type == "newznab" else "EXTRA_TORZNABS"
+    if object_payload:
+        existing = getattr(ctx.config, config_key, []) or []
+        by_id = {str(row[6]): row for row in existing if isinstance(row, (list, tuple)) and len(row) >= 7}
+        by_identity = {
+            (str(row[0]), _safe_provider_host(row[1])): row
+            for row in existing
+            if isinstance(row, (list, tuple)) and len(row) >= 6
+        }
+        normalized = []
+        for row in providers:
+            if not isinstance(row, dict):
+                return {"success": False, "error": "Invalid provider configuration"}
+            old = by_id.get(str(row.get("id"))) or by_identity.get(
+                (str(row.get("name") or ""), _safe_provider_host(row.get("host")))
+            )
+            credential = row.get("api_key", row.get("apikey"))
+            host = str(row.get("host") or "")
+            new_origin = _http_origin(host)
+            if new_origin is None:
+                return {"success": False, "error": "Provider URL must use HTTP or HTTPS"}
+            if credential in (None, "") and old is not None and _secret_is_configured(old[3]):
+                if _http_origin(old[1]) != new_origin:
+                    return {
+                        "success": False,
+                        "error": "A new API key is required when changing a provider origin",
+                    }
+                credential = old[3]
+            if old is not None and host == _safe_provider_host(old[1]):
+                host = old[1]
+            normalized_row = [
+                row.get("name", ""),
+                host,
+                "1" if row.get("verify") else "0",
+                credential or "",
+                str(row.get("categories") or "").replace(",", "#"),
+                "1" if row.get("enabled") else "0",
+            ]
+            provider_id = (
+                row.get("id") if row.get("id") is not None else (old[6] if old is not None and len(old) >= 7 else None)
+            )
+            if provider_id is not None:
+                normalized_row.append(provider_id)
+            normalized.append(normalized_row)
+        providers = normalized
     try:
         ctx.config.validate_provider_extra_value(config_key, providers)
     except (TypeError, ValueError):
         return {"success": False, "error": "Invalid provider configuration"}
+    values = {config_key: providers}
+    if "enabled" in provider_data:
+        enabled_key = "NEWZNAB" if provider_type == "newznab" else "ENABLE_TORZNAB"
+        values[enabled_key] = provider_data["enabled"]
     try:
-        persisted = ctx.config.apply_transaction({config_key: providers}, configure=False)
+        persisted = ctx.config.apply_transaction(values, configure=False)
     except Exception as e:
         logger.error("[PROVIDERS] Failed to persist provider configuration: %s" % type(e).__name__)
         persisted = False
@@ -405,7 +548,10 @@ def update_providers(ctx, provider_data):
     if persisted is False:
         return {"success": False, "error": PROVIDER_CONFIG_PERSISTENCE_ERROR}
 
-    return {"success": True}
+    result = {"success": True}
+    if object_payload:
+        result.update(_safe_provider_projection(ctx.config, provider_type))
+    return result
 
 
 # Scheduler job id -> the config attribute that drives its cadence, in minutes.

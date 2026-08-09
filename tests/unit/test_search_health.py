@@ -99,6 +99,21 @@ def test_route_readiness_is_independent_and_never_exposes_credentials(tmp_path):
     assert "token=secret" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"EXTRA_NEWZNABS": []}, "provider_not_configured"),
+        ({"EXTRA_NEWZNABS": [["Indexer", "https://indexer.test", "1", "key", "", "0"]]}, "provider_disabled"),
+        ({"NZB_DOWNLOADER": 3}, "downloader_disabled"),
+    ],
+)
+def test_nzb_route_reports_the_specific_configuration_gap(tmp_path, overrides, expected):
+    routes = health.build_route_readiness(_config(tmp_path, **overrides))
+
+    assert routes["nzb"]["enabled"] is False
+    assert routes["nzb"]["reason"] == expected
+
+
 def test_health_explains_configured_but_unattempted_torznab_without_secrets(tmp_path):
     routes = health.build_route_readiness(
         _config(tmp_path),
@@ -223,6 +238,36 @@ def test_blocking_route_reason_names_the_smallest_remaining_gap(tmp_path):
     assert routes["ddl"]["reason"] == "disabled"
     # DDL sorts first but is merely off; the NZB route is one directory away.
     assert health.blocking_route_reason(routes) == "path_not_ready"
+
+
+def test_blocking_route_reason_prefers_actionable_nzb_setup_over_disabled_routes(tmp_path):
+    routes = health.build_route_readiness(
+        _config(
+            tmp_path,
+            ENABLE_DDL=False,
+            ENABLE_GETCOMICS=False,
+            NEWZNAB=False,
+            EXTRA_NEWZNABS=[],
+            ENABLE_TORRENT_SEARCH=False,
+            ENABLE_TORRENTS=False,
+        )
+    )
+
+    assert routes["nzb"]["reason"] == "provider_not_configured"
+    assert health.blocking_route_reason(routes) == "provider_not_configured"
+
+
+def test_disabled_nzb_provider_still_counts_as_configured(tmp_path):
+    routes = health.build_route_readiness(
+        _config(
+            tmp_path,
+            EXTRA_NEWZNABS=[["Indexer", "https://indexer.test", "1", "key", "5030", "0"]],
+        )
+    )
+
+    assert routes["nzb"]["reason"] == "provider_disabled"
+    assert routes["nzb"]["configured_provider_count"] == 1
+    assert routes["nzb"]["executable_provider_count"] == 0
 
 
 def test_blocking_route_reason_falls_back_when_routes_report_nothing():

@@ -12,28 +12,30 @@ export interface Config extends ReadableConfig {
   data_dir?: string;
   python_version?: string;
 
-  // Search providers
-  newznab?: NewznabProvider[];
-  torznab?: TorznabProvider[];
+  newznab?: ProviderConfigResponse["newznab"];
+  torznab?: ProviderConfigResponse["newznab"];
 }
 
-/** Newznab provider configuration */
+/** Sanitized Newznab provider configuration returned by the settings API. */
 export interface NewznabProvider {
+  id?: number;
   name: string;
   host: string;
-  apikey: string;
+  verify: boolean;
+  categories: string;
   enabled: boolean;
-  categories?: string;
+  api_key_set: boolean;
+  api_key?: string;
 }
 
-/** Torznab provider configuration */
-export interface TorznabProvider {
-  name: string;
-  host: string;
-  apikey: string;
-  enabled: boolean;
-  categories?: string;
+export interface ProviderConfigResponse {
+  newznab: {
+    enabled: boolean;
+    providers: NewznabProvider[];
+  };
 }
+
+export type TorznabProvider = NewznabProvider;
 
 /** Config update payload */
 export type ConfigUpdate = Partial<Config>;

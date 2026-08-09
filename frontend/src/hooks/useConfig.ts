@@ -7,7 +7,12 @@ import {
 } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
-import type { Config, ConfigUpdate } from "@/types";
+import type {
+  Config,
+  ConfigUpdate,
+  NewznabProvider,
+  ProviderConfigResponse,
+} from "@/types";
 
 interface RegenerateApiKeyResponse {
   success: boolean;
@@ -64,6 +69,37 @@ export function useGenerateApiKey(): UseMutationResult<string, Error, void> {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+  });
+}
+
+export function useProviderConfig(): UseQueryResult<ProviderConfigResponse> {
+  return useQuery({
+    queryKey: ["config", "providers"],
+    queryFn: () =>
+      apiRequest<ProviderConfigResponse>("GET", "/api/config/providers"),
+    staleTime: 10 * 60 * 1000,
+    retry: 1,
+  });
+}
+
+export function useUpdateNewznabProviders(): UseMutationResult<
+  unknown,
+  Error,
+  { enabled: boolean; providers: NewznabProvider[] }
+> {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ enabled, providers }) =>
+      apiRequest<unknown>("PUT", "/api/config/providers", {
+        type: "newznab",
+        enabled,
+        providers,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["config", "providers"] });
+      queryClient.invalidateQueries({ queryKey: ["acquisition", "health"] });
     },
   });
 }

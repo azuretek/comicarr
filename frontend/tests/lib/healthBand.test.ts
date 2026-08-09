@@ -215,6 +215,23 @@ describe("healthBandView", () => {
       });
     });
 
+    it("links provider blockers to Search settings", () => {
+      const result = view(
+        healthy({
+          viable_route: false,
+          routes: {
+            nzb: { ready: false, reason: "provider_not_configured" },
+            torrent: { ready: false, reason: "disabled" },
+          },
+        }),
+      );
+
+      expect(signal(result, "route")).toMatchObject({
+        text: "No usable download route — no indexer is configured",
+        fix: { label: "open search providers", to: "/settings?section=search" },
+      });
+    });
+
     it("prefers the blocker nearest to ready when routes disagree", () => {
       const result = view(
         healthy({
@@ -284,7 +301,9 @@ describe("healthBandView", () => {
       );
 
       expect(result.lastSearch.at).toBe(minutesAgo(12));
-      expect(result.lastSearch.text).toBe("Last successful search: 12 minutes ago");
+      expect(result.lastSearch.text).toBe(
+        "Last successful search: 12 minutes ago",
+      );
       expect(result.lastSearch.stale).toBe(false);
     });
 
@@ -314,15 +333,21 @@ describe("healthBandView", () => {
 
     it("degrades past 2× SEARCH_INTERVAL even when every component is fine", () => {
       const result = view(
-        healthy({ providers: [{ provider: "a", lastrun: minutesAgo(11 * 1440) }] }),
+        healthy({
+          providers: [{ provider: "a", lastrun: minutesAgo(11 * 1440) }],
+        }),
         1440,
       );
 
       // The silent failure: nothing reports an error, and the pipeline has
       // produced nothing for eleven days.
-      expect(result.signals.every((item) => item.tone === "healthy")).toBe(true);
+      expect(result.signals.every((item) => item.tone === "healthy")).toBe(
+        true,
+      );
       expect(result.lastSearch.stale).toBe(true);
-      expect(result.lastSearch.text).toBe("Last successful search: 11 days ago");
+      expect(result.lastSearch.text).toBe(
+        "Last successful search: 11 days ago",
+      );
       expect(result.tone).toBe("degraded");
     });
 
@@ -345,7 +370,10 @@ describe("healthBandView", () => {
         view(
           healthy({
             providers: [
-              { provider: "a", lastrun: minutesAgo(2 * DEFAULT_SEARCH_INTERVAL_MINUTES + 1) },
+              {
+                provider: "a",
+                lastrun: minutesAgo(2 * DEFAULT_SEARCH_INTERVAL_MINUTES + 1),
+              },
             ],
           }),
           0,

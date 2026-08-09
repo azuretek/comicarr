@@ -308,6 +308,14 @@ function RouteCard({
           </dd>
         </div>
       </dl>
+      <div
+        className="mt-3 flex flex-wrap gap-x-3 gap-y-1 border-t pt-2 font-mono text-[10px] text-muted-foreground"
+        style={{ borderColor: "var(--border)" }}
+      >
+        <span>{asCount(health.configured_provider_count)} configured</span>
+        <span>{asCount(health.executable_provider_count)} executable</span>
+        <span>{asCount(health.attempted_provider_count)} attempted</span>
+      </div>
       {health.last_error && (
         <p
           className="mt-3 break-words border-t pt-2 font-mono text-[10px] text-muted-foreground"

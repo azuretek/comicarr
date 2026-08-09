@@ -74,6 +74,7 @@ export type { ComicAddedDetail, ComicAddedEvent } from "./events";
 export type {
   Config,
   NewznabProvider,
+  ProviderConfigResponse,
   TorznabProvider,
   ConfigUpdate,
 } from "./config";

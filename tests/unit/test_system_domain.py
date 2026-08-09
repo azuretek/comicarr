@@ -522,6 +522,17 @@ class TestConfigService:
         assert result["mattermost_webhook_url_set"] is True
         assert result["discord_webhook_url_set"] is True
 
+    def test_get_safe_config_strips_userinfo_from_editable_sab_host(self):
+        ctx = _make_test_ctx()
+        ctx.config.SAB_HOST = "https://sab-user:sab-pass@sab.test:8080/api?token=sab-token"
+
+        result = system_service.get_safe_config(ctx)
+
+        assert result["sab_host"] == "https://sab.test:8080/api?token=[redacted]"
+        assert "sab-user" not in str(result)
+        assert "sab-pass" not in str(result)
+        assert "sab-token" not in str(result)
+
     def test_get_safe_config_secret_indicators_false_when_empty(self):
         """Secret indicators are False when existing config values are empty."""
         ctx = _make_test_ctx()
@@ -667,6 +678,23 @@ class TestConfigService:
         result = system_service.update_config(ctx, {"COMIC_DIR": "/new/path"})
         assert result["success"] is True
 
+    @pytest.mark.parametrize("value", (-1, 4, "1", True, None))
+    def test_update_config_rejects_invalid_nzb_downloader(self, value):
+        ctx = _make_test_ctx()
+
+        result = system_service.update_config(ctx, {"nzb_downloader": value})
+
+        assert result == {"success": False, "error": "NZB_DOWNLOADER must be an integer between 0 and 3"}
+        ctx.config.apply_transaction.assert_not_called()
+
+    def test_update_config_accepts_valid_nzb_downloader(self):
+        ctx = _make_test_ctx()
+
+        result = system_service.update_config(ctx, {"nzb_downloader": 3})
+
+        assert result == {"success": True}
+        ctx.config.apply_transaction.assert_called_once_with({"NZB_DOWNLOADER": 3})
+
     def test_update_config_rejects_sensitive_keys_regardless_of_case(self):
         """update_config rejects api_key, http_password in any casing."""
         ctx = _make_test_ctx()
@@ -722,6 +750,34 @@ class TestConfigService:
         assert result == {"success": True}
         assert events == ["persist", "scheduler"]
 
+    def test_update_config_requires_new_sab_key_when_server_origin_changes(self):
+        ctx = _make_test_ctx()
+        ctx.config.SAB_HOST = "https://sab.test:8080/api"
+        ctx.config.SAB_APIKEY = "stored-secret"
+
+        result = system_service.update_config(ctx, {"sab_host": "https://other.test:8080/api"})
+
+        assert result == {
+            "success": False,
+            "error": "SABnzbd API key is required when changing the server origin",
+        }
+        ctx.config.apply_transaction.assert_not_called()
+
+    def test_update_config_allows_sab_origin_change_with_replacement_key(self):
+        ctx = _make_test_ctx()
+        ctx.config.SAB_HOST = "https://sab.test:8080/api"
+        ctx.config.SAB_APIKEY = "stored-secret"
+
+        result = system_service.update_config(
+            ctx,
+            {"sab_host": "https://other.test:8080/api", "sab_apikey": "replacement-secret"},
+        )
+
+        assert result == {"success": True}
+        ctx.config.apply_transaction.assert_called_once_with(
+            {"SAB_HOST": "https://other.test:8080/api", "SAB_APIKEY": "replacement-secret"}
+        )
+
     @pytest.mark.parametrize(
         ("provider_type", "config_key"),
         (("newznab", "EXTRA_NEWZNABS"), ("torznab", "EXTRA_TORZNABS")),
@@ -752,6 +808,184 @@ class TestConfigService:
         ctx.config.apply_transaction.assert_called_once_with({"EXTRA_NEWZNABS": new_providers}, configure=False)
         ctx.config.configure.assert_not_called()
         ctx.config.writeconfig_values.assert_not_called()
+
+    def test_get_provider_config_redacts_credentials_and_url_userinfo(self):
+        ctx = _make_test_ctx()
+        ctx.config.NEWZNAB = True
+        ctx.config.EXTRA_NEWZNABS = [
+            ("Indexer", "https://user:pass@indexer.test:8443/api", "1", "secret", "5030#7000", "1", 101)
+        ]
+
+        result = system_service.get_provider_config(ctx)
+
+        provider = result["newznab"]["providers"][0]
+        assert provider["host"] == "https://indexer.test:8443/api"
+        assert provider["categories"] == "5030,7000"
+        assert provider["api_key_set"] is True
+        assert "secret" not in str(result)
+        assert "user:pass" not in str(result)
+
+    def test_update_providers_accepts_safe_objects_and_preserves_blank_existing_key(self):
+        ctx = _make_test_ctx()
+        ctx.config.EXTRA_NEWZNABS = [
+            ("Indexer", "https://user:pass@indexer.test:8443", "1", "secret", "5030", "1", 101)
+        ]
+        providers = [
+            {
+                "id": 101,
+                "name": "Indexer",
+                "host": "https://indexer.test:8443",
+                "verify": True,
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+
+        result = system_service.update_providers(ctx, {"type": "newznab", "enabled": True, "providers": providers})
+
+        assert result["success"] is True
+        persisted = ctx.config.apply_transaction.call_args_list[0].args[0]["EXTRA_NEWZNABS"]
+        assert persisted[0][3] == "secret"
+        assert persisted[0][1] == "https://user:pass@indexer.test:8443"
+
+    def test_update_providers_matches_legacy_six_field_userinfo_by_safe_identity(self):
+        ctx = _make_test_ctx()
+        ctx.config.EXTRA_NEWZNABS = [
+            ("Indexer", "https://user:pass@indexer.test:8443", "1", "legacy-secret", "5030", "1")
+        ]
+        providers = [
+            {
+                "name": "Indexer",
+                "host": "https://indexer.test:8443",
+                "verify": True,
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+
+        result = system_service.update_providers(ctx, {"type": "newznab", "providers": providers})
+
+        assert result["success"] is True
+        persisted = ctx.config.apply_transaction.call_args.args[0]["EXTRA_NEWZNABS"][0]
+        assert persisted[1] == "https://user:pass@indexer.test:8443"
+        assert persisted[3] == "legacy-secret"
+
+    def test_update_providers_projection_reads_post_persistence_config(self):
+        ctx = _make_test_ctx()
+        providers = [
+            {
+                "name": "New",
+                "host": "https://new.test",
+                "verify": True,
+                "api_key": "new-secret",
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+
+        def persist(values, configure=False):
+            assert configure is False
+            ctx.config.EXTRA_NEWZNABS = values["EXTRA_NEWZNABS"]
+            return True
+
+        ctx.config.apply_transaction.side_effect = persist
+        result = system_service.update_providers(ctx, {"type": "newznab", "providers": providers})
+
+        assert result["success"] is True
+        assert result["providers"] == [
+            {
+                "name": "New",
+                "host": "https://new.test",
+                "verify": True,
+                "categories": "5030",
+                "enabled": True,
+                "api_key_set": True,
+            }
+        ]
+
+    def test_update_providers_requires_new_key_when_origin_changes(self):
+        ctx = _make_test_ctx()
+        ctx.config.EXTRA_NEWZNABS = [("Indexer", "https://indexer.test/api", "1", "secret", "5030", "1", 101)]
+        providers = [
+            {
+                "id": 101,
+                "name": "Indexer",
+                "host": "https://attacker.test/api",
+                "verify": True,
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+
+        result = system_service.update_providers(ctx, {"type": "newznab", "enabled": True, "providers": providers})
+
+        assert result == {
+            "success": False,
+            "error": "A new API key is required when changing a provider origin",
+        }
+        ctx.config.apply_transaction.assert_not_called()
+
+    def test_update_providers_preserves_key_for_path_change_on_same_origin(self):
+        ctx = _make_test_ctx()
+        ctx.config.EXTRA_NEWZNABS = [("Indexer", "https://indexer.test/api", "1", "secret", "5030", "1", 101)]
+        providers = [
+            {
+                "id": 101,
+                "name": "Indexer",
+                "host": "https://indexer.test/new-api",
+                "verify": True,
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+
+        result = system_service.update_providers(ctx, {"type": "newznab", "enabled": True, "providers": providers})
+
+        assert result["success"] is True
+        values = ctx.config.apply_transaction.call_args.args[0]
+        assert values["EXTRA_NEWZNABS"][0][1] == "https://indexer.test/new-api"
+        assert values["EXTRA_NEWZNABS"][0][3] == "secret"
+
+    @pytest.mark.parametrize("enabled", ["false", 0, 1, None])
+    def test_update_providers_rejects_non_boolean_enablement(self, enabled):
+        ctx = _make_test_ctx()
+
+        result = system_service.update_providers(
+            ctx,
+            {"type": "newznab", "enabled": enabled, "providers": []},
+        )
+
+        assert result == {"success": False, "error": "Provider enabled must be a boolean"}
+        ctx.config.apply_transaction.assert_not_called()
+
+    def test_update_providers_persists_rows_and_enablement_atomically(self):
+        old_providers = [("Old", "https://old.test", "1", "old-key", "5030", "1", 100)]
+        new_providers = [
+            {
+                "name": "New",
+                "host": "https://new.test",
+                "verify": True,
+                "api_key": "new-key",
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+        ctx = _make_test_ctx()
+        ctx.config.EXTRA_NEWZNABS = old_providers
+        ctx.config.apply_transaction.side_effect = None
+        ctx.config.apply_transaction.return_value = False
+
+        result = system_service.update_providers(
+            ctx,
+            {"type": "newznab", "enabled": True, "providers": new_providers},
+        )
+
+        assert result == {"success": False, "error": "Failed to persist provider configuration"}
+        ctx.config.apply_transaction.assert_called_once()
+        values = ctx.config.apply_transaction.call_args.args[0]
+        assert values["NEWZNAB"] is True
+        assert values["EXTRA_NEWZNABS"][0][0] == "New"
+        assert ctx.config.apply_transaction.call_args.kwargs == {"configure": False}
 
     @pytest.mark.asyncio
     async def test_update_providers_returns_bad_request_for_malformed_entry(self):
@@ -1721,6 +1955,26 @@ class TestConfigTransactions:
         second.read(config_path)
         assert second.get("Newznab", "extra_newznabs") == first_newznab_storage
         assert second.get("Torznab", "extra_torznabs") == first_torznab_storage
+
+    def test_provider_transaction_persists_enablement_in_same_write(self, tmp_path, monkeypatch):
+        cfg, config_path, config_module = _make_real_config(tmp_path, monkeypatch)
+        cfg.configure = MagicMock()
+        providers = [["Indexer", "https://indexer.test", "1", "secret", "5030", "1", 201]]
+
+        assert cfg.apply_transaction({"EXTRA_NEWZNABS": providers, "NEWZNAB": True}) is True
+
+        persisted = configparser.ConfigParser()
+        persisted.read(config_path)
+        assert persisted.getboolean("Newznab", "newznab") is True
+        assert (
+            config_module.parse_provider_extras(
+                persisted.get("Newznab", "extra_newznabs"),
+                config_version=cfg.CONFIG_VERSION,
+            )[0][0]
+            == "Indexer"
+        )
+        assert cfg.NEWZNAB is True
+        cfg.configure.assert_not_called()
 
     def test_provider_transaction_persists_reconciled_order_in_same_write(self, tmp_path, monkeypatch):
         cfg, config_path, _config_module = _make_real_config(tmp_path, monkeypatch)

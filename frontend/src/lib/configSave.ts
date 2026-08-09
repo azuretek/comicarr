@@ -20,6 +20,7 @@ const REDACTED_SECRET_FIELDS: ReadonlyArray<{
   { field: "slack_webhook_url", indicator: "slack_webhook_url_set" },
   { field: "mattermost_webhook_url", indicator: "mattermost_webhook_url_set" },
   { field: "discord_webhook_url", indicator: "discord_webhook_url_set" },
+  { field: "sab_apikey", indicator: "sab_apikey_set" },
 ];
 
 export function prepareConfigSaveData(
@@ -34,6 +35,14 @@ export function prepareConfigSaveData(
   for (const { field, indicator } of REDACTED_SECRET_FIELDS) {
     if (!saveData[field] && config?.[indicator]) {
       delete saveData[field];
+    }
+  }
+
+  const current = config as Record<string, unknown> | undefined;
+  const pending = saveData as Record<string, unknown>;
+  for (const field of Object.keys(pending)) {
+    if (current && field in current && current[field] === pending[field]) {
+      delete pending[field];
     }
   }
 

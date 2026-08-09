@@ -38,6 +38,9 @@ _ROUTE_REASON_RANK = {
             "path_not_ready",
             "client_not_ready",
             "unsupported_restart_correlation",
+            "provider_disabled",
+            "downloader_disabled",
+            "provider_not_configured",
             "disabled",
         )
     )
@@ -273,6 +276,13 @@ def build_route_readiness(
             )
         if diagnostics:
             names[route] = list(dict.fromkeys(names[route] + [item["name"] for item in diagnostics]))
+        configured_provider_count = len(diagnostics)
+        if route == "nzb":
+            configured_provider_count = int(bool(getattr(config, "EXPERIMENTAL", False))) + sum(
+                1
+                for row in (getattr(config, "EXTRA_NEWZNABS", None) or [])
+                if isinstance(row, (list, tuple)) and len(row) >= 6
+            )
         enabled = _route_enabled(config, route)
         client, client_ready, path_ready, restart_safe = _downstream_readiness(config, route)
         downstream_ready = client_ready and path_ready
@@ -289,7 +299,25 @@ def build_route_readiness(
         all_blocked = all_blocked or history_blocked
         ready = bool(enabled and downstream_ready and restart_safe and not all_blocked and not maintenance_reason)
         if not enabled:
-            reason = "disabled"
+            if route == "nzb":
+                raw_providers = list(getattr(config, "EXTRA_NEWZNABS", None) or [])
+                valid_providers = [row for row in raw_providers if isinstance(row, (list, tuple)) and len(row) >= 6]
+                enabled_providers = [
+                    row for row in valid_providers if str(row[5]).lower() in {"1", "true", "yes", "on"}
+                ]
+                downloader = int(getattr(config, "NZB_DOWNLOADER", 3) or 0)
+                if downloader == 3:
+                    reason = "downloader_disabled"
+                elif not getattr(config, "EXPERIMENTAL", False) and not valid_providers:
+                    reason = "provider_not_configured"
+                elif not getattr(config, "EXPERIMENTAL", False) and (
+                    not getattr(config, "NEWZNAB", False) or not enabled_providers
+                ):
+                    reason = "provider_disabled"
+                else:
+                    reason = "disabled"
+            else:
+                reason = "disabled"
         elif maintenance_reason:
             reason = str(maintenance_reason)
         elif not restart_safe:
@@ -333,7 +361,7 @@ def build_route_readiness(
             "last_success": last_success,
             "last_failure": last_failure,
             "last_error": _sanitize(history.get("last_error")),
-            "configured_provider_count": len(diagnostics),
+            "configured_provider_count": configured_provider_count,
             "executable_provider_count": sum(1 for item in diagnostics if enabled and not item["blocked"]),
             "attempted_provider_count": sum(1 for item in diagnostics if item["attempted"]),
             "providers": diagnostics,

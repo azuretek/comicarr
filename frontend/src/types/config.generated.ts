@@ -99,6 +99,10 @@ export interface ReadableConfig {
   check_folder?: string;
   nzb_downloader?: number;
   torrent_downloader?: number;
+  sab_host?: string;
+  sab_category?: string;
+  sab_directory?: string;
+  sab_verify?: boolean;
   storyarc_location?: string;
   enable_meta?: boolean;
   opds_enable?: boolean;
@@ -121,6 +125,7 @@ export interface ReadableConfig {
   metron_password_set?: boolean;
   nzb_downloader_label?: string;
   prowl_keys_set?: boolean;
+  sab_apikey_set?: boolean;
   slack_webhook_url_set?: boolean;
   torrent_downloader_label?: string;
 }
@@ -227,6 +232,12 @@ export interface WritableConfig {
   matrix_room_id?: string;
   matrix_onsnatch?: boolean;
   check_folder?: string;
+  nzb_downloader?: number;
+  sab_host?: string;
+  sab_apikey?: string;
+  sab_category?: string;
+  sab_directory?: string;
+  sab_verify?: boolean;
   storyarc_location?: string;
   enable_meta?: boolean;
   opds_enable?: boolean;

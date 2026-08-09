@@ -24,6 +24,9 @@ const healthFixture = {
       client_ready: true,
       path_ready: true,
       restart_safe: true,
+      configured_provider_count: 2,
+      executable_provider_count: 1,
+      attempted_provider_count: 1,
       last_error: "api_key=not-safe-to-show",
     },
     torrent: {
@@ -104,6 +107,9 @@ describe("AcquisitionHealthTab", () => {
     expect(screen.getByText("Verified build")).toBeTruthy();
     expect(screen.getByText("Auto-Search")).toBeTruthy();
     expect(screen.getByText("unsupported restart correlation")).toBeTruthy();
+    expect(screen.getByText("2 configured")).toBeTruthy();
+    expect(screen.getByText("1 executable")).toBeTruthy();
+    expect(screen.getByText("1 attempted")).toBeTruthy();
     expect(screen.getByText(/api_key=\[redacted\]/)).toBeTruthy();
     expect(screen.queryByText("not-safe-to-show")).toBeNull();
   });

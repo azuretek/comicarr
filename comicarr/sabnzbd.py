@@ -28,6 +28,7 @@ from packaging.version import parse as parse_version
 
 import comicarr
 from comicarr import cdh_mapping, logger
+from comicarr.app.common.redaction import redact_sensitive_text
 
 
 class SABnzbd(object):
@@ -79,7 +80,10 @@ class SABnzbd(object):
                     timeout=30,
                 )
         except Exception as e:
-            logger.warn("Failed to send to client. Error returned: %s" % e)
+            logger.warn(
+                "[SAB-SEND] Failed to send to client. Error returned: %s"
+                % redact_sensitive_text(e, secrets=(getattr(comicarr.CONFIG, "SAB_APIKEY", None),))
+            )
             return {"status": False}
         else:
             sendresponse = sendit.json()
@@ -124,7 +128,10 @@ class SABnzbd(object):
             time.sleep(5)  # pause 5 seconds before monitoring just so it hits the queue
             h = requests.get(self.sab_url, params=self.params["queue"], verify=comicarr.CONFIG.SAB_VERIFY, timeout=30)
         except Exception as e:
-            logger.fdebug("uh-oh: %s" % e)
+            logger.fdebug(
+                "[SAB-QUEUE] uh-oh: %s"
+                % redact_sensitive_text(e, secrets=(getattr(comicarr.CONFIG, "SAB_APIKEY", None),))
+            )
             return self.historycheck(self.params)
         else:
             queueresponse = h.json()
