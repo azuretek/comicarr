@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.27.0
+
+### Minor Changes
+
+- 86da2af: The dashboard now surfaces what needs your attention, not just whether the machinery is up. Below the health band it lists the same needs-attention groups the Activity Center already knows about — the series, the reason in plain language, and the actions that clear them — and when nothing is waiting it says so with a single quiet line: **Nothing needs you**.
+
+  That sentence is only trustworthy next to the health band's last-successful-search line. Together they close the gap that let downloads stay broken for weeks while the dashboard looked fine: the health band catches a stalled pipeline, and this one catches the specific releases that already need a human decision. Actions taken here (retry, search again, import, stop wanting) are the same exits as on the full triage route, and the count updates as soon as they land — no manual refresh.
+
+- 0d1105c: The dashboard now reads top to bottom in the order the questions actually matter: is the automation healthy, what needs you, what is happening, and only then what your library is. Health leads the page, needs-attention and in-flight sit together on the row beneath it, and recent activity and this week's releases follow. On a narrow window those two stack in the same order rather than reshuffling.
+
+  **Library statistics are no longer the hero of the page.** The three large tiles at the top are gone, replaced by a single line of numbers below the timeline — series, issues held, and completion, now labelled **of known issues held** and marked _not a health metric_. Completion counts what is on disk against what Comicarr knows exists; it says nothing about whether downloading works, and it no longer sits next to the health band where it looked like it did.
+
+  **Ask moves to the bottom of the page** and loses its suggestion chips. It is a way into chat, not an answer to any of the questions above it, and chips like "Anything stuck in the queue?" were making health claims that the health band now reports properly. The recent-chats card that sat beside "This week" goes with it; chat is reachable from the sidebar and the Ask bar.
+
+- 38eda3c: The dashboard now says how much work is moving right now, across every download route — one line reading "12 in flight", and "12 in flight (3 recovered from a restart)" when some of that work has already survived a restart. The two figures are never added together: the recovered ones are part of the total, not extra.
+
+  The **Queue** tile is gone. It counted direct downloads only, so an operator running SABnzbd saw "0 queued" while SABnzbd was actively downloading — a claim the dashboard could not back. The in-flight line answers the same question honestly for every route, and it reads the same source as the status indicator in the footer, so the two can never disagree. If that source cannot be read, the line says so instead of reporting a quiet system.
+
+- 1445a9a: The dashboard's **Recent activity** panel now reads the same narrative stream as the Activity Center, so a failed grab or blocked download appears in the timeline instead of vanishing because it never reached the snatched table. That is the failure mode that let a broken downloader look like a quiet week: the old panel could only list things that had already been snatched.
+
+  Each row uses the same sentence voice and deep-links as the Activity Center — failures read "Couldn't grab…", successes read "Grabbed…", and the subject links through to the issue or series. When nothing has happened, the empty state says **No activity in the last 30 days** and links into the full activity view, not the download-history table.
+
+### Patch Changes
+
+- 35415e3: The dashboard now opens with a health band that answers the only question worth opening it for: is anything broken right now? It reports whether a download route is usable, how many indexers are responding, and whether the workers are running — one quiet line when everything is fine, amber naming the specific component when it is not, and red with a link straight to the settings page that fixes it when nothing can get through.
+
+  Alongside those it carries a **last successful search** line, which is the one that matters most. Every other signal reports the state of a component; this one reports whether searching has actually produced anything lately, and it goes amber once nothing has run for twice your search interval. That is the reading that catches the failure the rest of the page cannot: for weeks, downloads could be completely broken while every component reported itself fine and the dashboard looked like a quiet week. This line would have read "11 days ago".
+
+  The band never guesses in your favour. If the health check itself cannot be reached, it says "Cannot determine health" rather than going quiet — an unanswered question is not good news. And the last-successful-search line is never hidden, at any age, including when nothing has ever run.
+
+- ebef755: The dashboard no longer goes blank when one thing behind it breaks. Every panel — the library figures, the queue, recent activity, this week's releases, recent chats — now loads on its own. If one of them cannot be answered, that panel alone says "unavailable" and offers a retry next to it, and everything else on the page still works. Previously the whole page was built from a single request, so one failure took the page down entirely, and a failure that was quietly swallowed showed up as an empty panel — indistinguishable from a genuinely quiet week.
+
+  That distinction is the point: an empty panel now means the answer really was nothing, and a broken one says so out loud. The panels also reserve their space while loading, so a slow one no longer shifts the page around as it arrives.
+
+  The dashboard reads the same information in the same order as before, with one correction: the count above each panel now matches the rows beneath it. "Recent activity" could previously say ten events above a list of five.
+
 ## 0.26.4
 
 ### Patch Changes
