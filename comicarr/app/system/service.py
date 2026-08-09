@@ -343,6 +343,7 @@ def _http_origin(value):
 
 
 def _safe_provider_projection(config, provider_type):
+    """Build the credential-free provider projection returned by the API."""
     attr_name = "EXTRA_NEWZNABS" if provider_type == "newznab" else "EXTRA_TORZNABS"
     enabled_key = "NEWZNAB" if provider_type == "newznab" else "ENABLE_TORZNAB"
     rows = []
@@ -367,6 +368,7 @@ def _safe_provider_projection(config, provider_type):
 
 
 def get_provider_config(ctx):
+    """Return credential-free Newznab and Torznab settings for the UI."""
     if not ctx.config:
         return {"newznab": {"enabled": False, "providers": []}, "torznab": {"enabled": False, "providers": []}}
     return {
@@ -397,6 +399,11 @@ def update_config(ctx, key_values):
     filtered = {k: v for k, v in key_values.items() if k in WRITABLE_CONFIG_KEYS}
     if not filtered:
         return {"success": False, "error": "No valid config keys provided"}
+
+    if "NZB_DOWNLOADER" in filtered:
+        nzb_downloader = filtered["NZB_DOWNLOADER"]
+        if isinstance(nzb_downloader, bool) or not isinstance(nzb_downloader, int) or not 0 <= nzb_downloader <= 3:
+            return {"success": False, "error": "NZB_DOWNLOADER must be an integer between 0 and 3"}
 
     if "SAB_HOST" in filtered:
         new_origin = _http_origin(filtered["SAB_HOST"])
@@ -484,14 +491,16 @@ def update_providers(ctx, provider_data):
         existing = getattr(ctx.config, config_key, []) or []
         by_id = {str(row[6]): row for row in existing if isinstance(row, (list, tuple)) and len(row) >= 7}
         by_identity = {
-            (str(row[0]), str(row[1])): row for row in existing if isinstance(row, (list, tuple)) and len(row) >= 6
+            (str(row[0]), _safe_provider_host(row[1])): row
+            for row in existing
+            if isinstance(row, (list, tuple)) and len(row) >= 6
         }
         normalized = []
         for row in providers:
             if not isinstance(row, dict):
                 return {"success": False, "error": "Invalid provider configuration"}
             old = by_id.get(str(row.get("id"))) or by_identity.get(
-                (str(row.get("name") or ""), str(row.get("host") or ""))
+                (str(row.get("name") or ""), _safe_provider_host(row.get("host")))
             )
             credential = row.get("api_key", row.get("apikey"))
             host = str(row.get("host") or "")

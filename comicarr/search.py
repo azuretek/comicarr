@@ -1341,14 +1341,14 @@ def NZB_SEARCH(
                         r.raise_for_status()
                     except requests.exceptions.Timeout as e:
                         logger.warn(
-                            "Timeout occured fetching data from %s: %s"
+                            "[NZB-SEARCH] Timeout occured fetching data from %s: %s"
                             % (nzbprov, redact_sensitive_text(e, secrets=(apikey,)))
                         )
                         is_info["foundc"]["status"] = False
                         break
                     except requests.exceptions.ConnectionError as e:
                         logger.warn(
-                            "Connection error trying to retrieve data from %s: %s"
+                            "[NZB-SEARCH] Connection error trying to retrieve data from %s: %s"
                             % (nzbprov, redact_sensitive_text(e, secrets=(apikey,)))
                         )
                         if helpers.provider_unreachable(e):
@@ -1357,7 +1357,7 @@ def NZB_SEARCH(
                         break
                     except requests.exceptions.RequestException as e:
                         logger.warn(
-                            "General Error fetching data from %s: %s"
+                            "[NZB-SEARCH] General Error fetching data from %s: %s"
                             % (nzbprov, redact_sensitive_text(e, secrets=(apikey,)))
                         )
                         if helpers.provider_unreachable(e):

@@ -133,6 +133,7 @@ def test_sender_redacts_api_key_from_request_exception_logs(sab_config):
     rendered = " ".join(str(call.args[0]) for call in warn.call_args_list)
     assert "sab-key" not in rendered
     assert "[redacted]" in rendered
+    assert "[SAB-SEND]" in rendered
 
 
 def test_rejected_submission_returns_status_false(sab_config, cached_nzb):

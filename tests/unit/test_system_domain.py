@@ -678,6 +678,23 @@ class TestConfigService:
         result = system_service.update_config(ctx, {"COMIC_DIR": "/new/path"})
         assert result["success"] is True
 
+    @pytest.mark.parametrize("value", (-1, 4, "1", True, None))
+    def test_update_config_rejects_invalid_nzb_downloader(self, value):
+        ctx = _make_test_ctx()
+
+        result = system_service.update_config(ctx, {"nzb_downloader": value})
+
+        assert result == {"success": False, "error": "NZB_DOWNLOADER must be an integer between 0 and 3"}
+        ctx.config.apply_transaction.assert_not_called()
+
+    def test_update_config_accepts_valid_nzb_downloader(self):
+        ctx = _make_test_ctx()
+
+        result = system_service.update_config(ctx, {"nzb_downloader": 3})
+
+        assert result == {"success": True}
+        ctx.config.apply_transaction.assert_called_once_with({"NZB_DOWNLOADER": 3})
+
     def test_update_config_rejects_sensitive_keys_regardless_of_case(self):
         """update_config rejects api_key, http_password in any casing."""
         ctx = _make_test_ctx()
@@ -830,7 +847,61 @@ class TestConfigService:
         persisted = ctx.config.apply_transaction.call_args_list[0].args[0]["EXTRA_NEWZNABS"]
         assert persisted[0][3] == "secret"
         assert persisted[0][1] == "https://user:pass@indexer.test:8443"
-        assert result["providers"][0]["api_key_set"] is True
+
+    def test_update_providers_matches_legacy_six_field_userinfo_by_safe_identity(self):
+        ctx = _make_test_ctx()
+        ctx.config.EXTRA_NEWZNABS = [
+            ("Indexer", "https://user:pass@indexer.test:8443", "1", "legacy-secret", "5030", "1")
+        ]
+        providers = [
+            {
+                "name": "Indexer",
+                "host": "https://indexer.test:8443",
+                "verify": True,
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+
+        result = system_service.update_providers(ctx, {"type": "newznab", "providers": providers})
+
+        assert result["success"] is True
+        persisted = ctx.config.apply_transaction.call_args.args[0]["EXTRA_NEWZNABS"][0]
+        assert persisted[1] == "https://user:pass@indexer.test:8443"
+        assert persisted[3] == "legacy-secret"
+
+    def test_update_providers_projection_reads_post_persistence_config(self):
+        ctx = _make_test_ctx()
+        providers = [
+            {
+                "name": "New",
+                "host": "https://new.test",
+                "verify": True,
+                "api_key": "new-secret",
+                "categories": "5030",
+                "enabled": True,
+            }
+        ]
+
+        def persist(values, configure=False):
+            assert configure is False
+            ctx.config.EXTRA_NEWZNABS = values["EXTRA_NEWZNABS"]
+            return True
+
+        ctx.config.apply_transaction.side_effect = persist
+        result = system_service.update_providers(ctx, {"type": "newznab", "providers": providers})
+
+        assert result["success"] is True
+        assert result["providers"] == [
+            {
+                "name": "New",
+                "host": "https://new.test",
+                "verify": True,
+                "categories": "5030",
+                "enabled": True,
+                "api_key_set": True,
+            }
+        ]
 
     def test_update_providers_requires_new_key_when_origin_changes(self):
         ctx = _make_test_ctx()

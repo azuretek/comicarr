@@ -81,7 +81,7 @@ class SABnzbd(object):
                 )
         except Exception as e:
             logger.warn(
-                "Failed to send to client. Error returned: %s"
+                "[SAB-SEND] Failed to send to client. Error returned: %s"
                 % redact_sensitive_text(e, secrets=(getattr(comicarr.CONFIG, "SAB_APIKEY", None),))
             )
             return {"status": False}
@@ -129,7 +129,8 @@ class SABnzbd(object):
             h = requests.get(self.sab_url, params=self.params["queue"], verify=comicarr.CONFIG.SAB_VERIFY, timeout=30)
         except Exception as e:
             logger.fdebug(
-                "uh-oh: %s" % redact_sensitive_text(e, secrets=(getattr(comicarr.CONFIG, "SAB_APIKEY", None),))
+                "[SAB-QUEUE] uh-oh: %s"
+                % redact_sensitive_text(e, secrets=(getattr(comicarr.CONFIG, "SAB_APIKEY", None),))
             )
             return self.historycheck(self.params)
         else:

@@ -8,6 +8,7 @@ import {
   useProviderConfig,
   useUpdateNewznabProviders,
 } from "@/hooks/useConfig";
+import { httpOrigin } from "@/lib/httpOrigin";
 import type { NewznabProvider } from "@/types";
 import { SettingGroup } from "./SettingGroup";
 import { SettingField } from "./SettingField";
@@ -28,17 +29,6 @@ interface SearchTabProps {
 }
 
 type EditableProvider = NewznabProvider & { api_key: string };
-
-function httpOrigin(value: string): string | null {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:"
-      ? url.origin
-      : null;
-  } catch {
-    return null;
-  }
-}
 
 function NewznabProviderSettings({
   onDirtyChange,
@@ -192,7 +182,8 @@ function NewznabProviderForm({
       ) : (
         <div className="space-y-3">
           {providers.map((provider, index) => {
-            const suffix = provider.id ?? index + 1;
+            const suffix =
+              provider.id != null ? `saved-${provider.id}` : `new-${index}`;
             return (
               <article
                 key={provider.id ?? `new-${index}`}

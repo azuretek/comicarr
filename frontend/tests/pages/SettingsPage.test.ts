@@ -1,6 +1,6 @@
 import userEvent from "@testing-library/user-event";
 import { createElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { server } from "../mocks/server";
 import { render, screen, waitFor } from "../test-utils";
@@ -8,7 +8,45 @@ import { prepareConfigSaveData } from "@/lib/configSave";
 import { formatAppVersion } from "@/lib/version";
 import SettingsPage from "@/pages/SettingsPage";
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("settings configuration", () => {
+  it.each([
+    ["disabled client with empty host", 3, ""],
+    ["non-SAB client with legacy-invalid host", 1, "sab host without scheme"],
+  ])(
+    "saves unrelated settings for %s without validating SAB URL",
+    async (_description, nzbDownloader, sabHost) => {
+      let saved: unknown = null;
+      server.use(
+        http.get("/api/config", () =>
+          HttpResponse.json({
+            nzb_downloader: nzbDownloader,
+            sab_host: sabHost,
+            comicvine_enabled: true,
+            mangadex_enabled: true,
+          }),
+        ),
+        http.put("/api/config", async ({ request }) => {
+          saved = await request.json();
+          return HttpResponse.json({ success: true });
+        }),
+      );
+      const user = userEvent.setup();
+
+      render(createElement(SettingsPage));
+      await screen.findByText("Settings");
+      const comics = await screen.findByText("Comics (Comic Vine)");
+      await user.click(comics);
+      await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+      await waitFor(() => expect(saved).not.toBeNull());
+      expect(saved).toMatchObject({ comicvine_enabled: false });
+    },
+  );
+
   it("omits blank redacted secrets and raw API key values from saves", () => {
     const saveData = prepareConfigSaveData(
       {
@@ -71,7 +109,10 @@ describe("settings configuration", () => {
     ).toBe("API key saved (enter a new value to change)");
     await user.clear(host);
     await user.type(host, "http://sab:8080");
-    await user.type(screen.getByLabelText("SABnzbd API key"), "replacement-key");
+    await user.type(
+      screen.getByLabelText("SABnzbd API key"),
+      "replacement-key",
+    );
     await user.click(screen.getByRole("button", { name: "Save Changes" }));
 
     await waitFor(() => expect(saved).not.toBeNull());
@@ -123,7 +164,6 @@ describe("settings configuration", () => {
     await user.click(screen.getAllByRole("button", { name: "General" })[0]);
     expect(confirm).toHaveBeenCalledWith("Discard unsaved indexer changes?");
     expect(screen.getByLabelText("Indexer name")).toBeTruthy();
-    vi.unstubAllGlobals();
     await user.click(screen.getByRole("button", { name: "Save indexers" }));
 
     await waitFor(() => expect(saved).not.toBeNull());
@@ -139,6 +179,50 @@ describe("settings configuration", () => {
         }),
       ],
     });
+  });
+
+  it("keeps saved and newly added indexer field IDs unique", async () => {
+    server.use(
+      http.get("/api/config/providers", () =>
+        HttpResponse.json({
+          newznab: {
+            enabled: true,
+            providers: [
+              {
+                id: 1,
+                name: "Saved indexer",
+                host: "https://indexer.test",
+                verify: true,
+                categories: "5030",
+                enabled: true,
+                api_key_set: false,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+
+    render(createElement(SettingsPage));
+    await screen.findByText("Settings");
+    await user.click(screen.getAllByRole("button", { name: "Search" })[0]);
+    await screen.findByLabelText("Indexer name");
+    await user.click(screen.getByRole("button", { name: "Add indexer" }));
+
+    const names = screen.getAllByLabelText("Indexer name");
+    expect(names.map((input) => input.id)).toEqual([
+      "indexer-name-saved-1",
+      "indexer-name-new-1",
+    ]);
+    expect(names.map((input) => input.id)).toHaveLength(
+      new Set(names.map((input) => input.id)).size,
+    );
+    expect(names.map((input) => input.id)).toEqual(
+      names.map(
+        (input) => input.closest("div")?.querySelector("label")?.htmlFor,
+      ),
+    );
   });
 
   it("requires a replacement indexer key when its server changes", async () => {
@@ -241,6 +325,51 @@ describe("SettingsPage", () => {
 
     expect(await screen.findByText("Acquisition health")).toBeTruthy();
     expect(screen.getByText("Evidence-driven repair")).toBeTruthy();
+  });
+
+  it("blocks dirty indexer edits on internal SPA links when confirmation is declined", async () => {
+    server.use(
+      http.get("/api/config/providers", () =>
+        HttpResponse.json({
+          newznab: {
+            enabled: true,
+            providers: [
+              {
+                id: 1,
+                name: "Indexer",
+                host: "https://indexer.test",
+                verify: true,
+                categories: "5030",
+                enabled: true,
+                api_key_set: false,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+
+    render(
+      createElement(
+        "div",
+        null,
+        createElement("a", { href: "/library" }, "Library preview link"),
+        createElement(SettingsPage),
+      ),
+    );
+    await screen.findByText("Settings");
+    await user.click(screen.getAllByRole("button", { name: "Search" })[0]);
+    const name = await screen.findByLabelText("Indexer name");
+    await user.type(name, " changed");
+    await user.click(
+      screen.getByRole("link", { name: "Library preview link" }),
+    );
+
+    expect(confirm).toHaveBeenCalledWith("Discard unsaved indexer changes?");
+    expect(screen.getByLabelText("Indexer name")).toBeTruthy();
   });
   it("shows the package release version even when the API reports a different one", async () => {
     // Regression for #412: Settings/About must not echo backend config.version

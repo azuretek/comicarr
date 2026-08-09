@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 import { useConfig, useUpdateConfig } from "@/hooks/useConfig";
 import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,6 +17,7 @@ import { SaveButton } from "@/components/settings/SaveButton";
 import PageHeader from "@/components/layout/PageHeader";
 import { prepareConfigSaveData } from "@/lib/configSave";
 import { formatAppVersion } from "@/lib/version";
+import { httpOrigin } from "@/lib/httpOrigin";
 import type { Config } from "@/types";
 import type {
   ReadableConfig,
@@ -56,21 +57,11 @@ function parseSectionParam(raw: string | null): SectionId | null {
   return SECTION_IDS.has(raw as SectionId) ? (raw as SectionId) : null;
 }
 
-function httpOrigin(value: unknown): string | null {
-  try {
-    const url = new URL(String(value ?? ""));
-    return url.protocol === "http:" || url.protocol === "https:"
-      ? url.origin
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 export default function SettingsPage() {
   const { data: config, isLoading, error } = useConfig();
   const updateConfigMutation = useUpdateConfig();
   const { addToast } = useToast();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const sectionFromUrl = parseSectionParam(searchParams.get("section"));
@@ -125,6 +116,48 @@ export default function SettingsPage() {
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
   }, [providerDirty]);
 
+  // BrowserRouter does not expose the data-router useBlocker API. Capture
+  // in-app link activations here so SPA navigation gets the same confirmation
+  // as section changes, while allowing ordinary navigation when clean.
+  useEffect(() => {
+    if (!providerDirty) return;
+    const confirmNavigation = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      )
+        return;
+      const target =
+        event.target instanceof Element
+          ? event.target.closest("a[href]")
+          : null;
+      if (
+        !(target instanceof HTMLAnchorElement) ||
+        target.target === "_blank" ||
+        target.hasAttribute("download")
+      )
+        return;
+      const url = new URL(target.href, window.location.href);
+      if (url.origin !== window.location.origin) return;
+      if (
+        url.pathname === location.pathname &&
+        url.search === location.search &&
+        url.hash === location.hash
+      )
+        return;
+      if (!window.confirm("Discard unsaved indexer changes?")) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    document.addEventListener("click", confirmNavigation, true);
+    return () => document.removeEventListener("click", confirmNavigation, true);
+  }, [location, providerDirty]);
+
   useEffect(() => {
     if (config && Object.keys(formData).length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Sync external data to local form state
@@ -173,7 +206,13 @@ export default function SettingsPage() {
     ) {
       errors.minsize = "Minimum size must be less than maximum size";
     }
-    if (data.sab_host !== undefined) {
+    const sabSelected =
+      Number(data.nzb_downloader ?? config?.nzb_downloader ?? 3) === 0;
+    if (
+      sabSelected &&
+      typeof data.sab_host === "string" &&
+      data.sab_host.trim()
+    ) {
       const nextOrigin = httpOrigin(data.sab_host);
       if (!nextOrigin) {
         errors.sab_host = "SABnzbd URL must use HTTP or HTTPS";
