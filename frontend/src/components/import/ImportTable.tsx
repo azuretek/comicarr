@@ -1,5 +1,4 @@
 import { useRef, useState } from "react";
-import type { Table as TanstackTable } from "@tanstack/react-table";
 import { FileText } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -10,6 +9,7 @@ import { DataTableServerPagination } from "@/components/data-table/DataTableServ
 import { TableCell, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { getImportIssueLabel } from "@/lib/importUtils";
+import type { ComicarrTable } from "@/components/data-table/useTableState";
 import type { ImportGroup, ImportFile, PaginationMeta } from "@/types";
 
 interface ImportTableProps {
@@ -18,7 +18,7 @@ interface ImportTableProps {
    * instance because it owns selection — `ImportBulkActions` is its sibling —
    * and this component only renders it.
    */
-  table: TanstackTable<ImportGroup>;
+  table: ComicarrTable<ImportGroup>;
   pagination?: PaginationMeta;
   onNextPage?: () => void;
   onPrevPage?: () => void;

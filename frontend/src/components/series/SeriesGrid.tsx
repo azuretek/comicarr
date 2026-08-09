@@ -1,9 +1,9 @@
-import type { Row } from "@tanstack/react-table";
 import SeriesCard from "./SeriesCard";
+import type { ComicarrRow } from "@/components/data-table/useTableState";
 import type { Comic } from "@/types";
 
 interface SeriesGridProps {
-  rows: Row<Comic>[];
+  rows: ComicarrRow<Comic>[];
   onCardClick: (comic: Comic) => void;
 }
 

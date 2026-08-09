@@ -1,15 +1,19 @@
-import type { Column } from "@tanstack/react-table";
+import type { CellData, Column, RowData } from "@tanstack/react-table";
 import { ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
+import type { ComicarrTableFeatures } from "@/components/data-table/useTableState";
 
-interface DataTableSortHeaderProps<TData> {
-  column: Column<TData>;
+interface DataTableSortHeaderProps<
+  TData extends RowData,
+  TValue extends CellData,
+> {
+  column: Column<ComicarrTableFeatures, TData, TValue>;
   title: string;
 }
 
-export function DataTableSortHeader<TData>({
-  column,
-  title,
-}: DataTableSortHeaderProps<TData>) {
+export function DataTableSortHeader<
+  TData extends RowData,
+  TValue extends CellData,
+>({ column, title }: DataTableSortHeaderProps<TData, TValue>) {
   if (!column.getCanSort()) {
     return <span>{title}</span>;
   }

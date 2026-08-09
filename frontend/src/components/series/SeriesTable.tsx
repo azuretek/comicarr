@@ -4,7 +4,6 @@ import {
   createColumnHelper,
   type RowSelectionState,
   type SortingState,
-  type Row,
 } from "@tanstack/react-table";
 import { useQueryStates, parseAsStringLiteral } from "nuqs";
 import {
@@ -34,6 +33,8 @@ import {
   getIsAllSelected,
   toggleAllSelected,
   useTableState,
+  type ComicarrRow,
+  type ComicarrTableFeatures,
   type TableStore,
 } from "@/components/data-table/useTableState";
 import { DataTableFooter } from "@/components/data-table/DataTableFooter";
@@ -47,7 +48,7 @@ import {
 import { useToast } from "@/components/ui/toast";
 import type { Comic } from "@/types";
 
-const columnHelper = createColumnHelper<Comic>();
+const columnHelper = createColumnHelper<ComicarrTableFeatures, Comic>();
 
 // Domain filters and the view toggle only. `page`, `sort` and `search` are the
 // table's own state and live in the shared URL store (tableUrlStore.ts) under
@@ -119,12 +120,13 @@ export default function SeriesTable({
   // Columns are only used by TanStack for sorting & filtering state; rendering
   // is done inline below to match the compact grid design.
   const columns = useMemo(
-    () => [
-      columnHelper.accessor("ComicName", { id: "ComicName" }),
-      columnHelper.accessor("ComicPublisher", { id: "ComicPublisher" }),
-      columnHelper.accessor("Status", { id: "Status" }),
-      columnHelper.accessor("ComicYear", { id: "ComicYear" }),
-    ],
+    () =>
+      columnHelper.columns([
+        columnHelper.accessor("ComicName", { id: "ComicName" }),
+        columnHelper.accessor("ComicPublisher", { id: "ComicPublisher" }),
+        columnHelper.accessor("Status", { id: "Status" }),
+        columnHelper.accessor("ComicYear", { id: "ComicYear" }),
+      ]),
     [],
   );
 
@@ -184,15 +186,15 @@ export default function SeriesTable({
     store,
   });
 
-  const sorting = table.getState().sorting;
-  const effectivePage = table.getState().pagination.pageIndex;
+  const sorting = table.state.sorting;
+  const effectivePage = table.state.pagination.pageIndex;
 
   // A selection change must invalidate an armed delete confirmation. That
   // reset used to live in `onRowSelectionChange`, which the hook now owns, so
   // it is derived instead: the confirmation is armed against the selection
   // state *object*, and every selection change (including the hook's pruning)
   // produces a new one, disarming it.
-  const rowSelection = table.getState().rowSelection;
+  const rowSelection = table.state.rowSelection;
   const confirmDelete =
     confirmDeleteFor !== null && confirmDeleteFor === rowSelection;
 
@@ -577,7 +579,7 @@ function SortHeader({
 }
 
 interface SeriesRowProps {
-  row: Row<Comic>;
+  row: ComicarrRow<Comic>;
   onClick: () => void;
 }
 

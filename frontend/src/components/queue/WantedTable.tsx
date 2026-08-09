@@ -1,8 +1,8 @@
 import { useNavigate } from "react-router-dom";
-import type { Table as TanstackTable } from "@tanstack/react-table";
 import EmptyState from "@/components/ui/EmptyState";
 import { DataTable } from "@/components/data-table/DataTable";
 import { DataTableServerPagination } from "@/components/data-table/DataTableServerPagination";
+import type { ComicarrTable } from "@/components/data-table/useTableState";
 import type { WantedIssue, PaginationMeta } from "@/types";
 
 interface WantedTableProps {
@@ -11,7 +11,7 @@ interface WantedTableProps {
    * instance because it owns selection — `BulkActionBar` is its sibling — and
    * this component only renders it.
    */
-  table: TanstackTable<WantedIssue>;
+  table: ComicarrTable<WantedIssue>;
   pagination?: PaginationMeta;
   onNextPage?: () => void;
   onPrevPage?: () => void;

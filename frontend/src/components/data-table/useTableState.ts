@@ -7,13 +7,26 @@ import {
   useState,
 } from "react";
 import {
-  getCoreRowModel,
-  getExpandedRowModel,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
-  useReactTable,
+  columnFilteringFeature,
+  columnSizingFeature,
+  columnVisibilityFeature,
+  createExpandedRowModel,
+  createFilteredRowModel,
+  createPaginatedRowModel,
+  createSortedRowModel,
+  globalFilteringFeature,
+  rowExpandingFeature,
+  rowPaginationFeature,
+  rowSelectionFeature,
+  rowSortingFeature,
+  sortFn_alphanumeric,
+  sortFn_datetime,
+  sortFn_text,
+  tableFeatures,
+  useTable,
   type ExpandedState,
+  type ReactTable,
+  type Row,
   type RowData,
   type RowSelectionState,
   type SortingState,
@@ -25,8 +38,8 @@ import {
 /**
  * The single owner of TanStack table state.
  *
- * This is not a hook that sits beside `useReactTable` — it *wraps* it, and an
- * ESLint rule makes it the only file allowed to import `useReactTable`. That is
+ * This is not a hook that sits beside `useTable` — it *wraps* it, and an
+ * ESLint rule makes it the only file allowed to import `useTable`. That is
  * what lets `getRowId` be required rather than merely offered: a hook beside
  * the call can only suggest a correct row id, and TanStack's index-based
  * default is precisely the silent default nobody chose (#307, #359).
@@ -37,19 +50,46 @@ import {
  * place (#359).
  */
 
-declare module "@tanstack/react-table" {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  interface TableMeta<TData extends RowData> {
-    /**
-     * Set by `useTableState` from `selection.scope`, so a header checkbox can
-     * honour the table's scope without the column closing over the hook's
-     * return value (columns are memoised; the `table` argument is not).
-     */
-    selectAllScope?: SelectAllScope;
-  }
-}
-
 export type SelectAllScope = "filtered" | "page";
+
+/**
+ * The native v9 feature set shared by every Comicarr table. Keeping this
+ * static gives column helpers and table props one feature type while allowing
+ * TanStack to tree-shake features Comicarr does not use.
+ */
+export const comicarrTableFeatures = tableFeatures({
+  columnFilteringFeature,
+  globalFilteringFeature,
+  rowSortingFeature,
+  rowPaginationFeature,
+  rowExpandingFeature,
+  rowSelectionFeature,
+  columnSizingFeature,
+  columnVisibilityFeature,
+  filteredRowModel: createFilteredRowModel(),
+  sortedRowModel: createSortedRowModel(),
+  paginatedRowModel: createPaginatedRowModel(),
+  expandedRowModel: createExpandedRowModel(),
+  sortFns: {
+    alphanumeric: sortFn_alphanumeric,
+    datetime: sortFn_datetime,
+    text: sortFn_text,
+  },
+});
+
+export type ComicarrTableFeatures = typeof comicarrTableFeatures;
+export type ComicarrTable<TData extends RowData> = ReactTable<
+  ComicarrTableFeatures,
+  TData
+>;
+export type ComicarrCoreTable<TData extends RowData> = Table<
+  ComicarrTableFeatures,
+  TData
+>;
+export type ComicarrRow<TData extends RowData> = Row<
+  ComicarrTableFeatures,
+  TData
+>;
 
 /**
  * The three slices worth putting in a URL. The caller supplies the backing
@@ -84,11 +124,7 @@ type OwnedOptions =
   | "onRowSelectionChange"
   | "onPaginationChange"
   | "onExpandedChange"
-  | "getCoreRowModel"
-  | "getSortedRowModel"
-  | "getFilteredRowModel"
-  | "getPaginationRowModel"
-  | "getExpandedRowModel"
+  | "features"
   | "manualPagination"
   | "autoResetPageIndex"
   // Derived from `selection` and set after the passthrough spread, so a caller
@@ -96,8 +132,8 @@ type OwnedOptions =
   // Omit exists to make impossible.
   | "enableRowSelection";
 
-export type UseTableStateOptions<TData> = Omit<
-  TableOptions<TData>,
+export type UseTableStateOptions<TData extends RowData> = Omit<
+  TableOptions<ComicarrTableFeatures, TData>,
   OwnedOptions
 > & {
   /**
@@ -125,8 +161,8 @@ export type UseTableStateOptions<TData> = Omit<
   initialSorting?: SortingState;
 };
 
-export type UseTableStateResult<TData> = {
-  table: Table<TData>;
+export type UseTableStateResult<TData extends RowData> = {
+  table: ComicarrTable<TData>;
   /**
    * Always derived from `getSelectedRowModel()`, never from raw
    * `state.rowSelection` keys — the raw object is what exposes ids whose rows
@@ -149,8 +185,8 @@ function applyUpdater<T>(updater: Updater<T>, current: T): T {
  * call these instead of picking a TanStack pair themselves, so the scope is
  * decided once, where it was named.
  */
-export function getIsAllSelected<TData>(
-  table: Table<TData>,
+export function getIsAllSelected<TData extends RowData>(
+  table: ComicarrCoreTable<TData>,
 ): boolean | "indeterminate" {
   // Both halves have to read the same scope. Mixing them — an all-check scoped
   // to the page and a some-check scoped to everything — renders a page with no
@@ -166,8 +202,8 @@ export function getIsAllSelected<TData>(
   return isAll || (isSome && "indeterminate");
 }
 
-export function toggleAllSelected<TData>(
-  table: Table<TData>,
+export function toggleAllSelected<TData extends RowData>(
+  table: ComicarrCoreTable<TData>,
   value: boolean,
 ): void {
   if (table.options.meta?.selectAllScope === "page") {
@@ -177,7 +213,7 @@ export function toggleAllSelected<TData>(
   table.toggleAllRowsSelected(value);
 }
 
-export function useTableState<TData>({
+export function useTableState<TData extends RowData>({
   getRowId,
   pagination,
   selection,
@@ -244,9 +280,14 @@ export function useTableState<TData>({
   useEffect(() => {
     if (rowCount > 0) seenRows.current = true;
   });
+  // This snapshot is intentionally a render input: TanStack reads the option
+  // synchronously while building the row model, as explained above.
+  // eslint-disable-next-line react-hooks/refs
+  const autoResetPageIndex = seenRows.current;
 
-  const table = useReactTable({
+  const table = useTable({
     ...passthrough,
+    features: comicarrTableFeatures,
     meta: { ...meta, selectAllScope: selection?.scope },
     getRowId,
     state: {
@@ -263,14 +304,9 @@ export function useTableState<TData>({
     ...(pagination
       ? {
           onPaginationChange: setPagination,
-          getPaginationRowModel: getPaginationRowModel(),
-          autoResetPageIndex: seenRows.current,
+          autoResetPageIndex,
         }
       : { manualPagination: true }),
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getExpandedRowModel: getExpandedRowModel(),
     enableRowSelection: selection !== undefined,
   });
 
@@ -286,8 +322,13 @@ export function useTableState<TData>({
   useLayoutEffect(() => {
     if (previousPageSize.current !== pageSize) {
       previousPageSize.current = pageSize;
-      if (store) store.setState({ pageIndex: 0 });
-      else setLocalPageIndex(0);
+      if (store) {
+        store.setState({ pageIndex: 0 });
+      } else {
+        // This reconciles hook-owned pagination with a changed page-size input.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setLocalPageIndex(0);
+      }
     }
   }, [pageSize, store]);
 
@@ -309,6 +350,9 @@ export function useTableState<TData>({
   );
 
   useEffect(() => {
+    // TanStack intentionally retains stale row ids; reconcile them when the
+    // filtered row model changes so header selection state stays truthful.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRowSelection((current) => {
       const selectedKeys = Object.keys(current);
       if (selectedKeys.length === 0) return current;

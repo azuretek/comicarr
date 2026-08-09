@@ -45,9 +45,9 @@ export default tseslint.config(
           paths: [
             {
               name: '@tanstack/react-table',
-              importNames: ['useReactTable'],
+              importNames: ['useTable'],
               message:
-                'Call useTableState from @/components/data-table/useTableState instead. It wraps useReactTable so getRowId cannot fall back to TanStack’s index default (#307, #359).',
+                'Call useTableState from @/components/data-table/useTableState instead. It wraps useTable so getRowId cannot fall back to TanStack’s index default (#307, #359).',
             },
           ],
         },
@@ -59,10 +59,6 @@ export default tseslint.config(
     files: ['src/components/data-table/useTableState.ts'],
     rules: {
       'no-restricted-imports': 'off',
-      // React Compiler flags useReactTable as an incompatible library. This
-      // disable used to be repo-wide because the call sites were scattered;
-      // confining them to one file is what lets it narrow to one file.
-      'react-hooks/incompatible-library': 'off',
     },
   },
   {
