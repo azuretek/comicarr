@@ -237,6 +237,12 @@ async def update_providers(request: Request, ctx: AppContext = Depends(get_conte
     return result
 
 
+@router.get("/config/providers", dependencies=[Depends(require_session)])
+def get_providers(ctx: AppContext = Depends(get_context)):
+    """Return provider identities and enablement without credentials."""
+    return system_service.get_provider_config(ctx)
+
+
 # ---------------------------------------------------------------------------
 # Admin endpoints
 # ---------------------------------------------------------------------------

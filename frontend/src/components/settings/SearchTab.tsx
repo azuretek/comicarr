@@ -1,3 +1,14 @@
+import { useEffect, useMemo, useState } from "react";
+import { LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/components/ui/toast";
+import {
+  useProviderConfig,
+  useUpdateNewznabProviders,
+} from "@/hooks/useConfig";
+import type { NewznabProvider } from "@/types";
 import { SettingGroup } from "./SettingGroup";
 import { SettingField } from "./SettingField";
 import type {
@@ -13,9 +24,330 @@ interface SearchTabProps {
     key: K,
     value: NonNullable<WritableConfig[K]>,
   ) => void;
+  onProviderDirtyChange?: (dirty: boolean) => void;
 }
 
-export function SearchTab({ formData, onChange }: SearchTabProps) {
+type EditableProvider = NewznabProvider & { api_key: string };
+
+function httpOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function NewznabProviderSettings({
+  onDirtyChange,
+}: {
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
+  const providerQuery = useProviderConfig();
+
+  if (providerQuery.isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-4 text-[12px] text-muted-foreground">
+        <LoaderCircle className="h-4 w-4 animate-spin" /> Loading indexers…
+      </div>
+    );
+  }
+
+  if (providerQuery.error) {
+    return (
+      <div role="alert" className="py-3 text-[12px] text-destructive">
+        {providerQuery.error.message}
+      </div>
+    );
+  }
+
+  if (!providerQuery.data) return null;
+
+  return (
+    <NewznabProviderForm
+      key={JSON.stringify(providerQuery.data.newznab)}
+      initial={providerQuery.data.newznab}
+      onDirtyChange={onDirtyChange}
+    />
+  );
+}
+
+function NewznabProviderForm({
+  initial,
+  onDirtyChange,
+}: {
+  initial: { enabled: boolean; providers: NewznabProvider[] };
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
+  const { addToast } = useToast();
+  const updateProviders = useUpdateNewznabProviders();
+  const [enabled, setEnabled] = useState(initial.enabled);
+  const initialProviders = useMemo(
+    () => initial.providers.map((provider) => ({ ...provider, api_key: "" })),
+    [initial.providers],
+  );
+  const [providers, setProviders] =
+    useState<EditableProvider[]>(initialProviders);
+  const isDirty =
+    enabled !== initial.enabled ||
+    JSON.stringify(providers) !== JSON.stringify(initialProviders);
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+    return () => onDirtyChange?.(false);
+  }, [isDirty, onDirtyChange]);
+
+  const updateProvider = (index: number, patch: Partial<EditableProvider>) => {
+    setProviders((current) =>
+      current.map((provider, providerIndex) =>
+        providerIndex === index ? { ...provider, ...patch } : provider,
+      ),
+    );
+  };
+
+  const addProvider = () => {
+    setProviders((current) => [
+      ...current,
+      {
+        name: "",
+        host: "",
+        verify: true,
+        categories: "5030",
+        enabled: true,
+        api_key_set: false,
+        api_key: "",
+      },
+    ]);
+  };
+
+  const resetProviders = () => {
+    setEnabled(initial.enabled);
+    setProviders(initialProviders);
+  };
+
+  const saveProviders = async () => {
+    const incomplete = providers.some(
+      (provider) =>
+        !provider.name.trim() ||
+        !provider.host.trim() ||
+        (!provider.api_key_set && !provider.api_key.trim()),
+    );
+    if (incomplete) {
+      addToast({
+        type: "error",
+        message: "Each indexer needs a name, URL, and API key.",
+      });
+      return;
+    }
+    const redirectedSecret = providers.some((provider) => {
+      if (!provider.api_key_set || provider.api_key.trim()) return false;
+      const original = initial.providers.find(
+        (candidate) => candidate.id === provider.id,
+      );
+      return Boolean(
+        original && httpOrigin(original.host) !== httpOrigin(provider.host),
+      );
+    });
+    if (redirectedSecret) {
+      addToast({
+        type: "error",
+        message: "Enter the API key again when changing an indexer server.",
+      });
+      return;
+    }
+    try {
+      await updateProviders.mutateAsync({ enabled, providers });
+      addToast({ type: "success", message: "Search indexers saved" });
+    } catch (error) {
+      addToast({
+        type: "error",
+        message:
+          error instanceof Error ? error.message : "Failed to save indexers",
+      });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <SettingField
+        label="Enable Newznab indexers"
+        type="checkbox"
+        checked={enabled}
+        onChange={(value) => setEnabled(value as boolean)}
+        helpText="At least one enabled indexer is required for Usenet search."
+      />
+
+      <p className="text-[12px] text-muted-foreground">
+        Indexer edits are saved separately from the page-level settings
+        controls.
+      </p>
+
+      {providers.length === 0 ? (
+        <div className="rounded-[6px] border border-dashed px-4 py-5 text-[12px] text-muted-foreground">
+          No Usenet indexers are configured. Add a Newznab-compatible indexer to
+          make the NZB route searchable.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {providers.map((provider, index) => {
+            const suffix = provider.id ?? index + 1;
+            return (
+              <article
+                key={provider.id ?? `new-${index}`}
+                className="rounded-[6px] border p-4"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em]">
+                    Indexer {index + 1}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`Remove indexer ${index + 1}`}
+                    onClick={() =>
+                      setProviders((current) =>
+                        current.filter(
+                          (_, providerIndex) => providerIndex !== index,
+                        ),
+                      )
+                    }
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <Label htmlFor={`indexer-name-${suffix}`}>
+                      Indexer name
+                    </Label>
+                    <Input
+                      id={`indexer-name-${suffix}`}
+                      className="mt-1.5"
+                      value={provider.name}
+                      onChange={(event) =>
+                        updateProvider(index, { name: event.target.value })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor={`indexer-host-${suffix}`}>
+                      Indexer URL
+                    </Label>
+                    <Input
+                      id={`indexer-host-${suffix}`}
+                      className="mt-1.5"
+                      value={provider.host}
+                      placeholder="https://indexer.example/api"
+                      onChange={(event) =>
+                        updateProvider(index, { host: event.target.value })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor={`indexer-key-${suffix}`}>
+                      Indexer API key
+                    </Label>
+                    <Input
+                      id={`indexer-key-${suffix}`}
+                      className="mt-1.5"
+                      type="password"
+                      value={provider.api_key}
+                      placeholder={
+                        provider.api_key_set
+                          ? "API key saved (enter a new value to change)"
+                          : "Enter the indexer API key"
+                      }
+                      onChange={(event) =>
+                        updateProvider(index, { api_key: event.target.value })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor={`indexer-categories-${suffix}`}>
+                      Categories
+                    </Label>
+                    <Input
+                      id={`indexer-categories-${suffix}`}
+                      className="mt-1.5"
+                      value={provider.categories}
+                      placeholder="5030"
+                      onChange={(event) =>
+                        updateProvider(index, {
+                          categories: event.target.value,
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  <SettingField
+                    label={`Enable indexer ${index + 1}`}
+                    type="checkbox"
+                    checked={provider.enabled}
+                    onChange={(value) =>
+                      updateProvider(index, { enabled: value as boolean })
+                    }
+                  />
+                  <SettingField
+                    label={`Verify TLS for indexer ${index + 1}`}
+                    type="checkbox"
+                    checked={provider.verify}
+                    onChange={(value) =>
+                      updateProvider(index, { verify: value as boolean })
+                    }
+                  />
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={addProvider}>
+          <Plus /> Add indexer
+        </Button>
+        <div className="flex items-center gap-2">
+          {isDirty && (
+            <span className="text-[11px] text-muted-foreground">
+              Unsaved indexer changes
+            </span>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={!isDirty}
+            onClick={resetProviders}
+          >
+            Reset indexers
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            disabled={!isDirty || updateProviders.isPending}
+            onClick={() => void saveProviders()}
+          >
+            {updateProviders.isPending && (
+              <LoaderCircle className="animate-spin" />
+            )}
+            Save indexers
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function SearchTab({
+  formData,
+  onChange,
+  onProviderDirtyChange,
+}: SearchTabProps) {
   const qualityOptions = [
     { value: "0", label: "Any Quality" },
     { value: "1", label: "HD Only" },
@@ -24,6 +356,13 @@ export function SearchTab({ formData, onChange }: SearchTabProps) {
 
   return (
     <div className="space-y-6">
+      <SettingGroup
+        title="Usenet indexers"
+        description="Configure the Newznab-compatible sources Comicarr searches before handing an NZB to your download client."
+      >
+        <NewznabProviderSettings onDirtyChange={onProviderDirtyChange} />
+      </SettingGroup>
+
       <SettingGroup
         title="Quality Settings"
         description="Configure preferred quality for downloads"

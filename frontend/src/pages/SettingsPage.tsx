@@ -56,6 +56,17 @@ function parseSectionParam(raw: string | null): SectionId | null {
   return SECTION_IDS.has(raw as SectionId) ? (raw as SectionId) : null;
 }
 
+function httpOrigin(value: unknown): string | null {
+  try {
+    const url = new URL(String(value ?? ""));
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function SettingsPage() {
   const { data: config, isLoading, error } = useConfig();
   const updateConfigMutation = useUpdateConfig();
@@ -66,6 +77,7 @@ export default function SettingsPage() {
   const [section, setSectionState] = useState<SectionId>(
     () => sectionFromUrl ?? "general",
   );
+  const [providerDirty, setProviderDirty] = useState(false);
 
   // Honour ?section=about (modal overflow → archive) without losing local nav.
   useEffect(() => {
@@ -76,6 +88,14 @@ export default function SettingsPage() {
   }, [sectionFromUrl, section]);
 
   const setSection = (id: SectionId) => {
+    if (
+      section === "search" &&
+      id !== "search" &&
+      providerDirty &&
+      !window.confirm("Discard unsaved indexer changes?")
+    ) {
+      return;
+    }
     setSectionState(id);
     setSearchParams(
       (prev) => {
@@ -96,6 +116,14 @@ export default function SettingsPage() {
   const [regeneratedApiKey, setRegeneratedApiKey] = useState<string | null>(
     null,
   );
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!providerDirty) return;
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [providerDirty]);
 
   useEffect(() => {
     if (config && Object.keys(formData).length === 0) {
@@ -145,6 +173,19 @@ export default function SettingsPage() {
     ) {
       errors.minsize = "Minimum size must be less than maximum size";
     }
+    if (data.sab_host !== undefined) {
+      const nextOrigin = httpOrigin(data.sab_host);
+      if (!nextOrigin) {
+        errors.sab_host = "SABnzbd URL must use HTTP or HTTPS";
+      } else if (
+        config?.sab_apikey_set &&
+        httpOrigin(config.sab_host) !== nextOrigin &&
+        !data.sab_apikey
+      ) {
+        errors.sab_apikey =
+          "Enter the SABnzbd API key again when changing the server";
+      }
+    }
     return errors;
   };
 
@@ -160,7 +201,12 @@ export default function SettingsPage() {
     try {
       const saveData = prepareConfigSaveData(formData, config);
       await updateConfigMutation.mutateAsync(saveData);
-      addToast({ type: "success", message: "Settings saved successfully" });
+      addToast({
+        type: "success",
+        message: providerDirty
+          ? "Page settings saved; indexer edits still need Save indexers"
+          : "Settings saved successfully",
+      });
       setOriginalData(formData);
     } catch (err) {
       addToast({
@@ -172,7 +218,12 @@ export default function SettingsPage() {
 
   const handleCancel = () => {
     setFormData(originalData);
-    addToast({ type: "info", message: "Changes discarded" });
+    addToast({
+      type: "info",
+      message: providerDirty
+        ? "Page settings discarded; unsaved indexer edits remain"
+        : "Changes discarded",
+    });
   };
 
   if (isLoading) {
@@ -294,13 +345,16 @@ export default function SettingsPage() {
             {section === "general" && <GeneralTab {...tabProps} />}
             {section === "interface" && <InterfaceTab {...tabProps} />}
             {section === "api" && <ApiTab {...apiTabProps} />}
-            {section === "search" && <SearchTab {...tabProps} />}
+            {section === "search" && (
+              <SearchTab
+                {...tabProps}
+                onProviderDirtyChange={setProviderDirty}
+              />
+            )}
             {section === "acquisition" && <AcquisitionHealthTab />}
             {section === "media" && <MediaManagementTab {...tabProps} />}
             {section === "notifications" && <NotificationsTab {...tabProps} />}
-            {section === "clients" && (
-              <DownloadClientsTab config={configData} />
-            )}
+            {section === "clients" && <DownloadClientsTab {...tabProps} />}
             {section === "ai" && <AiTab {...tabProps} />}
             {section === "about" && <AboutTab {...aboutProps} />}
           </div>

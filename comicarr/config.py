@@ -1210,12 +1210,11 @@ class Config(object):
             try:
                 provider_values = {key: value for key, value in values.items() if key in _PROVIDER_EXTRA_FIELDS}
                 scalar_values = {key: value for key, value in values.items() if key not in _PROVIDER_EXTRA_FIELDS}
-                if provider_values and scalar_values:
-                    raise ValueError("Provider and scalar settings require separate transactions")
                 if provider_values:
                     # Provider values are fully normalized and published by
-                    # _writeconfig; the broad legacy configure pass adds no
-                    # provider state and cannot be rolled back safely.
+                    # _writeconfig. Scalar values can share this durable write,
+                    # but the broad legacy configure pass adds no provider state
+                    # and cannot be rolled back safely.
                     configure = False
                 if scalar_values:
                     self.process_kwargs(scalar_values)

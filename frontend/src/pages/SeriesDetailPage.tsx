@@ -84,6 +84,12 @@ const ROUTE_REASON_COPY: Record<string, string> = {
     "Route health could not be read. Check the server logs, then refresh this preview.",
   disabled:
     "Every download route is disabled. Enable one in Settings, along with at least one provider.",
+  provider_not_configured:
+    "No Usenet indexer is configured. Add and enable one in Search settings.",
+  provider_disabled:
+    "Usenet indexers are configured but disabled. Enable one in Search settings.",
+  downloader_disabled:
+    "The Usenet download client is disabled. Choose one in Download client settings.",
   client_not_ready:
     "The download client is missing its host or API key. Finish configuring it in Settings.",
   path_not_ready:
@@ -92,6 +98,29 @@ const ROUTE_REASON_COPY: Record<string, string> = {
     "Every provider is in a temporary backoff. This clears on its own — try again shortly.",
   unsupported_restart_correlation:
     "The selected download client cannot correlate downloads across a restart. Choose a client that can.",
+};
+
+const ROUTE_REASON_FIX: Record<string, { label: string; to: string }> = {
+  provider_not_configured: {
+    label: "Open search settings",
+    to: "/settings?section=search",
+  },
+  provider_disabled: {
+    label: "Open search settings",
+    to: "/settings?section=search",
+  },
+  downloader_disabled: {
+    label: "Open download client settings",
+    to: "/settings?section=clients",
+  },
+  client_not_ready: {
+    label: "Open download client settings",
+    to: "/settings?section=clients",
+  },
+  path_not_ready: {
+    label: "Open download client settings",
+    to: "/settings?section=clients",
+  },
 };
 
 function formatRouteReason(reason?: string | null): string {
@@ -828,6 +857,19 @@ export default function SeriesDetailPage() {
                         {preview.route.reason}
                       </div>
                     )}
+                    {preview.route?.reason &&
+                      ROUTE_REASON_FIX[preview.route.reason] && (
+                        <Button
+                          asChild
+                          variant="outline"
+                          size="sm"
+                          className="mt-3"
+                        >
+                          <Link to={ROUTE_REASON_FIX[preview.route.reason].to}>
+                            {ROUTE_REASON_FIX[preview.route.reason].label}
+                          </Link>
+                        </Button>
+                      )}
                   </div>
                 ) : preview.eligibleCount === 0 ? (
                   <div

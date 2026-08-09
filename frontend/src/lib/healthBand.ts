@@ -94,6 +94,9 @@ const ROUTE_REASONS: Array<[string, string]> = [
     "unsupported_restart_correlation",
     "the configured client cannot be verified after a restart",
   ],
+  ["provider_disabled", "every configured indexer is disabled"],
+  ["downloader_disabled", "the download client is disabled"],
+  ["provider_not_configured", "no indexer is configured"],
   ["disabled", "no route is enabled"],
 ];
 
@@ -132,7 +135,9 @@ function alive(worker: AcquisitionWorkerHealth): boolean {
 }
 
 /** The nearest-to-ready blocker across the routes that are not ready. */
-function routeBlocker(routes: Array<[string, AcquisitionRouteHealth]>): string {
+function routeBlocker(
+  routes: Array<[string, AcquisitionRouteHealth]>,
+): { reason: string; phrase: string } | null {
   const reasons = new Set(
     routes
       .filter(([, route]) => !route.ready)
@@ -143,11 +148,11 @@ function routeBlocker(routes: Array<[string, AcquisitionRouteHealth]>): string {
       ),
   );
   for (const [reason, phrase] of ROUTE_REASONS) {
-    if (reasons.has(reason)) return phrase;
+    if (reasons.has(reason)) return { reason, phrase };
   }
   // A maintenance fence puts its own reason in `reason`; the gate signal names
   // it, so the route signal stays silent rather than repeating it verbatim.
-  return "";
+  return null;
 }
 
 function routeSignal(health: AcquisitionHealthResponse): HealthSignal {
@@ -176,13 +181,18 @@ function routeSignal(health: AcquisitionHealthResponse): HealthSignal {
   }
 
   const blocker = routeBlocker(routes);
+  const providerBlocker =
+    blocker?.reason === "provider_not_configured" ||
+    blocker?.reason === "provider_disabled";
   return {
     key: "route",
     tone: "blocked",
     text: blocker
-      ? `No usable download route — ${blocker}`
+      ? `No usable download route — ${blocker.phrase}`
       : "No usable download route",
-    fix: { label: "open download clients", to: SETTINGS_CLIENTS },
+    fix: providerBlocker
+      ? { label: "open search providers", to: SETTINGS_SEARCH }
+      : { label: "open download clients", to: SETTINGS_CLIENTS },
   };
 }
 

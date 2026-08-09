@@ -28,6 +28,18 @@ sab_username =
 sab_password =
 sab_apikey =
 sab_category =
+sab_directory =
+sab_verify = False
+
+[Client]
+# 0 = SABnzbd, 1 = NZBGet, 2 = Blackhole, 3 = Disabled
+nzb_downloader = 3
+
+[Newznab]
+# Configure indexers from Settings > Search. The serialized provider rows are
+# maintained by Comicarr and may contain encrypted credentials.
+newznab = False
+extra_newznabs =
 
 [NZBGet]
 nzbget_host =

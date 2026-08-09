@@ -121,6 +121,20 @@ def test_unreadable_nzb_is_a_clean_rejection(sab_config, tmp_path):
     assert post.call_count == 0
 
 
+def test_sender_redacts_api_key_from_request_exception_logs(sab_config):
+    error = sabnzbd.requests.ConnectionError("failed http://sab.local:8080/api?mode=queue&apikey=sab-key")
+    with (
+        patch.object(sabnzbd.requests, "get", side_effect=error),
+        patch.object(sabnzbd.logger, "warn") as warn,
+    ):
+        result = sabnzbd.SABnzbd(_params()).sender(chkstatus=True)
+
+    assert result == {"status": False}
+    rendered = " ".join(str(call.args[0]) for call in warn.call_args_list)
+    assert "sab-key" not in rendered
+    assert "[redacted]" in rendered
+
+
 def test_rejected_submission_returns_status_false(sab_config, cached_nzb):
     response = MagicMock()
     response.json.return_value = {"status": False, "error": "nope"}

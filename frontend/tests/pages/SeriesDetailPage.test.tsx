@@ -474,4 +474,37 @@ describe("SeriesDetailPage", () => {
         .hasAttribute("disabled"),
     ).toBe(true);
   });
+
+  it("links a missing provider blocker to search provider settings", async () => {
+    server.use(
+      http.get("/api/series/1/search-missing/preview", () =>
+        HttpResponse.json({
+          success: true,
+          comicId: "1",
+          eligibleCount: 2,
+          excludedCount: 8,
+          route: { viable: false, reason: "provider_not_configured" },
+          canSearch: false,
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderDetail();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Search all missing" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "No Usenet indexer is configured. Add and enable one in Search settings.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "Open search settings" })
+        .getAttribute("href"),
+    ).toBe("/settings?section=search");
+  });
 });
