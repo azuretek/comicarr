@@ -5,6 +5,7 @@ import {
   getIsAllSelected,
   toggleAllSelected,
   useTableState,
+  type ComicarrTableFeatures,
   type TableStore,
 } from "@/components/data-table/useTableState";
 import { encodeRowId } from "@/components/data-table/rowId";
@@ -28,11 +29,11 @@ import { encodeRowId } from "@/components/data-table/rowId";
 
 type Row = { id: string; name: string; group: string };
 
-const columnHelper = createColumnHelper<Row>();
-const columns = [
+const columnHelper = createColumnHelper<ComicarrTableFeatures, Row>();
+const columns = columnHelper.columns([
   columnHelper.accessor("name", { id: "name" }),
   columnHelper.accessor("group", { id: "group" }),
-];
+]);
 
 function rows(...ids: string[]): Row[] {
   return ids.map((id) => ({ id, name: `row ${id}`, group: "a" }));
@@ -95,7 +96,7 @@ describe("useTableState", () => {
       rerender({ data: rows("a", "c"), scope: "filtered" });
 
       expect(result.current.selectedIds).toEqual([]);
-      expect(Object.keys(result.current.table.getState().rowSelection)).toEqual(
+      expect(Object.keys(result.current.table.state.rowSelection)).toEqual(
         [],
       );
     });
@@ -117,7 +118,7 @@ describe("useTableState", () => {
       // this true-but-stale, because the header counts raw state (#359).
       expect(result.current.selectedIds).toEqual(["a"]);
       expect(getIsAllSelected(result.current.table)).toBe(true);
-      expect(Object.keys(result.current.table.getState().rowSelection)).toEqual(
+      expect(Object.keys(result.current.table.state.rowSelection)).toEqual(
         ["a"],
       );
     });
@@ -187,7 +188,7 @@ describe("useTableState", () => {
       });
 
       expect(result.current.selectedIds).toEqual([]);
-      expect(Object.keys(result.current.table.getState().rowSelection)).toEqual(
+      expect(Object.keys(result.current.table.state.rowSelection)).toEqual(
         [],
       );
 
@@ -361,7 +362,7 @@ describe("useTableState", () => {
       expect(writes).toEqual([{ sorting: [{ id: "name", desc: true }] }]);
 
       rerender();
-      expect(result.current.table.getState().sorting).toEqual([
+      expect(result.current.table.state.sorting).toEqual([
         { id: "name", desc: true },
       ]);
     });
@@ -396,7 +397,7 @@ describe("useTableState", () => {
         result.current.table.getColumn("name")?.toggleSorting(true);
       });
 
-      expect(result.current.table.getState().sorting).toEqual([
+      expect(result.current.table.state.sorting).toEqual([
         { id: "name", desc: true },
       ]);
     });
@@ -443,13 +444,13 @@ describe("useTableState", () => {
       act(() => {
         result.current.table.setPageIndex(2);
       });
-      expect(result.current.table.getState().pagination.pageIndex).toBe(2);
+      expect(result.current.table.state.pagination.pageIndex).toBe(2);
 
       // A page-size change alters no `data` identity, so TanStack provably
       // never sees it (#360).
       rerender({ data, pageSize: 3 });
 
-      expect(result.current.table.getState().pagination.pageIndex).toBe(0);
+      expect(result.current.table.state.pagination.pageIndex).toBe(0);
     });
   });
 

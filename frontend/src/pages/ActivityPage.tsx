@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   createColumnHelper,
   type SortingState,
-  type Table as TanstackTable,
+  type RowData,
 } from "@tanstack/react-table";
 import { RefreshCw } from "lucide-react";
 import {
@@ -16,7 +16,11 @@ import {
 import { useDebounce } from "@/hooks/use-debounce";
 import { TimelineView } from "@/components/activity/timeline";
 import { DataTable } from "@/components/data-table/DataTable";
-import { useTableState } from "@/components/data-table/useTableState";
+import {
+  useTableState,
+  type ComicarrTable,
+  type ComicarrTableFeatures,
+} from "@/components/data-table/useTableState";
 import { useServerPage } from "@/components/data-table/useServerPage";
 import { encodeRowId } from "@/components/data-table/rowId";
 import { DataTableServerPagination } from "@/components/data-table/DataTableServerPagination";
@@ -275,7 +279,7 @@ function useActivityTable(defaultSortId: string) {
   };
 }
 
-function ActivityTableView<TData>({
+function ActivityTableView<TData extends RowData>({
   table,
   rows,
   pagination,
@@ -295,7 +299,7 @@ function ActivityTableView<TData>({
   onNextPage,
   onPrevPage,
 }: {
-  table: TanstackTable<TData>;
+  table: ComicarrTable<TData>;
   rows: TData[];
   pagination?: PaginationMeta;
   search: string;
@@ -367,7 +371,10 @@ function ActivityTableView<TData>({
   );
 }
 
-const queueColumnHelper = createColumnHelper<QueueItem>();
+const queueColumnHelper = createColumnHelper<
+  ComicarrTableFeatures,
+  QueueItem
+>();
 
 function QueueView() {
   const {
@@ -423,92 +430,93 @@ function QueueView() {
   );
 
   const columns = useMemo(
-    () => [
-      queueColumnHelper.accessor("series", {
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Series" />
-        ),
-        cell: ({ row }) => {
-          const content = (
-            <>
-              {row.original.series || "—"}
-              {row.original.year && (
-                <span className="text-muted-foreground">
-                  {" "}
-                  ({row.original.year})
-                </span>
-              )}
-            </>
-          );
-          return row.original.comicid ? (
-            <Link
-              to={`/library/${row.original.comicid}`}
-              className="font-medium hover:text-[var(--primary)]"
-            >
-              {content}
-            </Link>
-          ) : (
-            <span className="font-medium">{content}</span>
-          );
-        },
-      }),
-      queueColumnHelper.accessor("filename", {
-        id: "file",
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="File" />
-        ),
-        cell: ({ getValue }) => (
-          <span className="font-mono text-[11px] text-muted-foreground">
-            {getValue() || "—"}
-          </span>
-        ),
-      }),
-      queueColumnHelper.accessor("site", {
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Site" />
-        ),
-        cell: ({ getValue }) => (
-          <span className="text-muted-foreground">{getValue() || "—"}</span>
-        ),
-      }),
-      queueColumnHelper.accessor("status", {
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Status" />
-        ),
-        cell: ({ getValue }) => <StatusPill status={getValue()} />,
-      }),
-      queueColumnHelper.accessor("updated_date", {
-        id: "updated",
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Updated" />
-        ),
-        cell: ({ getValue }) => <RelativeTime value={getValue()} />,
-      }),
-      queueColumnHelper.display({
-        id: "actions",
-        header: "Actions",
-        cell: ({ row }) => {
-          const item = row.original;
-          const isFailed = item.status.trim().toLowerCase() === "failed";
-          if (!isFailed) return null;
+    () =>
+      queueColumnHelper.columns([
+        queueColumnHelper.accessor("series", {
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Series" />
+          ),
+          cell: ({ row }) => {
+            const content = (
+              <>
+                {row.original.series || "—"}
+                {row.original.year && (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    ({row.original.year})
+                  </span>
+                )}
+              </>
+            );
+            return row.original.comicid ? (
+              <Link
+                to={`/library/${row.original.comicid}`}
+                className="font-medium hover:text-[var(--primary)]"
+              >
+                {content}
+              </Link>
+            ) : (
+              <span className="font-medium">{content}</span>
+            );
+          },
+        }),
+        queueColumnHelper.accessor("filename", {
+          id: "file",
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="File" />
+          ),
+          cell: ({ getValue }) => (
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {getValue() || "—"}
+            </span>
+          ),
+        }),
+        queueColumnHelper.accessor("site", {
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Site" />
+          ),
+          cell: ({ getValue }) => (
+            <span className="text-muted-foreground">{getValue() || "—"}</span>
+          ),
+        }),
+        queueColumnHelper.accessor("status", {
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Status" />
+          ),
+          cell: ({ getValue }) => <StatusPill status={getValue()} />,
+        }),
+        queueColumnHelper.accessor("updated_date", {
+          id: "updated",
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Updated" />
+          ),
+          cell: ({ getValue }) => <RelativeTime value={getValue()} />,
+        }),
+        queueColumnHelper.display({
+          id: "actions",
+          header: "Actions",
+          cell: ({ row }) => {
+            const item = row.original;
+            const isFailed = item.status.trim().toLowerCase() === "failed";
+            if (!isFailed) return null;
 
-          const isRequeueing = isRequeuePending && requeueItemId === item.ID;
-          return (
-            <button
-              type="button"
-              onClick={() => void handleRequeue(item)}
-              disabled={isRequeueing}
-              className="rounded-[4px] border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-60"
-              style={{ borderColor: "var(--border)" }}
-              aria-label={`Requeue ${item.series || item.filename || "failed direct download"}`}
-              title="Requeue this failed direct download after confirmation"
-            >
-              {isRequeueing ? "requeueing…" : "requeue"}
-            </button>
-          );
-        },
-      }),
-    ],
+            const isRequeueing = isRequeuePending && requeueItemId === item.ID;
+            return (
+              <button
+                type="button"
+                onClick={() => void handleRequeue(item)}
+                disabled={isRequeueing}
+                className="rounded-[4px] border px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-60"
+                style={{ borderColor: "var(--border)" }}
+                aria-label={`Requeue ${item.series || item.filename || "failed direct download"}`}
+                title="Requeue this failed direct download after confirmation"
+              >
+                {isRequeueing ? "requeueing…" : "requeue"}
+              </button>
+            );
+          },
+        }),
+      ]),
     [handleRequeue, isRequeuePending, requeueItemId],
   );
 
@@ -545,7 +553,10 @@ function QueueView() {
   );
 }
 
-const historyColumnHelper = createColumnHelper<HistoryItem>();
+const historyColumnHelper = createColumnHelper<
+  ComicarrTableFeatures,
+  HistoryItem
+>();
 
 function HistoryView() {
   const {
@@ -569,59 +580,62 @@ function HistoryView() {
   const history = data?.history ?? [];
 
   const columns = useMemo(
-    () => [
-      historyColumnHelper.accessor("ComicName", {
-        id: "series",
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Series" />
-        ),
-        cell: ({ row }) =>
-          row.original.ComicID ? (
-            <Link
-              to={`/library/${row.original.ComicID}`}
-              className="font-medium hover:text-[var(--primary)]"
-            >
-              {row.original.ComicName || "—"}
-            </Link>
-          ) : (
-            <span className="font-medium">{row.original.ComicName || "—"}</span>
+    () =>
+      historyColumnHelper.columns([
+        historyColumnHelper.accessor("ComicName", {
+          id: "series",
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Series" />
           ),
-      }),
-      historyColumnHelper.accessor("Issue_Number", {
-        id: "issue",
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Issue" />
-        ),
-        cell: ({ getValue }) => (
-          <span className="font-mono text-[11px] text-muted-foreground">
-            {getValue() ? `#${getValue()}` : "—"}
-          </span>
-        ),
-      }),
-      historyColumnHelper.accessor("Provider", {
-        id: "provider",
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Provider" />
-        ),
-        cell: ({ getValue }) => (
-          <span className="text-muted-foreground">{getValue() || "—"}</span>
-        ),
-      }),
-      historyColumnHelper.accessor("Status", {
-        id: "status",
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Status" />
-        ),
-        cell: ({ getValue }) => <StatusPill status={getValue()} />,
-      }),
-      historyColumnHelper.accessor("DateAdded", {
-        id: "date",
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} title="Date" />
-        ),
-        cell: ({ getValue }) => <RelativeTime value={getValue()} />,
-      }),
-    ],
+          cell: ({ row }) =>
+            row.original.ComicID ? (
+              <Link
+                to={`/library/${row.original.ComicID}`}
+                className="font-medium hover:text-[var(--primary)]"
+              >
+                {row.original.ComicName || "—"}
+              </Link>
+            ) : (
+              <span className="font-medium">
+                {row.original.ComicName || "—"}
+              </span>
+            ),
+        }),
+        historyColumnHelper.accessor("Issue_Number", {
+          id: "issue",
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Issue" />
+          ),
+          cell: ({ getValue }) => (
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {getValue() ? `#${getValue()}` : "—"}
+            </span>
+          ),
+        }),
+        historyColumnHelper.accessor("Provider", {
+          id: "provider",
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Provider" />
+          ),
+          cell: ({ getValue }) => (
+            <span className="text-muted-foreground">{getValue() || "—"}</span>
+          ),
+        }),
+        historyColumnHelper.accessor("Status", {
+          id: "status",
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Status" />
+          ),
+          cell: ({ getValue }) => <StatusPill status={getValue()} />,
+        }),
+        historyColumnHelper.accessor("DateAdded", {
+          id: "date",
+          header: ({ column }) => (
+            <DataTableSortHeader column={column} title="Date" />
+          ),
+          cell: ({ getValue }) => <RelativeTime value={getValue()} />,
+        }),
+      ]),
     [],
   );
 

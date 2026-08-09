@@ -1,5 +1,5 @@
-import type { Table as TanstackTable } from "@tanstack/react-table";
 import { DataTable } from "@/components/data-table/DataTable";
+import type { ComicarrTable } from "@/components/data-table/useTableState";
 import type { UpcomingIssue } from "@/types";
 
 interface UpcomingTableProps {
@@ -8,7 +8,7 @@ interface UpcomingTableProps {
    * The page owns the table instance because it owns selection —
    * `BulkActionBar` is its sibling — and this component only renders it.
    */
-  table: TanstackTable<UpcomingIssue>;
+  table: ComicarrTable<UpcomingIssue>;
 }
 
 export default function UpcomingTable({ table }: UpcomingTableProps) {
