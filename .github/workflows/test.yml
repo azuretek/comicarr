@@ -11,10 +11,19 @@ on:
 
 jobs:
   # ===========================================================================
+  # Path detection (shared with CI)
+  # ===========================================================================
+  changes:
+    name: Detect changes
+    uses: ./.github/workflows/detect-changes.yml
+
+  # ===========================================================================
   # Backend Python Tests
   # ===========================================================================
   backend-tests:
     name: Backend Tests (Python ${{ matrix.python-version }})
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -63,6 +72,8 @@ jobs:
 
   migration-dialects:
     name: Schema migrations (${{ matrix.dialect }})
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -137,6 +148,8 @@ jobs:
   # ===========================================================================
   frontend-tests:
     name: Frontend Tests
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -177,11 +190,21 @@ jobs:
 
   # ===========================================================================
   # E2E Tests
+  # Runs when app surfaces change. Unit jobs that were skipped (other side of
+  # the monorepo) do not block; a failing unit job on a side that *did* change
+  # still blocks E2E.
   # ===========================================================================
   e2e-tests:
     name: E2E Smoke Tests
     runs-on: ubuntu-latest
-    needs: [backend-tests, frontend-tests]
+    needs: [changes, backend-tests, frontend-tests]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && needs.changes.outputs.e2e == 'true'
+      && (needs.changes.outputs.backend != 'true' || needs.backend-tests.result == 'success')
+      && (needs.changes.outputs.frontend != 'true' || needs.frontend-tests.result == 'success')
 
     steps:
       - uses: actions/checkout@v7
@@ -251,8 +274,18 @@ jobs:
   e2e-full-tests:
     name: E2E Full Tests
     runs-on: ubuntu-latest
-    needs: [backend-tests, frontend-tests]
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    needs: [changes, backend-tests, frontend-tests]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && (
+        github.event_name == 'schedule'
+        || github.event_name == 'workflow_dispatch'
+        || (github.event_name == 'push' && needs.changes.outputs.e2e == 'true')
+      )
+      && (needs.changes.outputs.backend != 'true' || needs.backend-tests.result == 'success')
+      && (needs.changes.outputs.frontend != 'true' || needs.frontend-tests.result == 'success')
 
     steps:
       - uses: actions/checkout@v7
@@ -318,18 +351,37 @@ jobs:
 
   # ===========================================================================
   # Summary Job
+  # Skipped jobs (path-filtered) are treated as pass; only real failures fail CI.
   # ===========================================================================
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [backend-tests, frontend-tests, e2e-tests, e2e-full-tests, migration-dialects]
+    needs: [changes, backend-tests, frontend-tests, e2e-tests, e2e-full-tests, migration-dialects]
     if: always()
 
     steps:
       - name: Check test results
         run: |
+          echo "changes=${{ needs.changes.result }}"
+          echo "backend-tests=${{ needs.backend-tests.result }}"
+          echo "frontend-tests=${{ needs.frontend-tests.result }}"
+          echo "e2e-tests=${{ needs.e2e-tests.result }}"
+          echo "e2e-full-tests=${{ needs.e2e-full-tests.result }}"
+          echo "migration-dialects=${{ needs.migration-dialects.result }}"
+
+          if [ "${{ needs.changes.result }}" == "failure" ] || [ "${{ needs.changes.result }}" == "cancelled" ]; then
+            echo "Path detection failed!"
+            exit 1
+          fi
+
           if [ "${{ needs.backend-tests.result }}" == "failure" ] || [ "${{ needs.frontend-tests.result }}" == "failure" ] || [ "${{ needs.e2e-tests.result }}" == "failure" ] || [ "${{ needs.e2e-full-tests.result }}" == "failure" ] || [ "${{ needs.migration-dialects.result }}" == "failure" ]; then
             echo "Some tests failed!"
             exit 1
           fi
-          echo "All tests passed!"
+
+          if [ "${{ needs.backend-tests.result }}" == "cancelled" ] || [ "${{ needs.frontend-tests.result }}" == "cancelled" ] || [ "${{ needs.e2e-tests.result }}" == "cancelled" ] || [ "${{ needs.e2e-full-tests.result }}" == "cancelled" ] || [ "${{ needs.migration-dialects.result }}" == "cancelled" ]; then
+            echo "Some tests were cancelled!"
+            exit 1
+          fi
+
+          echo "All required tests passed (skipped path-filtered jobs are OK)."

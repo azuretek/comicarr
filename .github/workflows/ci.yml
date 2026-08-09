@@ -9,6 +9,13 @@ on:
 
 jobs:
   # ===========================================================================
+  # Path detection (shared with Test Suite)
+  # ===========================================================================
+  changes:
+    name: Detect changes
+    uses: ./.github/workflows/detect-changes.yml
+
+  # ===========================================================================
   # PR Title Lint (conventional commits)
   # ===========================================================================
   pr-title:
@@ -37,69 +44,111 @@ jobs:
 
   # ===========================================================================
   # Frontend Lint & Build
+  # Always runs: this job name is a required status check. When there are no
+  # frontend-relevant paths, report success without installing or linting.
   # ===========================================================================
   frontend-ci:
     name: Frontend Lint & Build
+    needs: changes
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
 
     steps:
+      - name: Skip frontend CI (no relevant changes)
+        if: needs.changes.outputs.frontend != 'true'
+        run: |
+          echo "No frontend-relevant paths changed; skipping Frontend Lint & Build."
+          {
+            echo "### Frontend Lint & Build"
+            echo
+            echo "Skipped — no frontend-relevant changes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.frontend == 'true'
 
       - uses: actions/setup-node@v7
+        if: needs.changes.outputs.frontend == 'true'
         with:
           node-version: '22'
           cache: 'npm'
           cache-dependency-path: 'frontend/package-lock.json'
 
       - name: Install dependencies
+        if: needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
         run: npm ci
 
       - name: Lint
+        if: needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
         run: npm run lint
 
       - name: Format check
+        if: needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
         run: npm run format:check
 
       - name: Typecheck
+        if: needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
         run: npm run typecheck
 
       - name: Build
+        if: needs.changes.outputs.frontend == 'true'
+        working-directory: frontend
         run: npm run build
 
   # ===========================================================================
   # Backend Lint
+  # Always runs: this job name is a required status check. When there are no
+  # backend-relevant paths, report success without installing or linting.
   # ===========================================================================
   backend-lint:
     name: Backend Lint
+    needs: changes
     runs-on: ubuntu-latest
 
     steps:
+      - name: Skip backend lint (no relevant changes)
+        if: needs.changes.outputs.backend != 'true'
+        run: |
+          echo "No backend-relevant paths changed; skipping Backend Lint."
+          {
+            echo "### Backend Lint"
+            echo
+            echo "Skipped — no backend-relevant changes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.backend == 'true'
 
       - name: Set up Python 3.11
+        if: needs.changes.outputs.backend == 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
       # Pin to match uv.lock / ruff-pre-commit rev so local hooks and CI agree.
       - name: Install linting tools
+        if: needs.changes.outputs.backend == 'true'
         run: pip install "ruff==0.15.7"
 
       - name: Run ruff linter
+        if: needs.changes.outputs.backend == 'true'
         run: ruff check comicarr/ --output-format=github
 
       - name: Run modern backend quality ratchet
+        if: needs.changes.outputs.backend == 'true'
         run: python scripts/run_ruff.py modern
 
       # Deleting a module-level global cannot make its reassignment fail, so
       # the only gate against GLOBAL_MESSAGES coming back is a source scan.
       - name: Check retired globals stay retired
+        if: needs.changes.outputs.backend == 'true'
         run: python scripts/check_retired_globals.py
 
       - name: Run ruff formatter check
+        if: needs.changes.outputs.backend == 'true'
         run: ruff format --check comicarr/
 
       # The generated TypeScript is a backend artifact — its input is the config
@@ -107,4 +156,5 @@ jobs:
       # The generator loads registry.py by path and needs no project deps, so
       # this runs on the ruff-only install above.
       - name: Check generated settings types are fresh
+        if: needs.changes.outputs.backend == 'true'
         run: python scripts/generate_config_types.py --check
