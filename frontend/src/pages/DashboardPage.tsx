@@ -8,68 +8,23 @@ import {
 } from "@/components/dashboard/DashboardPanel";
 import HealthBand from "@/components/dashboard/HealthBand";
 import InFlightLine from "@/components/dashboard/InFlightLine";
+import LibraryRow from "@/components/dashboard/LibraryRow";
 import NeedsAttentionBand from "@/components/dashboard/NeedsAttentionBand";
 import RecentActivity from "@/components/dashboard/RecentActivity";
 import { panelState, type PanelState } from "@/lib/panelState";
 import { Kbd } from "@/components/ui/kbd";
-import RelativeTime from "@/components/ui/RelativeTime";
 import { useToast } from "@/components/ui/toast";
 import {
   useDashboardLibrary,
   useDashboardScanTargets,
   useDashboardUpcoming,
 } from "@/hooks/useDashboard";
-import { useChatThreads } from "@/hooks/useLibraryChat";
 import {
   useComicScan,
   useComicScanProgress,
   useMangaScan,
   useMangaScanProgress,
 } from "@/hooks/useImport";
-
-function Kpi({
-  label,
-  value,
-  state,
-  onRetry,
-  borderLeft,
-}: {
-  label: string;
-  value: string;
-  state: PanelState;
-  onRetry: () => void;
-  borderLeft?: boolean;
-}) {
-  return (
-    <div className={`px-5 py-4 ${borderLeft ? "border-l border-border" : ""}`}>
-      <div className="mono-label">{label}</div>
-      <div className="flex items-end gap-2 mt-1.5 h-[26px]">
-        {state === "loading" ? (
-          <div
-            aria-hidden="true"
-            className="h-4 w-16 self-center animate-pulse rounded-[2px] bg-primary/10"
-          />
-        ) : state === "unavailable" ? (
-          <div className="flex items-center gap-2 self-center font-mono text-[11px]">
-            <span style={{ color: "var(--status-error)" }}>unavailable</span>
-            <button
-              type="button"
-              onClick={onRetry}
-              aria-label={`Retry ${label}`}
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <RefreshCw className="w-3 h-3" />
-            </button>
-          </div>
-        ) : (
-          <div className="text-[26px] font-semibold tracking-tight leading-none">
-            {value}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
 
 /** Panel heading plus its count and a link out to the full view. */
 function PanelHeader({
@@ -115,23 +70,12 @@ function summarize(state: PanelState, source: string, fact: string): string {
   return fact;
 }
 
-const ASK_SUGGESTIONS = [
-  "Which runs have gaps?",
-  "What landed this week?",
-  "Anything stuck in the queue?",
-];
-
 export default function DashboardPage() {
   const library = useDashboardLibrary();
   const upcoming = useDashboardUpcoming();
   const scanTargets = useDashboardScanTargets();
   const navigate = useNavigate();
-  const chatThreadsQuery = useChatThreads();
   const [question, setQuestion] = useState("");
-
-  const recentChats = (
-    chatThreadsQuery.data?.pages.flatMap((page) => page.threads) || []
-  ).slice(0, 3);
 
   /** Hand the question to the chat workspace, which asks it on arrival. */
   const handleAsk = (event: SubmitEvent<HTMLFormElement>) => {
@@ -152,11 +96,9 @@ export default function DashboardPage() {
 
   const activeSeries = stats?.total_series ?? 0;
   const totalIssues = stats?.total_issues ?? 0;
-  const completion = stats?.completion_pct ?? 0;
 
   const libraryState = panelState(library, false);
   const upcomingState = panelState(upcoming, upcomingReleases.length === 0);
-  const chatsState = panelState(chatThreadsQuery, recentChats.length === 0);
 
   const comicScanning = comicScanProgress?.status === "scanning";
   const mangaScanning = mangaScanProgress?.status === "scanning";
@@ -180,7 +122,7 @@ export default function DashboardPage() {
   const summary = summarize(
     libraryState,
     "library",
-    `${activeSeries} series · ${totalIssues} issues`,
+    `${activeSeries.toLocaleString()} series · ${totalIssues.toLocaleString()} issues`,
   );
 
   const handleLibraryScan = async () => {
@@ -208,7 +150,9 @@ export default function DashboardPage() {
     if (started === scanRequests.length) {
       addToast({
         type: "success",
-        message: `${started === 2 ? "Comic and manga library scans" : "Library scan"} started.`,
+        message: `${
+          started === 2 ? "Comic and manga library scans" : "Library scan"
+        } started.`,
       });
     } else if (started > 0) {
       addToast({
@@ -262,85 +206,35 @@ export default function DashboardPage() {
           whose answer can require action today (dashboard-spec.md §2, §3.1). */}
       <HealthBand />
 
-      {/* Actionable half of failure visibility (dashboard-spec.md §3.2) */}
-      <NeedsAttentionBand />
-
-      {/* How much work is moving, across every route (dashboard-spec.md §3.3) */}
-      <InFlightLine />
-
-      {/* Ask bar — a question here opens as a chat instead of a search */}
-      <div className="px-5 py-3.5 border-b border-border bg-card/30 flex flex-col gap-2.5">
-        <form
-          onSubmit={handleAsk}
-          className="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] border border-border bg-card focus-within:border-primary"
-        >
-          <span className="flex size-4.5 shrink-0 items-center justify-center rounded-[5px] bg-primary/15">
-            <span className="size-[5px] rounded-[1px] bg-primary" />
-          </span>
-          <input
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            aria-label="Ask about your library"
-            placeholder="Ask about your library — gaps, publishers, what to read next…"
-            className="min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-muted-foreground"
-          />
-          <Kbd className="hidden sm:inline-flex">⌘⇧K</Kbd>
-          <button
-            type="submit"
-            aria-label="Ask Comicarr"
-            disabled={!question.trim()}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-primary text-primary-foreground disabled:opacity-40"
-          >
-            <ArrowUp className="w-3.5 h-3.5" />
-          </button>
-        </form>
-        <div className="flex flex-wrap gap-1.5">
-          {ASK_SUGGESTIONS.map((suggestion) => (
-            <button
-              key={suggestion}
-              type="button"
-              onClick={() => setQuestion(suggestion)}
-              className="h-[26px] px-2.5 rounded-full border border-border text-[12px] text-muted-foreground hover:text-foreground hover:border-ring"
-            >
-              {suggestion}
-            </button>
-          ))}
+      {/* Question 2 — what needs me — and, beside it, how much work is moving
+          (dashboard-spec.md §3.2, §3.3, §4). One row, but two queries: each
+          side still reports its own unavailability and retries alone, so a
+          broken band can never take the in-flight count down with it. */}
+      <div
+        className="border-b border-border flex flex-col lg:flex-row lg:items-start"
+        data-testid="attention-inflight-row"
+      >
+        <div className="min-w-0 flex-1 border-b border-border lg:border-b-0">
+          <NeedsAttentionBand />
+        </div>
+        <div className="shrink-0 lg:border-l lg:border-border">
+          <InFlightLine />
         </div>
       </div>
 
-      {/* Everything below the ask bar scrolls inside the page column. */}
+      {/* Everything below the actionable bands scrolls inside the page column. */}
       <div className="flex-1 min-h-0 overflow-auto">
-        {/* KPI strip — the library, and only the library */}
-        <div className="grid grid-cols-2 lg:grid-cols-3 border-b border-border">
-          <Kpi
-            label="Active series"
-            value={String(activeSeries)}
-            state={libraryState}
-            onRetry={() => void library.refetch()}
-          />
-          <Kpi
-            label="Issues"
-            value={String(totalIssues)}
-            state={libraryState}
-            onRetry={() => void library.refetch()}
-            borderLeft
-          />
-          <Kpi
-            label="Completion"
-            value={`${completion.toFixed(1)}%`}
-            state={libraryState}
-            onRetry={() => void library.refetch()}
-            borderLeft
-          />
-        </div>
-
-        {/* Operational summaries */}
-        <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]">
+        {/* Question 3 — what is happening. On narrow viewports these stack in
+            the same priority order: activity first, then what is coming. */}
+        <div
+          className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] border-b border-border min-h-[320px]"
+          data-testid="middle-columns"
+        >
           {/* Narrative recent activity (dashboard-spec.md §3.4) */}
           <RecentActivity />
 
           {/* This week */}
-          <section className="px-5 py-4">
+          <section className="px-5 py-4" data-testid="this-week">
             <PanelHeader
               title="This week"
               meta={countMeta(
@@ -392,45 +286,42 @@ export default function DashboardPage() {
                 ))
               }
             </PanelBody>
-
-            <div className="mt-4 p-3 rounded-[6px] border border-border bg-card">
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <div className="mono-label">Recent chats</div>
-                <Link
-                  to="/chat"
-                  className="font-mono text-[10px] text-primary hover:underline"
-                >
-                  all →
-                </Link>
-              </div>
-              <PanelBody
-                state={chatsState}
-                label="Recent chats"
-                skeleton={<PanelSkeleton rows={3} rowHeight={33} />}
-                empty="no saved chats yet"
-                onRetry={() => void chatThreadsQuery.refetch()}
-                isRetrying={chatThreadsQuery.isFetching}
-              >
-                {() =>
-                  recentChats.map((thread) => (
-                    <Link
-                      key={thread.id}
-                      to={`/chat/${thread.id}`}
-                      className="block px-2 py-1.5 -mx-1 rounded-[6px] hover:bg-accent"
-                    >
-                      <div className="text-[12px] font-medium truncate">
-                        {thread.title}
-                      </div>
-                      <div className="mono-meta text-[10px]">
-                        {thread.message_count} msgs ·{" "}
-                        <RelativeTime value={thread.updated_at} />
-                      </div>
-                    </Link>
-                  ))
-                }
-              </PanelBody>
-            </div>
           </section>
+        </div>
+
+        {/* Question 4 — what the library is. Ambient, one row, and deliberately
+            far from the health band (dashboard-spec.md §3.6). */}
+        <LibraryRow />
+
+        {/* Ask — a feature entry point, not an answer to any of §2's questions,
+            so it sits last (dashboard-spec.md §3.8). The suggestion chips are
+            gone: "Anything stuck in the queue?" was health reporting, and the
+            health band now does that properly. */}
+        <div className="px-5 py-3.5" data-testid="ask-bar">
+          <form
+            onSubmit={handleAsk}
+            className="flex items-center gap-2.5 px-3 py-2.5 rounded-[10px] border border-border bg-card focus-within:border-primary"
+          >
+            <span className="flex size-4.5 shrink-0 items-center justify-center rounded-[5px] bg-primary/15">
+              <span className="size-[5px] rounded-[1px] bg-primary" />
+            </span>
+            <input
+              value={question}
+              onChange={(e) => setQuestion(e.target.value)}
+              aria-label="Ask about your library"
+              placeholder="Ask about your library — gaps, publishers, what to read next…"
+              className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-muted-foreground"
+            />
+            <Kbd className="hidden sm:inline-flex">⌘⇧K</Kbd>
+            <button
+              type="submit"
+              aria-label="Ask Comicarr"
+              disabled={!question.trim()}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-primary text-primary-foreground disabled:opacity-40"
+            >
+              <ArrowUp className="w-3.5 h-3.5" />
+            </button>
+          </form>
         </div>
       </div>
     </div>
