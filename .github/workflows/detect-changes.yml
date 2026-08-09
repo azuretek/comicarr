@@ -1,0 +1,93 @@
+# Shared path detection for CI and Test Suite.
+# Callers that gate required checks must still *run* those jobs and no-op when
+# the matching output is false — skipped required checks block merges.
+name: Detect path changes
+
+on:
+  workflow_call:
+    outputs:
+      backend:
+        description: Backend-relevant paths changed (or forced full run)
+        value: ${{ jobs.detect.outputs.backend }}
+      frontend:
+        description: Frontend-relevant paths changed (or forced full run)
+        value: ${{ jobs.detect.outputs.frontend }}
+      e2e:
+        description: Paths that warrant E2E (or forced full run)
+        value: ${{ jobs.detect.outputs.e2e }}
+
+jobs:
+  detect:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    # Permissions come from the caller job (must grant pull-requests: read so
+    # dorny/paths-filter can list PR files). Do not request more here — nested
+    # jobs cannot escalate beyond what the caller allows.
+    outputs:
+      backend: ${{ steps.resolve.outputs.backend }}
+      frontend: ${{ steps.resolve.outputs.frontend }}
+      e2e: ${{ steps.resolve.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # schedule / workflow_dispatch have no useful path diff — run everything.
+      - name: Force full run for schedule and manual dispatch
+        id: force
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          echo "frontend=true" >> "$GITHUB_OUTPUT"
+          echo "e2e=true" >> "$GITHUB_OUTPUT"
+
+      - name: Filter changed paths
+        id: filter
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        with:
+          filters: |
+            backend:
+              - 'comicarr/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'Comicarr.py'
+              - 'comictagger.py'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'alembic/**'
+              - 'alembic.ini'
+              - '.pre-commit-config.yaml'
+              - 'frontend/src/types/config.generated.ts'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/test.yml'
+              - '.github/workflows/detect-changes.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/test.yml'
+              - '.github/workflows/detect-changes.yml'
+            e2e:
+              - 'frontend/**'
+              - 'comicarr/**'
+              - 'Comicarr.py'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'alembic/**'
+              - 'alembic.ini'
+              - 'Dockerfile'
+              - 'docker/**'
+              - 'docker-compose.yml'
+              - '.github/workflows/test.yml'
+              - '.github/workflows/detect-changes.yml'
+
+      - name: Resolve outputs
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "backend=${{ steps.force.outputs.backend }}" >> "$GITHUB_OUTPUT"
+            echo "frontend=${{ steps.force.outputs.frontend }}" >> "$GITHUB_OUTPUT"
+            echo "e2e=${{ steps.force.outputs.e2e }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend=${{ steps.filter.outputs.backend }}" >> "$GITHUB_OUTPUT"
+            echo "frontend=${{ steps.filter.outputs.frontend }}" >> "$GITHUB_OUTPUT"
+            echo "e2e=${{ steps.filter.outputs.e2e }}" >> "$GITHUB_OUTPUT"
+          fi
