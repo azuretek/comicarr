@@ -14,6 +14,27 @@ import { http, HttpResponse } from "msw";
 import { createTestQueryClient, render, screen } from "../test-utils";
 import DashboardPage from "@/pages/DashboardPage";
 
+/** Enough of `GET /api/search/health` for the band to resolve to "healthy". */
+const HEALTHY_HEALTH = {
+  viable_route: true,
+  routes: {
+    nzb: {
+      ready: true,
+      reason: "ready",
+      downstream: "sabnzbd",
+      providers: [
+        { name: "nzbgeek", kind: "newznab", blocked: false, attempted: true },
+      ],
+    },
+  },
+  workers: { search: { state: "idle", alive: true, healthy: true } },
+  maintenance: { blocked: false },
+  blocked_producer_count: 0,
+  providers: [
+    { provider: "nzbgeek", lastrun: Math.floor(Date.now() / 1000) - 720 },
+  ],
+};
+
 function LocationProbe() {
   return <div data-testid="location">{useLocation().pathname}</div>;
 }
@@ -39,22 +60,32 @@ describe("DashboardPage", () => {
     });
   });
 
-  it("renders KPI strip with stats", async () => {
+  it("reduces the library to one row of numbers", async () => {
     render(<DashboardPage />);
 
-    // KPI labels appear immediately; values arrive once the query resolves.
     await waitFor(() => {
       expect(screen.getByText("50.0%")).toBeTruthy();
     });
 
-    expect(screen.getByText("Active series")).toBeTruthy();
-    expect(screen.getByText("Issues")).toBeTruthy();
-    expect(screen.getByText("Completion")).toBeTruthy();
+    // One row, not three hero tiles (dashboard-spec.md §3.6).
+    const row = screen.getByTestId("library-row");
+    expect(row.textContent).toBe(
+      "10 series·250 issues held·50.0% of known issues heldnot a health metric",
+    );
+    expect(screen.queryByText("Active series")).toBeNull();
+    expect(screen.queryByText("Completion")).toBeNull();
     // The Queue tile is gone: it counted active DDL items only, so it read
     // "0 queued" while SABnzbd was downloading (dashboard-spec.md §3.7).
     expect(screen.queryByText("Queue")).toBeNull();
-    expect(screen.getByText("10")).toBeTruthy();
-    expect(screen.getByText("250")).toBeTruthy();
+  });
+
+  it("labels completion as issues held vs. issues known", async () => {
+    render(<DashboardPage />);
+
+    // Never "Completion", which reads as a health score — and never adjacent
+    // to the health band, where it would read as one (dashboard-spec.md §3.6).
+    expect(await screen.findByText("of known issues held")).toBeTruthy();
+    expect(screen.getByText("not a health metric")).toBeTruthy();
   });
 
   it("renders the recent activity preview from the narrative stream", async () => {
@@ -119,8 +150,9 @@ describe("DashboardPage", () => {
 
     // Deep-link matches Activity Center subject routing.
     expect(
-      (screen.getByRole("link", { name: "Saga #12" }) as HTMLAnchorElement)
-        .getAttribute("href"),
+      (
+        screen.getByRole("link", { name: "Saga #12" }) as HTMLAnchorElement
+      ).getAttribute("href"),
     ).toBe("/library/42/issue/901");
   });
 
@@ -128,9 +160,7 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     // The default fixture reports 2 in flight, none of it recovered.
-    expect(
-      await screen.findByRole("link", { name: "In flight" }),
-    ).toBeTruthy();
+    expect(await screen.findByRole("link", { name: "In flight" })).toBeTruthy();
     expect(screen.getByText("2 in flight")).toBeTruthy();
   });
 
@@ -139,7 +169,9 @@ describe("DashboardPage", () => {
 
     // Default mock has zero groups — calm, not an empty card with a heading.
     expect(await screen.findByText("Nothing needs you")).toBeTruthy();
-    expect(screen.queryByRole("region", { name: "Needs attention" })).toBeNull();
+    expect(
+      screen.queryByRole("region", { name: "Needs attention" }),
+    ).toBeNull();
   });
 
   it("qualifies the in-flight count with restart recoveries", async () => {
@@ -300,9 +332,7 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/No activity in the last 30 days/),
-      ).toBeTruthy();
+      expect(screen.getByText(/No activity in the last 30 days/)).toBeTruthy();
       expect(screen.getByText("nothing upcoming this week")).toBeTruthy();
     });
     expect(
@@ -408,9 +438,10 @@ describe("DashboardPage", () => {
     await waitFor(() => {
       expect(screen.getByText(/library unavailable/)).toBeTruthy();
     });
-    // All three tiles read the library, so all three report unavailable —
-    // while the in-flight line, on its own endpoint, still answers.
-    expect(screen.getAllByText("unavailable").length).toBe(3);
+    // The row says so once and retries itself — while the in-flight line, on
+    // its own endpoint, still answers.
+    expect(screen.getByText("Library unavailable")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry Library" })).toBeTruthy();
     expect(screen.getByText("2 in flight")).toBeTruthy();
     expect(screen.queryByText("50.0%")).toBeNull();
   });
@@ -434,13 +465,96 @@ describe("DashboardPage", () => {
     ).toBeTruthy();
   });
 
-  it("renders the recent chats card", async () => {
+  it("keeps no chat surface above the fold", async () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Recent chats")).toBeTruthy();
+      expect(screen.getByText("This week")).toBeTruthy();
     });
-    expect(screen.getByRole("link", { name: "all →" })).toBeTruthy();
+    // Ask is demoted to the bottom of the page, and the recent-chats card that
+    // sat beside "This week" goes with it (dashboard-spec.md §3.8).
+    expect(screen.queryByText("Recent chats")).toBeNull();
+    expect(screen.queryByRole("link", { name: "all →" })).toBeNull();
+  });
+
+  it("orders the page by the priority of questions", async () => {
+    server.use(
+      http.get("/api/search/health", () => HttpResponse.json(HEALTHY_HEALTH)),
+    );
+
+    const { container } = render(<DashboardPage />);
+
+    // Wait for every band to have resolved so none is still a skeleton.
+    const health = await screen.findByRole("region", {
+      name: "Acquisition health",
+    });
+    await screen.findByText("Nothing needs you");
+    await screen.findByText("50.0%");
+
+    // §4's vertical order is §2's priority order: health, what needs me, what
+    // is happening, what my library is, and only then the feature entry point.
+    const anchors = [
+      health,
+      ...[
+        "needs-attention-empty",
+        "recent-activity",
+        "library-row",
+        "ask-bar",
+      ].map((id) => {
+        const node = container.querySelector(`[data-testid="${id}"]`);
+        expect(node, `missing ${id}`).toBeTruthy();
+        return node as HTMLElement;
+      }),
+    ];
+
+    for (let i = 1; i < anchors.length; i += 1) {
+      // DOCUMENT_POSITION_FOLLOWING === 4: each anchor precedes the next one.
+      expect(
+        anchors[i - 1].compareDocumentPosition(anchors[i]) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+
+    // Ambient library numbers are never adjacent to the health band, where
+    // completion would read as a health score (dashboard-spec.md §3.6).
+    expect(health.nextElementSibling).not.toBe(anchors[3]);
+  });
+
+  it("stacks the middle columns in priority order on narrow viewports", async () => {
+    const { container } = render(<DashboardPage />);
+
+    await screen.findByText("This week");
+
+    // The two middle panels share one grid: a single column below `lg`, two
+    // columns above it. Stacking follows source order, so the narrow layout
+    // puts recent activity above this week — the same priority order as wide.
+    const grid = container.querySelector('[data-testid="middle-columns"]');
+    expect(grid).toBeTruthy();
+    expect(grid!.className).toContain("grid-cols-1");
+    expect(grid!.className).toContain("lg:grid-cols-[2fr_1fr]");
+
+    const activity = screen.getByTestId("recent-activity");
+    const week = screen.getByTestId("this-week");
+    expect(grid!.children[0].contains(activity)).toBe(true);
+    expect(grid!.children[1].contains(week)).toBe(true);
+  });
+
+  it("puts needs-attention and in flight on one row without coupling them", async () => {
+    server.use(
+      http.get("/api/activity/band", () =>
+        HttpResponse.json({ detail: "unavailable" }, { status: 503 }),
+      ),
+    );
+
+    render(<DashboardPage />);
+
+    // Sharing a row is a layout fact, not a data one: a failed band still
+    // leaves the in-flight count, on its own endpoint, answering.
+    await waitFor(() => {
+      expect(screen.getByText("Needs attention unavailable")).toBeTruthy();
+    });
+    expect(screen.getByText("2 in flight")).toBeTruthy();
+    expect(screen.getByTestId("attention-inflight-row")).toBeTruthy();
   });
 
   it("hands a typed question to the chat workspace", async () => {
@@ -456,10 +570,7 @@ describe("DashboardPage", () => {
     const ask = await screen.findByRole("textbox", {
       name: "Ask about your library",
     });
-    await user.click(
-      screen.getByRole("button", { name: "Which runs have gaps?" }),
-    );
-    expect((ask as HTMLInputElement).value).toBe("Which runs have gaps?");
+    await user.type(ask, "Which runs have gaps?");
 
     await user.click(screen.getByRole("button", { name: "Ask Comicarr" }));
     await waitFor(() => {

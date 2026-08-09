@@ -100,7 +100,10 @@ export default function RecentActivity() {
         : `${events.length} event${events.length === 1 ? "" : "s"} · ${days} days`;
 
   return (
-    <section className="px-5 py-4 lg:border-r lg:border-border">
+    <section
+      className="px-5 py-4 lg:border-r lg:border-border"
+      data-testid="recent-activity"
+    >
       <div className="flex items-center justify-between gap-3 mb-3">
         <div className="flex items-center gap-2.5">
           <div className="text-[13px] font-semibold">Recent activity</div>

@@ -18,7 +18,7 @@ export default function InFlightLine() {
 
   if (status.isPending) {
     return (
-      <div className="px-5 py-2.5 border-b border-border">
+      <div className="px-5 py-2.5">
         <div
           aria-hidden="true"
           className="h-2.5 w-40 animate-pulse rounded-[2px] bg-primary/10"
@@ -29,7 +29,7 @@ export default function InFlightLine() {
 
   if (status.isError) {
     return (
-      <div className="px-5 border-b border-border">
+      <div className="px-5">
         <PanelUnavailable
           label="In flight"
           onRetry={() => void status.refetch()}
@@ -45,7 +45,7 @@ export default function InFlightLine() {
   });
 
   return (
-    <div className="px-5 py-2.5 border-b border-border">
+    <div className="px-5 py-2.5">
       <Link
         to="/activity"
         aria-label="In flight"

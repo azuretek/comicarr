@@ -37,8 +37,12 @@ function batchSummary(result: BandBatchResult): string {
   const verb = actionLabel(result.action);
   const head =
     result.succeeded === result.processed
-      ? `${verb} — ${result.succeeded} ${result.succeeded === 1 ? "issue" : "issues"}.`
-      : `${verb} ${result.succeeded} of ${result.processed} — ${result.failed} still ${result.failed === 1 ? "needs" : "need"} attention.`;
+      ? `${verb} — ${result.succeeded} ${
+          result.succeeded === 1 ? "issue" : "issues"
+        }.`
+      : `${verb} ${result.succeeded} of ${result.processed} — ${
+          result.failed
+        } still ${result.failed === 1 ? "needs" : "need"} attention.`;
   if (!result.capped) return head;
   return `${head} ${result.skipped_for_cap} left for another go (max ${result.cap} at a time).`;
 }
@@ -54,7 +58,9 @@ function GroupRow({
 }) {
   const accent = stageAccent(group.stage);
   const mixed = group.available_actions.length === 0;
-  const triageGroupHref = `${TRIAGE_HREF}?group=${encodeURIComponent(group.group_key)}`;
+  const triageGroupHref = `${TRIAGE_HREF}?group=${encodeURIComponent(
+    group.group_key,
+  )}`;
 
   return (
     <div
@@ -150,10 +156,7 @@ export default function NeedsAttentionBand() {
 
   if (band.isPending) {
     return (
-      <div
-        className="px-5 py-2.5 border-b border-border"
-        data-testid="needs-attention-loading"
-      >
+      <div className="px-5 py-2.5" data-testid="needs-attention-loading">
         <div
           aria-hidden="true"
           className="h-2.5 w-48 animate-pulse rounded-[2px] bg-primary/10"
@@ -164,7 +167,7 @@ export default function NeedsAttentionBand() {
 
   if (band.isError) {
     return (
-      <div className="px-5 border-b border-border">
+      <div className="px-5">
         <PanelUnavailable
           label="Needs attention"
           onRetry={() => void band.refetch()}
@@ -182,10 +185,7 @@ export default function NeedsAttentionBand() {
 
   if (total === 0) {
     return (
-      <div
-        className="px-5 py-2.5 border-b border-border"
-        data-testid="needs-attention-empty"
-      >
+      <div className="px-5 py-2.5" data-testid="needs-attention-empty">
         <span className="font-mono text-[11px] text-muted-foreground">
           Nothing needs you
         </span>
@@ -196,7 +196,6 @@ export default function NeedsAttentionBand() {
   return (
     <section
       aria-label="Needs attention"
-      className="border-b border-border"
       style={{
         background:
           "var(--status-error-bg, color-mix(in oklab, var(--status-error) 8%, transparent))",
