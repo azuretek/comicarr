@@ -1,9 +1,9 @@
 import { Fragment, type ReactNode } from "react";
-import {
-  flexRender,
-  type Row,
-  type Table as TanstackTable,
-} from "@tanstack/react-table";
+import { flexRender, type RowData } from "@tanstack/react-table";
+import type {
+  ComicarrRow,
+  ComicarrTable,
+} from "@/components/data-table/useTableState";
 import {
   Table,
   TableBody,
@@ -14,14 +14,14 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
-interface DataTableProps<TData> {
-  table: TanstackTable<TData>;
+interface DataTableProps<TData extends RowData> {
+  table: ComicarrTable<TData>;
   onRowClick?: (row: TData) => void;
-  renderSubRow?: (row: Row<TData>, colSpan: number) => ReactNode;
+  renderSubRow?: (row: ComicarrRow<TData>, colSpan: number) => ReactNode;
   className?: string;
 }
 
-export function DataTable<TData>({
+export function DataTable<TData extends RowData>({
   table,
   onRowClick,
   renderSubRow,
