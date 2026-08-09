@@ -20,9 +20,9 @@ jobs:
   detect:
     name: Detect changes
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
+    # Permissions come from the caller job (must grant pull-requests: read so
+    # dorny/paths-filter can list PR files). Do not request more here — nested
+    # jobs cannot escalate beyond what the caller allows.
     outputs:
       backend: ${{ steps.resolve.outputs.backend }}
       frontend: ${{ steps.resolve.outputs.frontend }}

@@ -16,6 +16,9 @@ jobs:
   changes:
     name: Detect changes
     uses: ./.github/workflows/detect-changes.yml
+    permissions:
+      contents: read
+      pull-requests: read
 
   # ===========================================================================
   # Backend Python Tests
