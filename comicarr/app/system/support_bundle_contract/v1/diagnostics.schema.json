@@ -1,0 +1,673 @@
+{
+  "$id": "urn:comicarr:support-bundle:diagnostics:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "build": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "enum": [
+            "verified_release",
+            "custom",
+            "unverified"
+          ],
+          "type": "string"
+        },
+        "install_method": {
+          "enum": [
+            "docker",
+            "source",
+            "package",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "release_version": {
+          "maxLength": 17,
+          "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "release_version",
+        "identity",
+        "install_method"
+      ],
+      "type": "object"
+    },
+    "configuration": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisition": {
+          "additionalProperties": false,
+          "properties": {
+            "ddl": {
+              "additionalProperties": false,
+              "properties": {
+                "client": {
+                  "enum": [
+                    "local",
+                    "disabled",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "enabled": {
+                  "enum": [
+                    "enabled",
+                    "disabled",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "enabled",
+                "client"
+              ],
+              "type": "object"
+            },
+            "nzb": {
+              "additionalProperties": false,
+              "properties": {
+                "client": {
+                  "enum": [
+                    "sabnzbd",
+                    "nzbget",
+                    "blackhole",
+                    "disabled",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "enabled": {
+                  "enum": [
+                    "enabled",
+                    "disabled",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "enabled",
+                "client"
+              ],
+              "type": "object"
+            },
+            "torrent": {
+              "additionalProperties": false,
+              "properties": {
+                "client": {
+                  "enum": [
+                    "watchfolder",
+                    "utorrent",
+                    "rtorrent",
+                    "transmission",
+                    "deluge",
+                    "qbittorrent",
+                    "disabled",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "enabled": {
+                  "enum": [
+                    "enabled",
+                    "disabled",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "enabled",
+                "client"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ddl",
+            "nzb",
+            "torrent"
+          ],
+          "type": "object"
+        },
+        "automation": {
+          "additionalProperties": false,
+          "properties": {
+            "post_processing": {
+              "enum": [
+                "enabled",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "rss": {
+              "enum": [
+                "enabled",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "update_checks": {
+              "enum": [
+                "enabled",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "post_processing",
+            "rss",
+            "update_checks"
+          ],
+          "type": "object"
+        },
+        "integrations": {
+          "additionalProperties": false,
+          "properties": {
+            "ai": {
+              "enum": [
+                "configured",
+                "not_configured",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "comicvine": {
+              "enum": [
+                "configured",
+                "not_configured",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "mangadex": {
+              "enum": [
+                "configured",
+                "not_configured",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "metron": {
+              "enum": [
+                "configured",
+                "not_configured",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "myanimelist": {
+              "enum": [
+                "configured",
+                "not_configured",
+                "disabled",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "comicvine",
+            "metron",
+            "mangadex",
+            "myanimelist",
+            "ai"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "automation",
+        "integrations",
+        "acquisition"
+      ],
+      "type": "object"
+    },
+    "database": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisition_schema_state": {
+          "enum": [
+            "ready",
+            "not_ready",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "acquisition_schema_version": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "count_buckets": {
+          "additionalProperties": false,
+          "properties": {
+            "annuals": {
+              "enum": [
+                "zero",
+                "one",
+                "2_9",
+                "10_99",
+                "100_999",
+                "1k_9k",
+                "10k_99k",
+                "100k_plus"
+              ],
+              "type": "string"
+            },
+            "in_flight": {
+              "enum": [
+                "zero",
+                "one",
+                "2_9",
+                "10_99",
+                "100_999",
+                "1k_9k",
+                "10k_99k",
+                "100k_plus"
+              ],
+              "type": "string"
+            },
+            "issues": {
+              "enum": [
+                "zero",
+                "one",
+                "2_9",
+                "10_99",
+                "100_999",
+                "1k_9k",
+                "10k_99k",
+                "100k_plus"
+              ],
+              "type": "string"
+            },
+            "recovery_pending": {
+              "enum": [
+                "zero",
+                "one",
+                "2_9",
+                "10_99",
+                "100_999",
+                "1k_9k",
+                "10k_99k",
+                "100k_plus"
+              ],
+              "type": "string"
+            },
+            "series": {
+              "enum": [
+                "zero",
+                "one",
+                "2_9",
+                "10_99",
+                "100_999",
+                "1k_9k",
+                "10k_99k",
+                "100k_plus"
+              ],
+              "type": "string"
+            },
+            "wanted": {
+              "enum": [
+                "zero",
+                "one",
+                "2_9",
+                "10_99",
+                "100_999",
+                "1k_9k",
+                "10k_99k",
+                "100k_plus"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "series",
+            "issues",
+            "annuals",
+            "wanted",
+            "in_flight",
+            "recovery_pending"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "acquisition_schema_state",
+        "acquisition_schema_version"
+      ],
+      "type": "object"
+    },
+    "health": {
+      "additionalProperties": false,
+      "properties": {
+        "maintenance": {
+          "enum": [
+            "clear",
+            "blocked",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "overall": {
+          "enum": [
+            "healthy",
+            "degraded",
+            "blocked",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "routes": {
+          "additionalProperties": false,
+          "properties": {
+            "ddl": {
+              "additionalProperties": false,
+              "properties": {
+                "last_success_age": {
+                  "enum": [
+                    "lt_5m",
+                    "5m_30m",
+                    "30m_2h",
+                    "2h_24h",
+                    "1d_7d",
+                    "gt_7d",
+                    "never",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "ready",
+                    "disabled",
+                    "maintenance_blocked",
+                    "client_not_ready",
+                    "path_not_ready",
+                    "providers_blocked",
+                    "restart_unsafe",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "last_success_age"
+              ],
+              "type": "object"
+            },
+            "nzb": {
+              "additionalProperties": false,
+              "properties": {
+                "last_success_age": {
+                  "enum": [
+                    "lt_5m",
+                    "5m_30m",
+                    "30m_2h",
+                    "2h_24h",
+                    "1d_7d",
+                    "gt_7d",
+                    "never",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "ready",
+                    "disabled",
+                    "maintenance_blocked",
+                    "client_not_ready",
+                    "path_not_ready",
+                    "providers_blocked",
+                    "restart_unsafe",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "last_success_age"
+              ],
+              "type": "object"
+            },
+            "torrent": {
+              "additionalProperties": false,
+              "properties": {
+                "last_success_age": {
+                  "enum": [
+                    "lt_5m",
+                    "5m_30m",
+                    "30m_2h",
+                    "2h_24h",
+                    "1d_7d",
+                    "gt_7d",
+                    "never",
+                    "unknown"
+                  ],
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "ready",
+                    "disabled",
+                    "maintenance_blocked",
+                    "client_not_ready",
+                    "path_not_ready",
+                    "providers_blocked",
+                    "restart_unsafe",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "last_success_age"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ddl",
+            "nzb",
+            "torrent"
+          ],
+          "type": "object"
+        },
+        "scheduler": {
+          "additionalProperties": false,
+          "properties": {
+            "import_scan": {
+              "enum": [
+                "running",
+                "waiting",
+                "paused",
+                "failed",
+                "stopped",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "rss": {
+              "enum": [
+                "running",
+                "waiting",
+                "paused",
+                "failed",
+                "stopped",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "search": {
+              "enum": [
+                "running",
+                "waiting",
+                "paused",
+                "failed",
+                "stopped",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            "weekly": {
+              "enum": [
+                "running",
+                "waiting",
+                "paused",
+                "failed",
+                "stopped",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "search",
+            "rss",
+            "weekly",
+            "import_scan"
+          ],
+          "type": "object"
+        },
+        "search_worker": {
+          "enum": [
+            "healthy",
+            "stale",
+            "failed",
+            "stopped",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "viable_route": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "overall",
+        "maintenance",
+        "viable_route",
+        "search_worker",
+        "scheduler",
+        "routes"
+      ],
+      "type": "object"
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture": {
+          "enum": [
+            "x86_64",
+            "x86",
+            "arm64",
+            "arm",
+            "other",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "database_dialect": {
+          "enum": [
+            "sqlite",
+            "postgresql",
+            "mysql",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "dependencies": {
+          "additionalProperties": false,
+          "properties": {
+            "apscheduler": {
+              "maxLength": 17,
+              "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+              "type": "string"
+            },
+            "fastapi": {
+              "maxLength": 17,
+              "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+              "type": "string"
+            },
+            "sqlalchemy": {
+              "maxLength": 17,
+              "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+              "type": "string"
+            },
+            "starlette": {
+              "maxLength": 17,
+              "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+              "type": "string"
+            },
+            "urllib3": {
+              "maxLength": 17,
+              "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+              "type": "string"
+            },
+            "uvicorn": {
+              "maxLength": 17,
+              "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "apscheduler",
+            "fastapi",
+            "sqlalchemy",
+            "starlette",
+            "urllib3",
+            "uvicorn"
+          ],
+          "type": "object"
+        },
+        "os_family": {
+          "enum": [
+            "linux",
+            "windows",
+            "macos",
+            "bsd",
+            "other",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "python_version": {
+          "maxLength": 17,
+          "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "os_family",
+        "architecture",
+        "python_version",
+        "database_dialect",
+        "dependencies"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "build",
+    "runtime",
+    "configuration"
+  ],
+  "type": "object"
+}

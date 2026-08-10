@@ -34,6 +34,7 @@ dependencies = [
     "urllib3>=2.7.0",
     "user_agent2>=2021.12.11",
     "uvicorn[standard]>=0.30.0",
+    "jsonschema>=4.26.0",
 ]
 
 [project.optional-dependencies]
@@ -66,6 +67,7 @@ include = ["comicarr*"]
 
 [tool.setuptools.package-data]
 "comicarr._vendor" = ["**/LICENSE", "**/COPYING", "**/NOTICE"]
+"comicarr.app.system.support_bundle_contract" = ["v1/*"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

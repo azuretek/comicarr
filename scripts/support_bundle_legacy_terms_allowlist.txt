@@ -1,0 +1,22 @@
+# Exact path-and-match allowlist for legacy CarePackage identifiers.
+# Format: path|substring
+# Paths are relative to the repository root. Matches are case-sensitive.
+# New user-facing CarePackage language must not be added; only historical
+# implementation identifiers and tests belong here.
+
+comicarr/carepackage.py|carePackage
+comicarr/carepackage.py|CarePackage
+tests/unit/test_carepackage_security.py|carePackage
+tests/unit/test_carepackage_security.py|CarePackage
+tests/unit/test_carepackage_security.py|carepackage
+tests/unit/test_support_bundle.py|carepackage
+tests/unit/test_support_bundle.py|carePackage
+CONTEXT.md|CarePackage
+docs/architecture/support-bundle-spec.md|CarePackage
+scripts/check_support_bundle_terms.py|CarePackage
+scripts/check_support_bundle_terms.py|Care Package
+scripts/check_support_bundle_terms.py|care package
+scripts/support_bundle_legacy_terms_allowlist.txt|CarePackage
+scripts/support_bundle_legacy_terms_allowlist.txt|Care Package
+scripts/support_bundle_legacy_terms_allowlist.txt|care package
+CHANGELOG.md|CarePackage

@@ -18,7 +18,7 @@ import asyncio
 import json
 import threading
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
@@ -32,6 +32,7 @@ from comicarr.app.core.security import (
     validate_jwt_token,
 )
 from comicarr.app.system import service as system_service
+from comicarr.app.system import support_bundle as support_bundle_module
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -625,3 +626,53 @@ async def release_acquisition_canary(
         reason=reason,
     )
     return _repair_response(result)
+
+
+# ---------------------------------------------------------------------------
+# Support bundle
+# ---------------------------------------------------------------------------
+
+
+@router.post("/system/support-bundle", dependencies=[Depends(require_session)])
+def create_support_bundle(ctx: AppContext = Depends(get_context)):
+    """Generate and download a Support bundle ZIP (session-authenticated only)."""
+    try:
+        artifact = support_bundle_module.generate_support_bundle(ctx)
+    except support_bundle_module.SupportBundleInProgress:
+        body = support_bundle_module.error_body("support_bundle_in_progress")
+        return JSONResponse(
+            status_code=409,
+            content=body,
+            headers={"Retry-After": "2"},
+        )
+    except support_bundle_module.SupportBundleUnavailable:
+        return JSONResponse(
+            status_code=503,
+            content=support_bundle_module.error_body("support_bundle_unavailable"),
+        )
+    except support_bundle_module.SupportBundleValidationFailed:
+        return JSONResponse(
+            status_code=500,
+            content=support_bundle_module.error_body("support_bundle_validation_failed"),
+        )
+    except support_bundle_module.SupportBundleError as exc:
+        status = 503 if exc.code == "support_bundle_unavailable" else 500
+        return JSONResponse(status_code=status, content=support_bundle_module.error_body(exc.code))
+    except Exception as e:
+        logger.error("[SUPPORT-BUNDLE] unexpected adapter failure: %s" % type(e).__name__)
+        return JSONResponse(
+            status_code=500,
+            content=support_bundle_module.error_body("support_bundle_generation_failed"),
+        )
+
+    return Response(
+        content=artifact.content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "X-Comicarr-Support-Bundle-Contract": str(artifact.contract_version),
+            "X-Comicarr-Support-Bundle-Status": artifact.status,
+        },
+    )
