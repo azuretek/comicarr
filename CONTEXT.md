@@ -19,3 +19,7 @@ Who issued a Series' identifier: ComicVine, MangaDex (`md-` prefix), or MyAnimeL
 ## Chapter source
 
 The MangaDex UUID a manga Series polls for new chapters. MangaDex Series carry it in their ComicID; MyAnimeList Series supply metadata from MAL but keep the chapter source in `MangaDexID`, and have none until it is resolved.
+
+## Support bundle
+
+A downloadable archive of allowlisted diagnostic data, engineered for public issue attachment after operator review. If its contents appear sensitive, the operator shares it privately with maintainers instead; CarePackage is the legacy implementation name, not the user-facing term.
