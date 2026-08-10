@@ -23,7 +23,7 @@ You should receive a response within 72 hours. We will work with you to understa
 - Configuration files with credentials (`config.ini`) are excluded from version control
 - The Docker image runs as a non-root user with configurable PUID/PGID
 - All database queries use parameterized statements to prevent SQL injection
-- The CarePackage feature redacts sensitive fields before export
+- The Support bundle exports only allowlisted diagnostic facts; operators must review the archive before public attachment
 
 ## Known Scanner Findings
 

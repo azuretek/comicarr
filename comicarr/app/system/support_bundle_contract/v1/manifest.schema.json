@@ -1,0 +1,237 @@
+{
+  "$id": "urn:comicarr:support-bundle:manifest:1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "bundle_status": {
+      "enum": [
+        "complete",
+        "partial"
+      ],
+      "type": "string"
+    },
+    "contract_version": {
+      "const": 1
+    },
+    "generated_at": {
+      "pattern": "^[2-9][0-9]{3}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$",
+      "type": "string"
+    },
+    "members": {
+      "items": false,
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "const": "README.txt"
+            },
+            "sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 16384,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "size_bytes",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "const": "manifest.json"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "const": "diagnostics.json"
+            },
+            "sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 262144,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "size_bytes",
+            "sha256"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "array",
+      "unevaluatedItems": false
+    },
+    "operator_review_required": {
+      "const": true
+    },
+    "product": {
+      "const": "Comicarr"
+    },
+    "product_version": {
+      "maxLength": 17,
+      "pattern": "^(?:unknown|(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4}))$",
+      "type": "string"
+    },
+    "sources": {
+      "additionalProperties": false,
+      "properties": {
+        "build": {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "available"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        "configuration": {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "available"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        "database": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "const": "available"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "access_denied",
+                    "query_failed",
+                    "schema_unavailable",
+                    "dependency_unavailable",
+                    "unsupported"
+                  ],
+                  "type": "string"
+                },
+                "status": {
+                  "const": "unavailable"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "health": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "const": "available"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "access_denied",
+                    "query_failed",
+                    "schema_unavailable",
+                    "dependency_unavailable",
+                    "unsupported"
+                  ],
+                  "type": "string"
+                },
+                "status": {
+                  "const": "unavailable"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "runtime": {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "available"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "build",
+        "runtime",
+        "configuration",
+        "database",
+        "health"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "contract_version",
+    "product",
+    "product_version",
+    "generated_at",
+    "bundle_status",
+    "operator_review_required",
+    "members",
+    "sources"
+  ],
+  "type": "object"
+}

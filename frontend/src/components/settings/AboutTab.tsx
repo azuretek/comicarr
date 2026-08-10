@@ -1,5 +1,6 @@
 import { SettingGroup } from "./SettingGroup";
 import { SettingField } from "./SettingField";
+import { SupportBundleSection } from "./SupportBundleSection";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { useForceVersionCheck, useVersionInfo } from "@/hooks/useVersion";
@@ -113,6 +114,8 @@ export function AboutTab({ config, formData, onChange }: AboutTabProps) {
       >
         <WhatsNewArchive />
       </SettingGroup>
+
+      <SupportBundleSection />
 
       <SettingGroup
         title="Build / environment"

@@ -202,7 +202,7 @@ When to add one:
 ## Reporting Issues
 
 - Use the [Bug Report](https://github.com/frankieramirez/comicarr/issues/new?template=bug_report.md) template
-- Include a CarePackage (available on the config page) when reporting bugs
+- Include a Support bundle from **Settings → About** when reporting bugs (review the three files first; share privately with a maintainer if anything looks sensitive)
 - For feature requests, use the [Feature Request](https://github.com/frankieramirez/comicarr/issues/new?template=feature_request.md) template
 
 ## License

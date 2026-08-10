@@ -442,19 +442,27 @@ describe("SettingsPage", () => {
       await screen.findByText("Update available: 0.21.0 → 0.22.0"),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Check now" })).toBeTruthy();
-    // Order: Updates before What's new before build rows.
+    // Order: Updates → What's new → Support bundle → Build / environment.
     const updates = screen.getByText("Updates");
     // SettingGroup title (exact); archive no longer duplicates an h2.
     const whatsNew = screen.getByText("What's new");
     expect(await screen.findByTestId("whats-new-archive-summary")).toBeTruthy();
+    const supportBundle = screen.getByText("Support bundle");
     const build = screen.getByText("Build / environment");
     expect(
       updates.compareDocumentPosition(whatsNew) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      whatsNew.compareDocumentPosition(build) &
+      whatsNew.compareDocumentPosition(supportBundle) &
         Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      supportBundle.compareDocumentPosition(build) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Create support bundle" }),
     ).toBeTruthy();
     // AUTO_UPDATE must not appear.
     expect(screen.queryByText(/auto.?update/i)).toBeNull();

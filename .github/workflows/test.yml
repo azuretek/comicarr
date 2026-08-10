@@ -139,6 +139,11 @@ jobs:
           DATABASE_URL: ${{ matrix.database_url }}
         run: uv run pytest tests/integration/test_schema_migration_dialects.py -q
 
+      - name: Support bundle dialect projection
+        env:
+          DATABASE_URL: ${{ matrix.database_url }}
+        run: uv run pytest tests/integration/test_support_bundle_dialects.py -q
+
       - name: Check adopted schema
         env:
           DATABASE_URL: ${{ matrix.database_url }}

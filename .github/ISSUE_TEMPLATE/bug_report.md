@@ -11,13 +11,13 @@ assignees: ''
 **Describe the bug**
 A clear and concise description of what the bug is.
 
-**CarePackage**
-On the config page, there is a button labelled "CarePackage". Pressing this button will download a zip file containing a redacted copy of your config, your database, a summary of your operating environment, and your logs. Upload that file here.
+**Support bundle**
+1. Go to **Settings → About → Support bundle**.
+2. Choose **Create support bundle**, then **Create and download**.
+3. Open the ZIP and review its three files (`README.txt`, `manifest.json`, `diagnostics.json`).
+4. Attach the archive to this issue only if you are comfortable with every value; otherwise share it privately with a maintainer.
 
-If you're uncomfortable with pasting your CarePackage, include a DEBUG log containing the error from disk. 
-
-Do not paste from the GUI log.
-Do not just paste a traceback/error.
+The bundle contains allowlisted diagnostic facts only. It is not a copy of your database, settings values, raw logs, library names, paths, or free text.
 
 
 **Environment (please complete the following information):**
