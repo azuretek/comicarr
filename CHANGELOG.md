@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.27.1
+
+### Patch Changes
+
+- ef8f7cc: Make blocked Usenet searches actionable with editable Newznab and SABnzbd settings, clearer route diagnostics, and credential-safe configuration updates.
+
 ## 0.27.0
 
 ### Minor Changes
