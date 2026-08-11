@@ -386,6 +386,7 @@ WRITABLE_CONFIG_KEYS = writable_keys()
 def update_config(ctx, key_values):
     """Update configuration key-values and trigger scheduler reconfiguration."""
     import comicarr
+    from comicarr.config import config_transaction_lock
 
     if not ctx.config:
         return {"success": False, "error": "Config not loaded"}
@@ -403,6 +404,7 @@ def update_config(ctx, key_values):
     if not filtered:
         return {"success": False, "error": "No valid config keys provided"}
 
+    level_notices = []
     if "LOG_LEVEL" in filtered:
         # Read by the same rules as every other source of the level, so a value
         # typed into Settings behaves like one passed on the command line:
@@ -410,14 +412,12 @@ def update_config(ctx, key_values):
         # clamped rather than rejected because refusing to boot helps nobody;
         # an HTTP request can simply be told it was wrong, and persisting
         # garbage would leave the level silently ignored at the next start.
-        level, notices = parse_level(filtered["LOG_LEVEL"], SOURCE_SETTINGS)
+        level, level_notices = parse_level(filtered["LOG_LEVEL"], SOURCE_SETTINGS)
         if level is None:
             return {
                 "success": False,
                 "error": "LOG_LEVEL must be a number between %s and %s" % (MIN_LEVEL, MAX_LEVEL),
             }
-        for notice in notices:
-            logger.info("[CONFIG] %s" % notice)
         filtered["LOG_LEVEL"] = level
 
     if "NZB_DOWNLOADER" in filtered:
@@ -444,25 +444,42 @@ def update_config(ctx, key_values):
 
     interval_changed = any(k in set(SCHEDULER_JOB_INTERVALS.values()) for k in filtered)
 
-    try:
-        persisted = ctx.config.apply_transaction(filtered)
-    except Exception as e:
-        logger.error("[CONFIG] Failed to persist configuration update: %s" % e)
-        persisted = False
+    # Writing the level and applying it have to be one step. apply_transaction
+    # serializes the write on this same (reentrant) lock, but on its own that
+    # only orders the writes: two saves racing could persist B and then apply A,
+    # leaving config.ini and the running logger disagreeing about the dial —
+    # exactly the confusion this dial exists to remove. Scheduler
+    # reconfiguration is deliberately left outside; it is slow, it touches
+    # APScheduler's own locks, and no config write depends on it having run.
+    with config_transaction_lock():
+        try:
+            persisted = ctx.config.apply_transaction(filtered)
+        except Exception as e:
+            logger.error("[CONFIG] Failed to persist configuration update: %s" % e)
+            persisted = False
 
-    if not persisted:
-        return {"success": False, "error": CONFIG_PERSISTENCE_ERROR}
+        if not persisted:
+            return {"success": False, "error": CONFIG_PERSISTENCE_ERROR}
+
+        # Sync back to globals during transition
+        comicarr.CONFIG = ctx.config
+
+        if "LOG_LEVEL" in filtered:
+            # After the global sync: configure_log_level rebuilds the handlers
+            # from comicarr.CONFIG, so it has to see the config just written.
+            _apply_log_level_now(filtered["LOG_LEVEL"])
 
     if interval_changed:
         _reconfigure_schedulers(ctx)
 
-    # Sync back to globals during transition
-    comicarr.CONFIG = ctx.config
-
-    if "LOG_LEVEL" in filtered:
-        # After the global sync: configure_log_level rebuilds the handlers from
-        # comicarr.CONFIG, so it has to see the config this save just wrote.
-        _apply_log_level_now(filtered["LOG_LEVEL"])
+    for notice in level_notices:
+        # WARNING rather than INFO, because it passes at every level by
+        # contract: a clamp notice logged at INFO is invisible at exactly the
+        # level a downward clamp lands on. It is warning-shaped anyway — the
+        # operator asked for a level they did not get. Emitted after the change
+        # is in force, so "using 0" describes what happened rather than what
+        # was about to be attempted.
+        logger.warn("[CONFIG] %s" % notice)
 
     return {"success": True}
 

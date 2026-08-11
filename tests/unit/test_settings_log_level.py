@@ -16,12 +16,20 @@ of raising verbosity is to catch a problem *while it is happening* (#610), so a
 dial that needs a restart destroys the state the operator was trying to
 capture.
 
-These tests drive the real ``comicarr`` logger through the real
-``update_config`` and assert on what actually gets *emitted*. A call-recording
-stub would pass against handlers that never changed.
+Two fixtures, deliberately:
+
+``stubbed_save`` stands in for the handler rebuild and covers what
+``update_config`` itself decides -- parsing, refusal, ordering, persistence.
+None of that depends on which logger path the process took, and the skip below
+would otherwise silence all of it on any machine whose locale is not English.
+
+``settings_save`` drives the real ``comicarr`` logger and asserts on what
+actually gets *emitted*; a call-recording stub would pass against handlers that
+never changed. Only those tests are skipped off the English path.
 """
 
 import logging
+import threading
 
 import pytest
 
@@ -29,8 +37,9 @@ import comicarr
 from comicarr import logger as comicarr_logger
 from comicarr.app.core.context import AppContext
 from comicarr.app.system import service as system_service
+from comicarr.config import config_transaction_lock
 
-pytestmark = pytest.mark.skipif(
+english_logger_only = pytest.mark.skipif(
     not comicarr_logger.LOG_LANG.startswith("en"),
     reason="the non-English RotatingLogger path does not implement this contract yet",
 )
@@ -65,6 +74,39 @@ class FakeConfig:
         return True
 
 
+def _make_save(tmp_path, monkeypatch):
+    config = FakeConfig(str(tmp_path))
+    ctx = AppContext(config=config, data_dir=str(tmp_path))
+    monkeypatch.setattr(comicarr, "CONFIG", config, raising=False)
+    monkeypatch.setattr(comicarr, "LOG_LEVEL", 1, raising=False)
+    monkeypatch.setattr(comicarr, "LOGLIST", [], raising=False)
+
+    def save(**key_values):
+        return system_service.update_config(ctx, key_values)
+
+    save.config = config
+    save.ctx = ctx
+    return save
+
+
+@pytest.fixture
+def stubbed_save(tmp_path, monkeypatch):
+    """Save config through the real service, standing in for the handler rebuild.
+
+    The stub still moves ``comicarr.LOG_LEVEL``, because that is what
+    ``configure_log_level`` does and what everything else reads the dial from.
+    """
+    save = _make_save(tmp_path, monkeypatch)
+    save.applied = []
+
+    def record(level):
+        comicarr.LOG_LEVEL = level
+        save.applied.append(level)
+
+    monkeypatch.setattr(comicarr_logger, "configure_log_level", record)
+    return save
+
+
 @pytest.fixture
 def settings_save(tmp_path, monkeypatch):
     """Save config through the real service against the real logger.
@@ -77,19 +119,9 @@ def settings_save(tmp_path, monkeypatch):
     saved_level = lg.level
     saved_propagate = lg.propagate
 
-    config = FakeConfig(str(tmp_path))
-    ctx = AppContext(config=config, data_dir=str(tmp_path))
-    monkeypatch.setattr(comicarr, "CONFIG", config, raising=False)
-    monkeypatch.setattr(comicarr, "LOG_LEVEL", 1, raising=False)
-    monkeypatch.setattr(comicarr, "LOGLIST", [], raising=False)
-    comicarr_logger.initLogger(console=True, log_dir=str(tmp_path), loglevel=1)
-
-    def save(**key_values):
-        return system_service.update_config(ctx, key_values)
-
-    save.config = config
-    save.ctx = ctx
+    save = _make_save(tmp_path, monkeypatch)
     save.logger = lg
+    comicarr_logger.initLogger(console=True, log_dir=str(tmp_path), loglevel=1)
 
     try:
         yield save
@@ -108,6 +140,7 @@ def _emitted(message):
     return any(message in entry[1] for entry in comicarr.LOGLIST)
 
 
+@english_logger_only
 class TestASavedLevelChangesWhatIsEmitted:
     def test_raising_the_level_starts_emitting_debug(self, settings_save):
         comicarr_logger.debug("before-raise")
@@ -144,58 +177,90 @@ class TestASavedLevelChangesWhatIsEmitted:
         assert comicarr_logger.current_log_level() == 2
         assert settings_save.config.LOG_LEVEL == 2
 
-    def test_the_level_is_persisted_as_well_as_applied(self, settings_save):
-        """Live is not enough on its own -- the next start reads the file."""
+    def test_a_clamp_notice_survives_the_level_it_clamps_to(self, settings_save):
+        """The one level that hides the notice is the one a clamp lands on.
+
+        A downward clamp resolves to 0, where INFO no longer emits -- so an
+        operator whose value was quietly altered would have no record of it.
+        WARNING passes at every level by contract, which is the whole reason
+        the contract says level 0 is warnings-and-errors rather than silence.
+        """
         settings_save(log_level=0)
 
-        assert settings_save.config.transactions == [{"LOG_LEVEL": 0}]
+        settings_save(log_level=-1)
+
+        assert _emitted("out of range")
 
 
 class TestTheValueIsReadByTheSameRulesAsEverySource:
     @pytest.mark.parametrize("raw, expected", [("2", 2), (0, 0), ("0", 0)])
-    def test_a_numeric_string_is_a_level(self, settings_save, raw, expected):
-        assert settings_save(log_level=raw) == {"success": True}
+    def test_a_numeric_string_is_a_level(self, stubbed_save, raw, expected):
+        assert stubbed_save(log_level=raw) == {"success": True}
+        assert stubbed_save.applied == [expected]
         assert comicarr_logger.current_log_level() == expected
 
     @pytest.mark.parametrize("raw, clamped", [(5, 2), (-1, 0)])
-    def test_out_of_range_clamps_and_persists_the_clamped_value(self, settings_save, raw, clamped):
+    def test_out_of_range_clamps_and_persists_the_clamped_value(self, stubbed_save, raw, clamped):
         """A compose file asking for 3 wants maximum verbosity; so does an operator.
 
         The clamped value is what gets written, so config.ini cannot claim a
         level the running process is not honouring.
         """
-        assert settings_save(log_level=raw) == {"success": True}
+        assert stubbed_save(log_level=raw) == {"success": True}
 
-        assert settings_save.config.LOG_LEVEL == clamped
-        assert comicarr_logger.current_log_level() == clamped
+        assert stubbed_save.config.LOG_LEVEL == clamped
+        assert stubbed_save.applied == [clamped]
 
     @pytest.mark.parametrize("raw", ["verbose", True, 2.5])
-    def test_a_non_level_is_refused_rather_than_persisted(self, settings_save, raw):
+    def test_a_non_level_is_refused_rather_than_persisted(self, stubbed_save, raw):
         """Persisting garbage would be ignored at the next start -- silently.
 
         Startup sources fall through to the next layer instead of refusing to
         boot. An HTTP request has somewhere to put the complaint.
         """
-        result = settings_save(log_level=raw)
+        result = stubbed_save(log_level=raw)
 
         assert result["success"] is False
         assert "LOG_LEVEL must be a number between 0 and 2" == result["error"]
-        assert settings_save.config.transactions == []
-        assert comicarr_logger.current_log_level() == 1
+        assert stubbed_save.config.transactions == []
+        assert stubbed_save.applied == []
 
 
 class TestTheRunningLevelOnlyFollowsADurableSave:
-    def test_a_failed_save_leaves_the_running_level_alone(self, settings_save):
-        settings_save.config.persist = False
+    def test_the_level_is_persisted_before_it_is_applied(self, stubbed_save, monkeypatch):
+        """Live is not enough on its own -- the next start reads the file.
 
-        result = settings_save(log_level=2)
+        A reconfigure that ran first would leave a process logging at a level
+        no restart will bring back if the write then fails.
+        """
+        order = []
+
+        def persist(values, configure=True):
+            order.append(("persist", values["LOG_LEVEL"]))
+            stubbed_save.config.LOG_LEVEL = values["LOG_LEVEL"]
+            return True
+
+        monkeypatch.setattr(stubbed_save.config, "apply_transaction", persist)
+        monkeypatch.setattr(
+            comicarr_logger,
+            "configure_log_level",
+            lambda level: order.append(("apply", level)),
+        )
+
+        stubbed_save(log_level=0)
+
+        assert order == [("persist", 0), ("apply", 0)]
+
+    def test_a_failed_save_leaves_the_running_level_alone(self, stubbed_save):
+        stubbed_save.config.persist = False
+
+        result = stubbed_save(log_level=2)
 
         assert result["success"] is False
+        assert stubbed_save.applied == []
         assert comicarr_logger.current_log_level() == 1
-        comicarr_logger.debug("after-failed-save")
-        assert not _emitted("after-failed-save")
 
-    def test_a_save_that_persists_but_cannot_reconfigure_still_succeeds(self, settings_save, monkeypatch):
+    def test_a_save_that_persists_but_cannot_reconfigure_still_succeeds(self, stubbed_save, monkeypatch):
         """The level survives the restart; reporting a failed save would not.
 
         Rebuilding the handlers can fail on a log directory that has become
@@ -207,15 +272,44 @@ class TestTheRunningLevelOnlyFollowsADurableSave:
             lambda level: (_ for _ in ()).throw(FileNotFoundError("log dir vanished")),
         )
 
-        result = settings_save(log_level=2)
+        result = stubbed_save(log_level=2)
 
         assert result == {"success": True}
-        assert settings_save.config.LOG_LEVEL == 2
+        assert stubbed_save.config.LOG_LEVEL == 2
 
-    def test_saving_an_unrelated_key_does_not_touch_the_logger(self, settings_save, monkeypatch):
-        calls = []
-        monkeypatch.setattr(comicarr_logger, "configure_log_level", lambda level: calls.append(level))
+    def test_the_level_is_applied_under_the_config_write_lock(self, stubbed_save, monkeypatch):
+        """Writing the level and applying it have to be one step.
 
-        assert settings_save(comic_dir="/new/comics") == {"success": True}
+        apply_transaction serializes the *writes* on its own, and nothing more:
+        two saves racing could persist level 2 and then apply level 1 over it,
+        leaving config.ini and the running logger disagreeing about the dial.
+        Probed from another thread because the lock is reentrant -- the calling
+        thread can always reacquire it, so asking there proves nothing.
+        """
+        observed = []
 
-        assert calls == []
+        def probe(level):
+            taken = []
+
+            def attempt():
+                lock = config_transaction_lock()
+                acquired = lock.acquire(blocking=False)
+                if acquired:
+                    lock.release()
+                taken.append(acquired)
+
+            other = threading.Thread(target=attempt)
+            other.start()
+            other.join()
+            observed.append(taken[0])
+
+        monkeypatch.setattr(comicarr_logger, "configure_log_level", probe)
+
+        stubbed_save(log_level=2)
+
+        assert observed == [False], "the level was applied outside the config write lock"
+
+    def test_saving_an_unrelated_key_does_not_touch_the_logger(self, stubbed_save):
+        assert stubbed_save(comic_dir="/new/comics") == {"success": True}
+
+        assert stubbed_save.applied == []

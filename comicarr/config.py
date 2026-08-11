@@ -48,6 +48,19 @@ _PROVIDER_CREDENTIAL_INDEX = 3
 _PROVIDER_BOOLEAN_VALUES = {"0", "1", "false", "true", "no", "yes", "off", "on"}
 
 
+def config_transaction_lock():
+    """The lock every durable config write serializes on.
+
+    Reentrant on purpose. A caller whose own follow-up work has to be atomic
+    with the write -- applying a saved log level to the running logger, say --
+    holds this around both, and `apply_transaction` re-entering it on the same
+    thread costs nothing. Handing out the existing lock rather than inventing a
+    second one is the point: two locks over the same state is a lock-ordering
+    bug waiting to happen.
+    """
+    return _CONFIG_TRANSACTION_LOCK
+
+
 def _provider_entry_is_structurally_valid(entry):
     """Distinguish historical six- and seven-field provider records safely."""
     if len(entry) not in _PROVIDER_EXTRA_WIDTHS:
