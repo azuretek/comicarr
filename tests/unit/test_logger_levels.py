@@ -21,11 +21,6 @@ import pytest
 import comicarr
 from comicarr import logger as comicarr_logger
 
-pytestmark = pytest.mark.skipif(
-    not comicarr_logger.LOG_LANG.startswith("en"),
-    reason="the non-English RotatingLogger path does not implement this contract yet",
-)
-
 LEVEL_THRESHOLDS = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
 
 
@@ -157,3 +152,52 @@ def test_current_log_level_treats_unconfigured_as_quiet(monkeypatch, configured,
     monkeypatch.setattr(comicarr, "LOG_LEVEL", configured, raising=False)
 
     assert comicarr_logger.current_log_level() == expected
+
+
+@pytest.mark.parametrize("name", ["info", "debug", "fdebug", "warn", "warning", "error", "exception", "message"])
+def test_every_logging_helper_the_codebase_calls_exists(name):
+    """Regression for #619: the retired locale branch defined only five of these.
+
+    ``logger.warning`` (21 call sites) and ``logger.exception`` (7, all inside
+    ``except`` blocks) were missing on the non-English path — the path *every*
+    Docker install took, because python:3.12-slim sets LANG=C.UTF-8. Calling
+    them raised AttributeError instead of logging, so warnings were dropped and
+    error handlers raised while handling the error.
+    """
+    assert callable(getattr(comicarr_logger, name))
+
+
+def test_warnings_and_exceptions_reach_the_sinks(isolated_logger, monkeypatch):
+    """The two helpers the retired branch omitted must actually emit."""
+    monkeypatch.setattr(comicarr, "LOGLIST", [], raising=False)
+    isolated_logger(0)
+
+    comicarr_logger.warning("[COMIC-SCAN] No COMIC_DIR configured")
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        comicarr_logger.exception("handled")
+
+    emitted = [entry[1] for entry in comicarr.LOGLIST]
+    assert any("No COMIC_DIR configured" in line for line in emitted)
+    assert any("handled" in line for line in emitted)
+
+
+def test_the_web_ui_log_list_is_bounded(isolated_logger, monkeypatch):
+    """LOGLIST is an in-memory buffer for the life of the process, so it needs a cap.
+
+    The retired locale branch trimmed at 2500; ``LogListHandler`` never did.
+    Retiring that branch without carrying the cap across would have handed every
+    Docker install an unbounded list.
+    """
+    monkeypatch.setattr(comicarr, "LOGLIST", [], raising=False)
+    monkeypatch.setattr(comicarr_logger, "MAX_LOGLIST_ENTRIES", 10)
+    isolated_logger(2)
+
+    for index in range(25):
+        comicarr_logger.info("entry-%s" % index)
+
+    assert len(comicarr.LOGLIST) == 10
+    # Newest first, so the cap must drop the *oldest* entries.
+    assert "entry-24" in comicarr.LOGLIST[0][1]
+    assert not any("entry-0 " in entry[1] for entry in comicarr.LOGLIST)

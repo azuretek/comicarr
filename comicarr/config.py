@@ -428,21 +428,13 @@ class Config(object):
             comicarr.LOG_LEVEL = (
                 log_level  # set this to the calculated log_leve value so that logs display fine in the GUI
             )
-            if logger.LOG_LANG.startswith("en"):
-                logger.initLogger(
-                    console=True,
-                    log_dir=self.LOG_DIR,
-                    max_logsize=self.MAX_LOGSIZE,
-                    max_logfiles=self.MAX_LOGFILES,
-                    loglevel=log_level,
-                )
-            else:
-                logger.comicarr_log.initLogger(
-                    loglevel=log_level,
-                    log_dir=self.LOG_DIR,
-                    max_logsize=self.MAX_LOGSIZE,
-                    max_logfiles=self.MAX_LOGFILES,
-                )
+            logger.initLogger(
+                console=True,
+                log_dir=self.LOG_DIR,
+                max_logsize=self.MAX_LOGSIZE,
+                max_logfiles=self.MAX_LOGFILES,
+                loglevel=log_level,
+            )
 
         # Validate the live provider authority before backup maintenance is
         # allowed to encrypt historical plaintext with that same authority.

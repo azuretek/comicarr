@@ -178,7 +178,6 @@ def test_configure_log_level_keeps_the_console_attached_at_every_level(monkeypat
     config = SimpleNamespace(LOG_DIR="/tmp/logs", MAX_LOGSIZE=1024, MAX_LOGFILES=3)
     monkeypatch.setattr(comicarr, "CONFIG", config, raising=False)
     monkeypatch.setattr(comicarr, "LOG_LEVEL", 1, raising=False)
-    monkeypatch.setattr(logger, "LOG_LANG", "en_US", raising=False)
     monkeypatch.setattr(logger, "initLogger", lambda **kwargs: calls.append(kwargs), raising=False)
 
     logger.configure_log_level(0)

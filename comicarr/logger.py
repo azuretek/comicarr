@@ -17,8 +17,6 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Comicarr.  If not, see <http://www.gnu.org/licenses/>.
 
-import inspect
-import locale
 import logging
 import os
 import platform
@@ -30,22 +28,8 @@ from logging import Formatter
 import comicarr
 from comicarr import helpers
 
-# setup logger for non-english (this doesnt carry thru, so check here too)
-try:
-    localeinfo = locale.getdefaultlocale()
-    language = localeinfo[0]
-    charset = localeinfo[1]
-    if any([language is None, charset is None]):
-        raise AttributeError
-except AttributeError:
-    # if it's set to None (ie. dockerized) - default to en_US.UTF-8.
-    if language is None:
-        language = "en_US"
-    if charset is None:
-        charset = "UTF-8"
-
-LOG_LANG = language
-LOG_CHARSET = charset
+# The Web UI log list is an in-memory ring buffer, so it needs a ceiling.
+MAX_LOGLIST_ENTRIES = 2500
 
 
 def current_log_level():
@@ -70,291 +54,172 @@ def threshold_for_level(loglevel):
     return logging.DEBUG
 
 
-if not LOG_LANG.startswith("en"):
-    # Simple rotating log handler that uses RotatingFileHandler
-    class RotatingLogger(object):
-        def __init__(self, filename):
+# Comicarr logger
+logger = logging.getLogger("comicarr")
 
-            self.filename = filename
-            self.filehandler = None
-            self.consolehandler = None
 
-        def stopLogger(self):
-            lg = logging.getLogger("comicarr")
-            lg.removeHandler(self.filehandler)
-            lg.removeHandler(self.consolehandler)
+class LogListHandler(logging.Handler):
+    """
+    Log handler for Web UI.
+    """
 
-        def handle_exception(self, exc_type, exc_value, exc_traceback):
-            if issubclass(exc_type, KeyboardInterrupt):
-                sys.__excepthook__(exc_type, exc_value, exc_traceback)
-                return
-            logger.exception("Uncaught Exception", excinfo=(exc_type, exc_value, exc_traceback))
-            sys.__excepthook__(exc_type, exc_value, None)
-            return
+    def emit(self, record):
+        message = self.format(record)
+        message = message.replace("\n", "<br />")
+        comicarr.LOGLIST.insert(0, (helpers.now(), message, record.levelname, record.threadName))
+        # Bound the buffer. Without this the list grows for the life of the
+        # process; a long-running install eventually pays for it in memory.
+        del comicarr.LOGLIST[MAX_LOGLIST_ENTRIES:]
 
-        def initLogger(self, loglevel=1, log_dir=None, max_logsize=None, max_logfiles=None):
-            import sys
 
-            sys.excepthook = RotatingLogger.handle_exception
+def initLogger(console=True, log_dir=False, init=False, loglevel=1, max_logsize=None, max_logfiles=5):
+    # concurrentLogHandler/0.8.7 (to deal with windows locks)
+    # since this only happens on windows boxes, if it's nix/mac use the default logger.
+    if platform.system() == "Windows":
+        try:
+            from ConcurrentLogHandler.cloghandler import ConcurrentRotatingFileHandler as RFHandler
 
-            logging.getLogger("apscheduler.scheduler").setLevel(logging.WARN)
-            logging.getLogger("apscheduler.threadpool").setLevel(logging.WARN)
-            logging.getLogger("apscheduler.scheduler").propagate = False
-            logging.getLogger("apscheduler.threadpool").propagate = False
-            lg = logging.getLogger("comicarr")
-            lg.setLevel(logging.DEBUG)
-
-            if log_dir is not None:
-                self.filename = os.path.join(log_dir, self.filename)
-
-                # concurrentLogHandler/0.8.7 (to deal with windows locks)
-                # since this only happens on windows boxes, if it's nix/mac use the default logger.
-                if comicarr.OS_DETECT == "Windows":
-                    try:
-                        from ConcurrentLogHandler.cloghandler import ConcurrentRotatingFileHandler as RFHandler
-
-                        comicarr.LOGTYPE = "clog"
-                    except ImportError:
-                        comicarr.LOGTYPE = "log"
-                        from logging.handlers import RotatingFileHandler as RFHandler
-                else:
-                    comicarr.LOGTYPE = "log"
-                    from logging.handlers import RotatingFileHandler as RFHandler
-
-                filehandler = RFHandler(self.filename, maxBytes=max_logsize, backupCount=max_logfiles)
-
-                filehandler.setLevel(logging.DEBUG)
-
-                fileformatter = logging.Formatter("%(asctime)s - %(levelname)-7s :: %(message)s", "%d-%b-%Y %H:%M:%S")
-
-                filehandler.setFormatter(fileformatter)
-                lg.addHandler(filehandler)
-                self.filehandler = filehandler
-
-            if loglevel:
-                consolehandler = logging.StreamHandler()
-                if loglevel == 1:
-                    consolehandler.setLevel(logging.INFO)
-                if loglevel >= 2:
-                    consolehandler.setLevel(logging.DEBUG)
-                consoleformatter = logging.Formatter("%(asctime)s - %(levelname)s :: %(message)s", "%d-%b-%Y %H:%M:%S")
-                consolehandler.setFormatter(consoleformatter)
-                lg.addHandler(consolehandler)
-                self.consolehandler = consolehandler
-
-        @staticmethod
-        def log(message, level, *args, **kwargs):
-            logger = logging.getLogger("comicarr")
-
-            threadname = threading.currentThread().getName()
-
-            # Get the frame data of the method that made the original logger call
-            if len(inspect.stack()) > 2:
-                frame = inspect.getframeinfo(inspect.stack()[2][0])
-                program = os.path.basename(frame.filename)
-                method = frame.function
-                lineno = frame.lineno
-            else:
-                program = ""
-                method = ""
-                lineno = ""
-
-            if level != "DEBUG" or current_log_level() >= 2:
-                comicarr.LOGLIST.insert(0, (helpers.now(), message, level, threadname))
-                if len(comicarr.LOGLIST) > 2500:
-                    del comicarr.LOGLIST[-1]
-
-            message = "%s : %s:%s:%s : %s" % (threadname, program, method, lineno, message)
-            if level == "DEBUG":
-                logger.debug(message, *args, **kwargs)
-            elif level == "INFO":
-                logger.info(message, *args, **kwargs)
-            elif level == "WARNING":
-                logger.warning(message, *args, **kwargs)
-            else:
-                logger.error(message, *args, **kwargs)
-
-    comicarr_log = RotatingLogger("comicarr.log")
-    filename = "comicarr.log"
-
-    def debug(message, *args, **kwargs):
-        if current_log_level() > 1:
-            comicarr_log.log(message, "DEBUG", *args, **kwargs)
-
-    def fdebug(message, *args, **kwargs):
-        if current_log_level() > 1:
-            comicarr_log.log(message, "DEBUG", *args, **kwargs)
-
-    def info(message, *args, **kwargs):
-        if current_log_level() > 0:
-            comicarr_log.log(message, "INFO", *args, **kwargs)
-
-    def warn(message, *args, **kwargs):
-        comicarr_log.log(message, "WARNING", *args, **kwargs)
-
-    def error(message, *args, **kwargs):
-        comicarr_log.log(message, "ERROR", *args, **kwargs)
-
-else:
-    # Comicarr logger
-    logger = logging.getLogger("comicarr")
-
-    class LogListHandler(logging.Handler):
-        """
-        Log handler for Web UI.
-        """
-
-        def emit(self, record):
-            message = self.format(record)
-            message = message.replace("\n", "<br />")
-            comicarr.LOGLIST.insert(0, (helpers.now(), message, record.levelname, record.threadName))
-
-    def initLogger(console=True, log_dir=False, init=False, loglevel=1, max_logsize=None, max_logfiles=5):
-        # concurrentLogHandler/0.8.7 (to deal with windows locks)
-        # since this only happens on windows boxes, if it's nix/mac use the default logger.
-        if platform.system() == "Windows":
-            try:
-                from ConcurrentLogHandler.cloghandler import ConcurrentRotatingFileHandler as RFHandler
-
-                comicarr.LOGTYPE = "clog"
-            except ImportError:
-                comicarr.LOGTYPE = "log"
-                from logging.handlers import RotatingFileHandler as RFHandler
-        else:
+            comicarr.LOGTYPE = "clog"
+        except ImportError:
             comicarr.LOGTYPE = "log"
             from logging.handlers import RotatingFileHandler as RFHandler
+    else:
+        comicarr.LOGTYPE = "log"
+        from logging.handlers import RotatingFileHandler as RFHandler
 
-        if all([init is True, max_logsize is None]):
+    if all([init is True, max_logsize is None]):
+        max_logsize = 1000000  # 1 MB
+    else:
+        if max_logsize is None:
             max_logsize = 1000000  # 1 MB
-        else:
-            if max_logsize is None:
-                max_logsize = 1000000  # 1 MB
 
-        """
-        Setup logging for Comicarr. It uses the logger instance with the name
-        'comicarr'. Three log handlers are added:
+    """
+    Setup logging for Comicarr. It uses the logger instance with the name
+    'comicarr'. Three log handlers are added:
 
-        * RotatingFileHandler: for the file comicarr.log
-        * LogListHandler: for Web UI
-        * StreamHandler: for console
-        """
+    * RotatingFileHandler: for the file comicarr.log
+    * LogListHandler: for Web UI
+    * StreamHandler: for console
+    """
 
-        logging.getLogger("apscheduler.scheduler").setLevel(logging.WARN)
-        logging.getLogger("apscheduler.threadpool").setLevel(logging.WARN)
-        logging.getLogger("apscheduler.scheduler").propagate = False
-        logging.getLogger("apscheduler.threadpool").propagate = False
-        # Close and remove old handlers. This is required to reinit the loggers
-        # at runtime
-        for handler in logger.handlers[:]:
-            # Just make sure it is cleaned up.
-            if isinstance(handler, RFHandler):
-                handler.close()
-            elif isinstance(handler, logging.StreamHandler):
-                handler.flush()
+    logging.getLogger("apscheduler.scheduler").setLevel(logging.WARN)
+    logging.getLogger("apscheduler.threadpool").setLevel(logging.WARN)
+    logging.getLogger("apscheduler.scheduler").propagate = False
+    logging.getLogger("apscheduler.threadpool").propagate = False
+    # Close and remove old handlers. This is required to reinit the loggers
+    # at runtime
+    for handler in logger.handlers[:]:
+        # Just make sure it is cleaned up.
+        if isinstance(handler, RFHandler):
+            handler.close()
+        elif isinstance(handler, logging.StreamHandler):
+            handler.flush()
 
-            logger.removeHandler(handler)
+        logger.removeHandler(handler)
 
-        # Configure the logger to accept all messages
-        logger.propagate = False
+    # Configure the logger to accept all messages
+    logger.propagate = False
 
-        # One threshold, derived once, applied to the logger and to every sink.
-        # Setting it unconditionally matters: the old code left the level alone
-        # at loglevel 0, so turning the dial *down* at runtime never took effect
-        # and level 0 silently inherited root's WARNING by accident.
-        threshold = logging.INFO if init is True else threshold_for_level(loglevel)
-        logger.setLevel(threshold)
+    # One threshold, derived once, applied to the logger and to every sink.
+    # Setting it unconditionally matters: the old code left the level alone
+    # at loglevel 0, so turning the dial *down* at runtime never took effect
+    # and level 0 silently inherited root's WARNING by accident.
+    threshold = logging.INFO if init is True else threshold_for_level(loglevel)
+    logger.setLevel(threshold)
 
-        # Add list logger
-        loglist_handler = LogListHandler()
-        loglist_handler.setLevel(threshold)
-        logger.addHandler(loglist_handler)
+    # Add list logger
+    loglist_handler = LogListHandler()
+    loglist_handler.setLevel(threshold)
+    logger.addHandler(loglist_handler)
 
-        # Setup file logger
-        if log_dir:
-            filename = os.path.join(log_dir, "comicarr.log")
-            file_formatter = Formatter(
-                "%(asctime)s - %(levelname)-7s :: %(name)s.%(funcName)s.%(lineno)s : %(threadName)s : %(message)s",
-                "%d-%b-%Y %H:%M:%S",
-            )
-            file_handler = RFHandler(filename, "a", maxBytes=max_logsize, backupCount=max_logfiles)
-            file_handler.setLevel(threshold)
-            file_handler.setFormatter(file_formatter)
+    # Setup file logger
+    if log_dir:
+        filename = os.path.join(log_dir, "comicarr.log")
+        file_formatter = Formatter(
+            "%(asctime)s - %(levelname)-7s :: %(name)s.%(funcName)s.%(lineno)s : %(threadName)s : %(message)s",
+            "%d-%b-%Y %H:%M:%S",
+        )
+        file_handler = RFHandler(filename, "a", maxBytes=max_logsize, backupCount=max_logfiles)
+        file_handler.setLevel(threshold)
+        file_handler.setFormatter(file_formatter)
 
-            logger.addHandler(file_handler)
+        logger.addHandler(file_handler)
 
-        # Setup console logger
-        if console:
-            console_formatter = logging.Formatter(
-                "%(asctime)s - %(levelname)s :: %(name)s.%(funcName)s.%(lineno)s : %(threadName)s : %(message)s",
-                "%d-%b-%Y %H:%M:%S",
-            )
-            console_handler = logging.StreamHandler()
-            console_handler.setFormatter(console_formatter)
-            console_handler.setLevel(threshold)
+    # Setup console logger
+    if console:
+        console_formatter = logging.Formatter(
+            "%(asctime)s - %(levelname)s :: %(name)s.%(funcName)s.%(lineno)s : %(threadName)s : %(message)s",
+            "%d-%b-%Y %H:%M:%S",
+        )
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(console_formatter)
+        console_handler.setLevel(threshold)
 
-            logger.addHandler(console_handler)
+        logger.addHandler(console_handler)
 
-        # Install exception hooks
-        initHooks()
+    # Install exception hooks
+    initHooks()
 
-    def initHooks(global_exceptions=True, thread_exceptions=True, pass_original=True):
-        """
-        This method installs exception catching mechanisms. Any exception caught
-        will pass through the exception hook, and will be logged to the logger as
-        an error. Additionally, a traceback is provided.
 
-        This is very useful for crashing threads and any other bugs, that may not
-        be exposed when running as daemon.
+def initHooks(global_exceptions=True, thread_exceptions=True, pass_original=True):
+    """
+    This method installs exception catching mechanisms. Any exception caught
+    will pass through the exception hook, and will be logged to the logger as
+    an error. Additionally, a traceback is provided.
 
-        The default exception hook is still considered, if pass_original is True.
-        """
+    This is very useful for crashing threads and any other bugs, that may not
+    be exposed when running as daemon.
 
-        def excepthook(*exception_info):
-            # We should always catch this to prevent loops!
-            try:
-                message = "".join(traceback.format_exception(*exception_info))
-                logger.error("Uncaught exception: %s", message)
-            except:
-                pass
+    The default exception hook is still considered, if pass_original is True.
+    """
 
-            # Original excepthook
-            if pass_original:
-                sys.__excepthook__(*exception_info)
+    def excepthook(*exception_info):
+        # We should always catch this to prevent loops!
+        try:
+            message = "".join(traceback.format_exception(*exception_info))
+            logger.error("Uncaught exception: %s", message)
+        except Exception:
+            pass
 
-        # Global exception hook
-        if global_exceptions:
-            sys.excepthook = excepthook
+        # Original excepthook
+        if pass_original:
+            sys.__excepthook__(*exception_info)
 
-        # Thread exception hook
-        if thread_exceptions:
-            old_init = threading.Thread.__init__
+    # Global exception hook
+    if global_exceptions:
+        sys.excepthook = excepthook
 
-            def new_init(self, *args, **kwargs):
-                old_init(self, *args, **kwargs)
-                old_run = self.run
+    # Thread exception hook
+    if thread_exceptions:
+        old_init = threading.Thread.__init__
 
-                def new_run(*args, **kwargs):
-                    try:
-                        old_run(*args, **kwargs)
-                    except (KeyboardInterrupt, SystemExit):
-                        raise
-                    except:
-                        excepthook(*sys.exc_info())
+        def new_init(self, *args, **kwargs):
+            old_init(self, *args, **kwargs)
+            old_run = self.run
 
-                self.run = new_run
+            def new_run(*args, **kwargs):
+                try:
+                    old_run(*args, **kwargs)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception:
+                    excepthook(*sys.exc_info())
 
-            # Monkey patch the run() by monkey patching the __init__ method
-            threading.Thread.__init__ = new_init
+            self.run = new_run
 
-    # Expose logger methods
-    info = logger.info
-    warn = logger.warn
-    error = logger.error
-    debug = logger.debug
-    warning = logger.warning
-    message = logger.info
-    exception = logger.exception
-    fdebug = logger.debug
+        # Monkey patch the run() by monkey patching the __init__ method
+        threading.Thread.__init__ = new_init
+
+
+# Expose logger methods
+info = logger.info
+warn = logger.warn
+error = logger.error
+debug = logger.debug
+warning = logger.warning
+message = logger.info
+exception = logger.exception
+fdebug = logger.debug
 
 
 def configure_log_level(level):
@@ -362,19 +227,10 @@ def configure_log_level(level):
     if level is None:
         level = 1
     comicarr.LOG_LEVEL = level
-    if LOG_LANG.startswith("en"):
-        initLogger(
-            console=True,
-            log_dir=comicarr.CONFIG.LOG_DIR,
-            max_logsize=comicarr.CONFIG.MAX_LOGSIZE,
-            max_logfiles=comicarr.CONFIG.MAX_LOGFILES,
-            loglevel=level,
-        )
-    else:
-        comicarr_log.stopLogger()
-        comicarr_log.initLogger(
-            loglevel=level,
-            log_dir=comicarr.CONFIG.LOG_DIR,
-            max_logsize=comicarr.CONFIG.MAX_LOGSIZE,
-            max_logfiles=comicarr.CONFIG.MAX_LOGFILES,
-        )
+    initLogger(
+        console=True,
+        log_dir=comicarr.CONFIG.LOG_DIR,
+        max_logsize=comicarr.CONFIG.MAX_LOGSIZE,
+        max_logfiles=comicarr.CONFIG.MAX_LOGFILES,
+        loglevel=level,
+    )

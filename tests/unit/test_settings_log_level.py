@@ -39,11 +39,6 @@ from comicarr.app.core.context import AppContext
 from comicarr.app.system import service as system_service
 from comicarr.config import config_transaction_lock
 
-english_logger_only = pytest.mark.skipif(
-    not comicarr_logger.LOG_LANG.startswith("en"),
-    reason="the non-English RotatingLogger path does not implement this contract yet",
-)
-
 
 class FakeConfig:
     """Enough config to persist a level and rebuild the handlers over it.
@@ -140,7 +135,6 @@ def _emitted(message):
     return any(message in entry[1] for entry in comicarr.LOGLIST)
 
 
-@english_logger_only
 class TestASavedLevelChangesWhatIsEmitted:
     def test_raising_the_level_starts_emitting_debug(self, settings_save):
         comicarr_logger.debug("before-raise")

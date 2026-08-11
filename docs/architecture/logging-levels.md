@@ -142,30 +142,61 @@ Three defects came out of it, all fixed alongside the retirement:
 - Failing to create the log directory dropped `LOG_DIR` only when `QUIET` was
   false, so a quiet process kept an uncreatable path and lost the recovery.
 
-## Not covered here — and "not covered" includes Docker
+## One logger, every locale
 
-The `RotatingLogger` path (`logger.py`, taken when `LOG_LANG` does not start
-with `en`) does **not** implement this contract. Read it as the *non-English*
-path and you will conclude it is a rare edge case. It is not:
+The contract above now covers every install. It did not always: `logger.py` used
+to branch at import on `LOG_LANG` and build an entirely separate
+`RotatingLogger` when the locale did not start with `en`. That branch was
+retired in #619, and the history is worth keeping because the shape of the bug
+recurs.
 
-**Every Docker install takes it.** `python:3.12-slim` sets `LANG=C.UTF-8`, so
-`locale.getdefaultlocale()` returns `('C', 'UTF-8')` and `LOG_LANG` is `"C"`.
-Verified inside an image built from this repo — the giveaway in `docker logs` is
-the message format, `INFO :: MainThread : maintenance.py:backup_files:539 :`
-rather than the English path's `INFO :: comicarr.backup_files.539 : MainThread`.
+**It was never the non-English path — it was the Docker path.**
+`python:3.12-slim` sets `LANG=C.UTF-8`, so `locale.getdefaultlocale()` returned
+`('C', 'UTF-8')`, `LOG_LANG` was `"C"`, and `"C".startswith("en")` is false.
+Every container took the branch. Reading it as a rare non-English edge case is
+what let it survive a decade.
 
-On that path the dial is enforced in the module-level `debug()` / `info()`
-wrappers rather than by handler levels, so the log *file* does follow it. The
-console does not: `initLogger` creates the `StreamHandler` inside `if loglevel:`,
-so **level 0 attaches no console sink at all** and `docker logs` goes silent
-rather than showing warnings and errors. That is the same shape as the #610
-defect — a level that removes a sink instead of raising its threshold — and it
-is why the contract's "level 0 is not silence" rule is currently aspirational
-for containers.
+What it actually cost:
 
-One consequence worth knowing before designing a fix: a single `ENV
-LANG=en_US.UTF-8` in the `Dockerfile` would move every container onto the
-contract-compliant path without touching `logger.py`. Whether that, adopting the
-contract in `RotatingLogger`, or retiring the path is right is the decision on
-[Decide the fate of the non-English RotatingLogger path](https://github.com/frankieramirez/comicarr/issues/619),
-under [Wayfinder: One log level dial, everywhere](https://github.com/frankieramirez/comicarr/issues/611).
+- **`logger.warning` and `logger.exception` did not exist on it.** The branch
+  defined only `debug`, `fdebug`, `info`, `warn`, and `error`. The 21
+  `logger.warning(...)` call sites — including `comicsync.py`'s "No COMIC_DIR
+  configured" and `importinbox.py`'s missing-import-directory warning — raised
+  `AttributeError` instead of logging. The 7 `logger.exception(...)` call sites
+  are all inside `except` blocks, so the handler raised while handling the
+  error and the original traceback was lost.
+- **`sys.excepthook` was never functional.** `initLogger` assigned the *unbound*
+  `RotatingLogger.handle_exception`, whose signature takes four parameters while
+  Python calls the hook with three; its body also referenced a module-global
+  `logger` that only existed in the other branch. `Comicarr.py` said as much at
+  startup — *"errors WILL NOT be captured in the logs"*.
+- **Level 0 attached no console sink at all**, because the `StreamHandler` was
+  built inside `if loglevel:`. Same shape as the #610 defect: a level that
+  removes a sink instead of raising its threshold.
+- **It never did the encoding job it existed for.** `LOG_CHARSET` was assigned
+  at import and read by nothing, anywhere. No `encoding=` on the file handler,
+  no charset handling of any kind. The only real differences were the formatter
+  string and enforcing the dial in the module-level wrappers rather than at
+  handler level.
+
+The one thing it got right was capping the Web UI buffer at 2500 entries.
+`LogListHandler` had no cap, so retiring the branch without carrying that across
+would have handed every Docker install an unbounded in-memory list. The cap now
+lives on `logger.MAX_LOGLIST_ENTRIES` and applies everywhere.
+
+`LOG_LANG` and `LOG_CHARSET` are in `RETIRED_GLOBALS`
+(`scripts/check_retired_globals.py`). Pinning `ENV LANG=en_US.UTF-8` in the
+`Dockerfile` was considered and rejected: it would have moved containers onto
+the working path while leaving non-English bare-metal installs still dropping
+warnings, and made correctness depend on an environment variable any operator
+can override.
+
+**One log format now.** Containers previously wrote
+`INFO :: MainThread : maintenance.py:backup_files:539 :` and now write the
+standard `INFO :: comicarr.backup_files.539 : MainThread`. An existing
+`comicarr.log` therefore contains both formats across the upgrade boundary —
+a constraint on anything that parses the file, noted on
+[Build the Settings log viewer and level control](https://github.com/frankieramirez/comicarr/issues/617).
+
+Charted under
+[Wayfinder: One log level dial, everywhere](https://github.com/frankieramirez/comicarr/issues/611).

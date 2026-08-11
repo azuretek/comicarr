@@ -83,14 +83,6 @@ def main():
     if not comicarr.SYS_ENCODING or comicarr.SYS_ENCODING in ("ANSI_X3.4-1968", "US-ASCII", "ASCII"):
         comicarr.SYS_ENCODING = "UTF-8"
 
-    if not logger.LOG_LANG.startswith("en"):
-        print(
-            "language detected as non-English (%s). Forcing specific logging module - errors WILL NOT be captured in the logs"
-            % logger.LOG_LANG
-        )
-    else:
-        print("log language set to %s" % logger.LOG_LANG)
-
     # Set up and gather command line arguments
     parser = argparse.ArgumentParser(description="Automated Comic Book Downloader")
     subparsers = parser.add_subparsers(title="Subcommands", dest="maintenance")
