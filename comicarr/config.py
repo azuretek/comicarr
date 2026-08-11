@@ -569,6 +569,7 @@ class Config(object):
                     config.remove_option("Torznab", option)
             self.TORZNAB_NAME = None
             self.TORZNAB_HOST = None
+            self.TORZNAB_VERIFY = None
             self.TORZNAB_APIKEY = None
             self.TORZNAB_CATEGORY = None
             self.WRITE_THE_CONFIG = True
@@ -592,7 +593,13 @@ class Config(object):
             return
 
         canonical_name = str(legacy["name"]).strip().casefold()
-        existing_names = {str(entry[0] or entry[1]).strip().casefold() for entry in self.EXTRA_TORZNABS}
+        # Provider names must be unique across BOTH extras lists — validation
+        # shares one namespace for newznabs and torznabs.
+        existing_names = {
+            str(entry[0] or entry[1]).strip().casefold()
+            for entries in (self.EXTRA_NEWZNABS, self.EXTRA_TORZNABS)
+            for entry in entries
+        }
         if canonical_name in existing_names | self._reserved_provider_names():
             logger.warn(
                 "[CONFIG] Legacy torznab_* fields under [Torznab] reuse the provider name "

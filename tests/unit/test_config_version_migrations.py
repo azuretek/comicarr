@@ -253,6 +253,38 @@ torznab_category = 8020
     assert any("reuse the provider name" in call[0][0] for call in warn.call_args_list)
 
 
+def test_legacy_torznab_name_collision_with_newznab_warns_and_stays_unmigrated(tmp_path, monkeypatch):
+    """Provider names share one namespace across newznabs and torznabs — a
+    migrated entry reusing a Newznab name would fail provider validation."""
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Newznab]
+extra_newznabs = Nyaa, http://usenet.example:5000/api, False, zzz, 7030, 1, 3
+
+[Torznab]
+enable_torznab = True
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+    warn = MagicMock()
+    monkeypatch.setattr(config_module.logger, "warn", warn)
+
+    assert cfg.read(startup=False) is cfg
+
+    hosts = [entry[1] for entry in cfg.EXTRA_TORZNABS]
+    assert "http://prowlarr.example:9696/1/api" not in hosts
+    assert any("reuse the provider name" in call[0][0] for call in warn.call_args_list)
+
+
 def test_legacy_torznab_incomplete_fields_warn_and_stay_unmigrated(tmp_path, monkeypatch):
     cfg, _ini = _load_config(
         tmp_path,
