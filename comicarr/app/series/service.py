@@ -405,6 +405,39 @@ def delete_comic(ctx, comic_id, delete_directory=False):
     }
 
 
+def update_search_settings(ctx, comic_id, allow_packs=None, ignore_type=None):
+    """Update the per-series search flags (#633).
+
+    ``allow_packs`` gates pack/bundle release matching; ``ignore_type`` lets
+    results through the booktype-mismatch check in search_filer. Both are
+    partial — omitted (None) fields are left untouched.
+    """
+    existing = series_queries.get_comic_search_settings(comic_id)
+    if not existing:
+        return {"success": False, "error": "ComicID %s not found in watchlist" % comic_id}
+
+    values = {}
+    if allow_packs is not None:
+        # Text column read as == 1 / == "1" by search.py — store "1"/"0".
+        values["AllowPacks"] = "1" if allow_packs else "0"
+    if ignore_type is not None:
+        values["IgnoreType"] = 1 if ignore_type else 0
+
+    if not values:
+        return {"success": False, "error": "No search settings provided"}
+
+    series_queries.update_comic_search_settings(comic_id, values)
+    logger.fdebug("[SERIES] Updated search settings for %s: %s" % (comic_id, values))
+    updated = series_queries.get_comic_search_settings(comic_id)
+    return {
+        "success": True,
+        "settings": {
+            "allow_packs": updated["AllowPacks"] in (1, "1"),
+            "ignore_type": bool(updated["IgnoreType"]),
+        },
+    }
+
+
 def pause_comic(ctx, comic_id):
     """Set comic status to Paused."""
     series_queries.pause_comic(comic_id)

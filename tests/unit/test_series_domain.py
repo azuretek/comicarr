@@ -309,6 +309,57 @@ def test_explicit_issue_actions_dual_write_canonical_intent(monkeypatch):
     ]
 
 
+def test_update_search_settings_stores_flag_columns_in_search_readable_form(monkeypatch):
+    """AllowPacks is read as == 1 / == "1" by search.py; IgnoreType via bool()."""
+    upsert = MagicMock()
+    rows = iter(
+        [
+            {"ComicID": "160294", "AllowPacks": None, "IgnoreType": None},
+            {"ComicID": "160294", "AllowPacks": "1", "IgnoreType": 0},
+        ]
+    )
+    monkeypatch.setattr(series_service.series_queries, "get_comic_search_settings", lambda _comic_id: next(rows))
+    monkeypatch.setattr(series_service.series_queries, "update_comic_search_settings", upsert)
+
+    result = series_service.update_search_settings(_make_ctx(), "160294", allow_packs=True, ignore_type=False)
+
+    upsert.assert_called_once_with("160294", {"AllowPacks": "1", "IgnoreType": 0})
+    assert result == {"success": True, "settings": {"allow_packs": True, "ignore_type": False}}
+
+
+def test_update_search_settings_is_partial_and_rejects_unknown_series(monkeypatch):
+    upsert = MagicMock()
+    monkeypatch.setattr(
+        series_service.series_queries,
+        "get_comic_search_settings",
+        lambda comic_id: (
+            {"ComicID": "160294", "AllowPacks": "0", "IgnoreType": 1} if comic_id == "160294" else None
+        ),
+    )
+    monkeypatch.setattr(series_service.series_queries, "update_comic_search_settings", upsert)
+
+    missing = series_service.update_search_settings(_make_ctx(), "999999", allow_packs=True)
+    assert missing["success"] is False
+    upsert.assert_not_called()
+
+    empty = series_service.update_search_settings(_make_ctx(), "160294")
+    assert empty["success"] is False
+    upsert.assert_not_called()
+
+    partial = series_service.update_search_settings(_make_ctx(), "160294", ignore_type=False)
+    assert partial["success"] is True
+    upsert.assert_called_once_with("160294", {"IgnoreType": 0})
+
+
+def test_search_settings_query_upserts_lowercase_comics_table(monkeypatch):
+    upsert = MagicMock()
+    monkeypatch.setattr(series_queries.db, "upsert", upsert)
+
+    series_queries.update_comic_search_settings("160294", {"AllowPacks": "1", "IgnoreType": 1})
+
+    upsert.assert_called_once_with("comics", {"AllowPacks": "1", "IgnoreType": 1}, {"ComicID": "160294"})
+
+
 def test_preview_search_all_missing_excludes_owned_future_and_skipped(monkeypatch):
     projected = [
         series_service.project_issue_state(row, series_status="Active")

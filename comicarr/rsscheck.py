@@ -1238,12 +1238,15 @@ def nzbdbsearch(
                                 "RSS": nzb["RSS"],
                                 "ComicID": nzb["ComicID"],
                                 "ComicName_Filesafe": nzb["ComicName_Filesafe"],
-                                "AllowPacks": bool(nzb["AllowPacks"]),
+                                # AllowPacks is a Text column storing "1"/"0";
+                                # bool() would treat "0" as True.
+                                "AllowPacks": nzb["AllowPacks"] in (1, "1"),
                                 "OneOff": bool(nzb["OneOff"]),
                                 "TorrentID_32P": nzb["TorrentID_32P"],
                                 "DigitalDate": nzb["DigitalDate"],
                                 "booktype": nzb["BookType"],
-                                "ignore_booktype": bool(nzb["Ignore_Booktype"]),
+                                # Same Text-column hazard as AllowPacks above.
+                                "ignore_booktype": nzb["Ignore_Booktype"] in (1, "1", True),
                             },
                         }
                     )

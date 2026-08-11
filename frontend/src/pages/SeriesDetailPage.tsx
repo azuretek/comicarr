@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +32,7 @@ import {
   useSearchMissingPreview,
   useSearchRun,
   useSeriesDetail,
+  useUpdateSeriesSearchSettings,
 } from "@/hooks/useSeries";
 import type {
   ComicOrManga,
@@ -163,6 +165,7 @@ export default function SeriesDetailPage() {
   const confirmSearch = useConfirmSearchMissing();
   const searchRun = useSearchRun(searchRunId);
   const retrySearchRun = useRetrySearchRun();
+  const searchSettingsMutation = useUpdateSeriesSearchSettings();
 
   const fetchSearchPreview = async () => {
     setPreview(null);
@@ -300,6 +303,29 @@ export default function SeriesDetailPage() {
     summary?.completionPercent ??
     (total > 0 ? Math.round((have / total) * 100) : 0);
   const isPaused = comic.Status?.toLowerCase() === "paused";
+  const allowPacks = comic.AllowPacks === 1 || comic.AllowPacks === "1";
+  const ignoreType = Boolean(comic.IgnoreType);
+
+  const handleSearchSettingChange = async (
+    setting: "allowPacks" | "ignoreType",
+    value: boolean,
+  ) => {
+    if (!comicId) return;
+    try {
+      await searchSettingsMutation.mutateAsync({
+        comicId,
+        ...(setting === "allowPacks"
+          ? { allowPacks: value }
+          : { ignoreType: value }),
+      });
+    } catch {
+      addToast({
+        type: "error",
+        title: "Error",
+        description: "Failed to update search settings",
+      });
+    }
+  };
   const isManga =
     comic.ContentType === "manga" ||
     comicId?.startsWith("md-") ||
@@ -611,6 +637,49 @@ export default function SeriesDetailPage() {
                 </div>
               ))}
             </div>
+          </div>
+          <div
+            className="border-t px-3 py-2.5"
+            style={{ borderColor: "var(--border)" }}
+          >
+            <div
+              className="mb-2 font-mono text-[10px] uppercase tracking-[0.1em]"
+              style={{ color: "var(--text-muted)" }}
+            >
+              Search options
+            </div>
+            {[
+              {
+                key: "allowPacks" as const,
+                label: "Allow packs",
+                title:
+                  "Accept pack/bundle releases (multi-issue or volume torrents) when searching",
+                checked: allowPacks,
+              },
+              {
+                key: "ignoreType" as const,
+                label: "Ignore book type",
+                title:
+                  "Match results even when the release's book type (TPB, GN…) differs from this series",
+                checked: ignoreType,
+              },
+            ].map(({ key, label, title, checked }) => (
+              <label
+                key={key}
+                title={title}
+                className="flex cursor-pointer items-center justify-between gap-2 py-1 font-mono text-[10px]"
+              >
+                <span style={{ color: "var(--text-muted)" }}>{label}</span>
+                <Checkbox
+                  checked={checked}
+                  disabled={searchSettingsMutation.isPending}
+                  onCheckedChange={(value) =>
+                    void handleSearchSettingChange(key, value)
+                  }
+                  aria-label={label}
+                />
+              </label>
+            ))}
           </div>
         </div>
       </div>

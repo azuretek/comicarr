@@ -42,6 +42,8 @@ COMICS_COLUMNS = [
     t_comics.c.DetailURL.label("DetailURL"),
     t_comics.c.ComicLocation.label("ComicLocation"),
     t_comics.c.ContentType.label("ContentType"),
+    t_comics.c.AllowPacks.label("AllowPacks"),
+    t_comics.c.IgnoreType.label("IgnoreType"),
 ]
 
 ISSUES_COLUMNS = [
@@ -166,6 +168,22 @@ def delete_comic(comic_id):
         conn.execute(delete(t_comics).where(t_comics.c.ComicID == comic_id))
         conn.execute(delete(t_issues).where(t_issues.c.ComicID == comic_id))
         conn.execute(delete(t_upcoming).where(t_upcoming.c.ComicID == comic_id))
+
+
+def get_comic_search_settings(comic_id):
+    """Get the per-series search flags (pack matching / booktype override)."""
+    return db.select_one(
+        select(t_comics.c.ComicID, t_comics.c.AllowPacks, t_comics.c.IgnoreType).where(t_comics.c.ComicID == comic_id)
+    )
+
+
+def update_comic_search_settings(comic_id, values):
+    """Persist per-series search flags.
+
+    ``AllowPacks`` is a Text column read as ``== 1 / == "1"`` by search.py, so
+    it is stored as "1"/"0" strings; ``IgnoreType`` is an Integer flag column.
+    """
+    db.upsert("comics", values, {"ComicID": comic_id})
 
 
 def pause_comic(comic_id):

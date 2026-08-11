@@ -84,6 +84,34 @@ def delete_series(
     return result
 
 
+@router.patch("/series/{comic_id}/search-settings", dependencies=[Depends(require_session)])
+def update_series_search_settings(
+    comic_id: str,
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Update per-series search flags (pack matching / booktype override)."""
+    if request_body is None:
+        request_body = {}
+
+    allow_packs = request_body.get("allow_packs")
+    ignore_type = request_body.get("ignore_type")
+    for name, value in (("allow_packs", allow_packs), ("ignore_type", ignore_type)):
+        if value is not None and not isinstance(value, bool):
+            return JSONResponse(status_code=400, content={"detail": "%s must be a boolean" % name})
+    if allow_packs is None and ignore_type is None:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Provide at least one of allow_packs, ignore_type"},
+        )
+
+    result = series_service.update_search_settings(ctx, comic_id, allow_packs=allow_packs, ignore_type=ignore_type)
+    if not result["success"]:
+        status = 404 if "not found" in result.get("error", "").lower() else 400
+        return JSONResponse(status_code=status, content={"detail": result.get("error")})
+    return result
+
+
 @router.put("/series/{comic_id}/pause", dependencies=[Depends(require_session)])
 def pause_series(comic_id: str, ctx: AppContext = Depends(get_context)):
     """Pause a comic series."""

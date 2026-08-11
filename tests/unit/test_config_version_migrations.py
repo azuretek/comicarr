@@ -155,3 +155,63 @@ folder_scan_log_verbose = True
     info.assert_any_call(
         "[CONFIG] Removed folder_scan_log_verbose: folder-scan diagnostics now follow LOG_LEVEL=debug."
     )
+
+
+def test_legacy_torznab_fields_absorbed_on_modern_config(tmp_path, monkeypatch):
+    """#631: torznab_* single-provider fields repopulated on a modern config are
+    folded into extra_torznabs instead of sitting silently inert."""
+    cfg, ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Torznab]
+enable_torznab = True
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+
+    assert cfg.read(startup=False) is cfg
+
+    hosts = [entry[1] for entry in cfg.EXTRA_TORZNABS]
+    assert "http://prowlarr.example:9696/1/api" in hosts
+    migrated = cfg.EXTRA_TORZNABS[hosts.index("http://prowlarr.example:9696/1/api")]
+    assert migrated[0] == "Nyaa"
+    assert migrated[3] == "abc123"
+    assert migrated[4] == "8020"
+    assert migrated[5] == "1"
+
+    assert cfg.TORZNAB_NAME is None
+    assert cfg.TORZNAB_HOST is None
+    text = ini.read_text(encoding="utf-8").lower()
+    assert "torznab_host" not in text
+    assert "extra_torznabs" in text
+
+
+def test_legacy_torznab_incomplete_fields_warn_and_stay_unmigrated(tmp_path, monkeypatch):
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Torznab]
+torznab_host = http://prowlarr.example:9696/1/api
+""",
+    )
+    warn = MagicMock()
+    monkeypatch.setattr(config_module.logger, "warn", warn)
+
+    assert cfg.read(startup=False) is cfg
+
+    assert cfg.EXTRA_TORZNABS == []
+    assert warn.called
+    assert "NOT used for searching" in warn.call_args_list[0][0][0]

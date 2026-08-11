@@ -71,6 +71,10 @@ export interface Comic {
   AlternateSearch?: string | null;
   ComicVersion?: string | null;
   ContentType?: ContentType | null;
+  /** Per-series pack/bundle matching flag — Text column, "1" when enabled */
+  AllowPacks?: string | number | null;
+  /** Per-series booktype-mismatch override — Integer flag column */
+  IgnoreType?: number | null;
 }
 
 /** Issue entity */
