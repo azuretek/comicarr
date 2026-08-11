@@ -77,6 +77,14 @@ def log_scan_summary(module, filename, candidate_count, selected_items, annual_c
     )
 
 
+def summarize_scan_matches(normal_items, arc_items):
+    """Build summary fields from the matches selected for one input file."""
+    selected_items = normal_items + arc_items
+    annual_count = sum(1 for item in selected_items if item.get("AnnualType"))
+    story_arc = bool(arc_items or any(item.get("IssueArcID") for item in normal_items))
+    return selected_items, annual_count, story_arc
+
+
 class PostProcessor(object):
     """
     A class which will process a media file according to the post processing settings in the config.
@@ -733,7 +741,7 @@ class PostProcessor(object):
             manual_list = []
             for fl in filelist["comiclist"]:
                 manual_list_start = len(manual_list)
-                story_the_arcs = False
+                manual_arclist_start = len(manual_arclist)
                 if (
                     all([fl["series_name"] is not None, fl["series_name"] != ""])
                     and comicarr.CONFIG.IGNORE_COVERS is True
@@ -2092,16 +2100,6 @@ class PostProcessor(object):
                             % (module, cs["ComicName"], cs["ComicID"])
                         )
 
-                selected_items = manual_list[manual_list_start:]
-                log_scan_summary(
-                    module,
-                    fl["comicfilename"],
-                    len(watchvals),
-                    selected_items,
-                    sum(1 for item in selected_items if item.get("AnnualType")),
-                    story_the_arcs,
-                )
-
                 # we should setup for manual post-processing of story-arc issues here
                 # we can also search by ComicID to just grab those particular arcs as an alternative as well (not done)
 
@@ -2922,6 +2920,19 @@ class PostProcessor(object):
                                 )  # helpers.conversion(fl['comicfilename'])))
                                 self.matched = True
                                 break
+
+                selected_items, annual_count, story_arc_matched = summarize_scan_matches(
+                    manual_list[manual_list_start:],
+                    manual_arclist[manual_arclist_start:],
+                )
+                log_scan_summary(
+                    module,
+                    fl["comicfilename"],
+                    len(watchvals),
+                    selected_items,
+                    annual_count,
+                    story_arc_matched,
+                )
 
             if filelist["comiccount"] > 0:
                 logger.fdebug(

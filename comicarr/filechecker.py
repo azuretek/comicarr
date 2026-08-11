@@ -311,13 +311,12 @@ class FileChecker(object):
         if self.sarc and comicarr.CONFIG.READ2FILENAME:
             removest = modfilename.find("-")  # the - gets removed above so we test for the first blank space...
             logger.fdebug(
-                "[SARC] Checking filename for Reading Order sequence - Reading Sequence Order found #: %s"
-                % modfilename[:removest]
+                "[SARC] Checking filename for Reading Order sequence - candidate: %s" % modfilename[:removest]
             )
             if modfilename[:removest].isdigit() and removest <= 3:
                 reading_order = {"reading_sequence": str(modfilename[:removest]), "filename": filename[removest + 1 :]}
                 modfilename = modfilename[removest + 1 :]
-                logger.fdebug("[SARC] Removed Reading Order sequence from subname. Now set to : %s" % modfilename)
+                logger.fdebug("[SARC] Validated and removed Reading Order sequence. Filename is now: %s" % modfilename)
 
         # make sure all the brackets are properly spaced apart
         if modfilename.find(r"\s") == -1:
