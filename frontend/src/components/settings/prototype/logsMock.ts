@@ -65,10 +65,7 @@ export function parseLogLine(raw: string): ParsedLogLine {
 export const MOCK_PARSED_LOGS = MOCK_RAW_LOGS.map(parseLogLine);
 
 export type LevelSource =
-  | "config"
-  | "environment"
-  | "startup argument"
-  | "default";
+  "config" | "environment" | "startup argument" | "default";
 
 export type LogsPrototypeScenario = {
   /** Value stored in config.ini / form (what Settings edits). */
@@ -122,9 +119,7 @@ export function filterByMinLevel(
   return lines.filter((line) => order.indexOf(line.level) >= minIdx);
 }
 
-export function levelBadgeStyle(
-  level: LogLevelName,
-): Record<string, string> {
+export function levelBadgeStyle(level: LogLevelName): Record<string, string> {
   switch (level) {
     case "ERROR":
       return {

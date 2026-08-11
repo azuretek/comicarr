@@ -35,6 +35,7 @@ import pytest
 
 import comicarr
 from comicarr import logger as comicarr_logger
+from comicarr.app.config.log_level import ACCEPTED_FORMS
 from comicarr.app.core.context import AppContext
 from comicarr.app.system import service as system_service
 from comicarr.config import config_transaction_lock
@@ -205,19 +206,28 @@ class TestTheValueIsReadByTheSameRulesAsEverySource:
         assert stubbed_save.config.LOG_LEVEL == clamped
         assert stubbed_save.applied == [clamped]
 
-    @pytest.mark.parametrize("raw", ["verbose", True, 2.5])
+    @pytest.mark.parametrize("raw", ["verbose", "loud", True, 2.5])
     def test_a_non_level_is_refused_rather_than_persisted(self, stubbed_save, raw):
         """Persisting garbage would be ignored at the next start -- silently.
 
         Startup sources fall through to the next layer instead of refusing to
-        boot. An HTTP request has somewhere to put the complaint.
+        boot. An HTTP request has somewhere to put the complaint. "verbose" is
+        refused with the rest: it is a flag spelling, never a level name (#620).
         """
         result = stubbed_save(log_level=raw)
 
         assert result["success"] is False
-        assert "LOG_LEVEL must be a number between 0 and 2" == result["error"]
+        assert "LOG_LEVEL must be %s" % ACCEPTED_FORMS == result["error"]
         assert stubbed_save.config.transactions == []
         assert stubbed_save.applied == []
+
+    @pytest.mark.parametrize("name, stored", [("warning", 0), ("info", 1), ("debug", 2), ("DEBUG", 2)])
+    def test_a_name_is_accepted_and_persisted_as_its_integer(self, stubbed_save, name, stored):
+        """The endpoint is no narrower than the CLI, and config.ini stays typed."""
+        assert stubbed_save(log_level=name) == {"success": True}
+
+        assert stubbed_save.config.LOG_LEVEL == stored
+        assert stubbed_save.applied == [stored]
 
 
 class TestTheRunningLevelOnlyFollowsADurableSave:

@@ -91,23 +91,26 @@ def main():
     parser.add_argument(
         "--log-level",
         dest="log_level",
-        type=int,
         default=None,
-        metavar="{0,1,2}",
+        metavar="{0,1,2|warning,info,debug}",
         help=(
-            "Logging verbosity: 0 warnings and errors, 1 normal, 2 everything. "
+            "Logging verbosity: 0/warning warnings and errors, 1/info normal, 2/debug everything. "
             "Overrides COMICARR_LOG_LEVEL and the config file; omit it and those apply."
         ),
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true", default=False, help="Increase console logging verbosity"
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Deprecated alias for --log-level debug (everything)",
     )
     parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
         default=False,
-        help="Deprecated alias for --log-level 0 (warnings and errors only)",
+        help="Deprecated alias for --log-level warning (warnings and errors only)",
     )
     parser.add_argument("-d", "--daemon", action="store_true", default=False, help="Run as a daemon")
     parser.add_argument("-p", "--port", type=int, default=0, help="Force Comicarr to run on a specified port")
@@ -300,15 +303,25 @@ def main():
     # Startup args are the top of the precedence chain (args > COMICARR_LOG_LEVEL
     # > config), but only when one was actually passed: leaving this None is what
     # lets the environment and the config file be heard at all.
+    #
+    # `--log-level` accepts a number or a name; an unusable value supplies
+    # nothing, so it falls through to the aliases and then to the layers below
+    # rather than blocking the boot over a typo.
     comicarr.LOG_LEVEL = None
     if args_log_level is not None:
-        comicarr.LOG_LEVEL = log_level_source.clamp_level(args_log_level)
-        print("Log level set to %s by startup argument." % comicarr.LOG_LEVEL)
-    elif args_verbose:
-        print("Verbose/Debugging mode enabled...")
+        argument_level, argument_notices = log_level_source.parse_level(
+            args_log_level, log_level_source.SOURCE_ARGUMENT
+        )
+        for notice in argument_notices:
+            print(notice)
+        if argument_level is not None:
+            comicarr.LOG_LEVEL = argument_level
+            print("Log level set to %s by startup argument." % log_level_source.describe_level(argument_level))
+    if comicarr.LOG_LEVEL is None and args_verbose:
+        print("--verbose is deprecated; use --log-level debug. Log level set to 2 (debug).")
         comicarr.LOG_LEVEL = 2
-    elif args_quiet:
-        print("--quiet is deprecated; use --log-level 0. Logging warnings and errors only...")
+    if comicarr.LOG_LEVEL is None and args_quiet:
+        print("--quiet is deprecated; use --log-level warning. Log level set to 0 (warning).")
         comicarr.LOG_LEVEL = 0
 
     if args_ignoreupdate:

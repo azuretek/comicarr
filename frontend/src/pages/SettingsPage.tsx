@@ -402,9 +402,7 @@ export default function SettingsPage() {
             {section === "clients" && <DownloadClientsTab {...tabProps} />}
             {section === "ai" && <AiTab {...tabProps} />}
             {section === "about" && <AboutTab {...aboutProps} />}
-            {import.meta.env.DEV && section === "logs" && (
-              <LogsPrototypeHost />
-            )}
+            {import.meta.env.DEV && section === "logs" && <LogsPrototypeHost />}
           </div>
         </div>
       </div>

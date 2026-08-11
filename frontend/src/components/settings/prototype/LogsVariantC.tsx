@@ -107,8 +107,8 @@ export function LogsVariantC({ simulateOverride }: Props) {
           >
             Process is running at{" "}
             <strong>
-              {LEVEL_LABELS[scenario.effectiveLevel]} (
-              {scenario.effectiveLevel})
+              {LEVEL_LABELS[scenario.effectiveLevel]} ({scenario.effectiveLevel}
+              )
             </strong>{" "}
             via {scenario.effectiveSource}, not the saved config value (
             {savedLevel}). Restart will re-apply the pin.
@@ -152,7 +152,10 @@ export function LogsVariantC({ simulateOverride }: Props) {
           side="right"
           className="flex w-full flex-col gap-0 p-0 sm:max-w-xl"
         >
-          <SheetHeader className="border-b px-4 py-3" style={{ borderColor: "var(--border)" }}>
+          <SheetHeader
+            className="border-b px-4 py-3"
+            style={{ borderColor: "var(--border)" }}
+          >
             <SheetTitle className="text-[15px]">comicarr.log</SheetTitle>
             <SheetDescription className="text-[12px]">
               Last {MOCK_PARSED_LOGS.length} lines · redacted server-side
@@ -185,7 +188,12 @@ export function LogsVariantC({ simulateOverride }: Props) {
                 <RefreshCw className="size-3.5" />
                 Refresh
               </Button>
-              <Button type="button" variant="outline" size="sm" onClick={copyAll}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={copyAll}
+              >
                 <Copy className="size-3.5" />
                 {copied ? "Copied" : "Copy"}
               </Button>
