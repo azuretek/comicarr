@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.29.0
+
+### Minor Changes
+
+- c5b7cd4: Read your logs without leaving Comicarr. Settings has a new **Logs** section: the tail of `comicarr.log` in a console you can filter by severity and copy straight into a bug report, with the log level dial sitting right above it. Raise the level, reproduce the problem, and read what happened — without a shell, a `docker exec`, or a restart.
+
+  The dial is honest about who is in charge. If a `--log-level` flag or `COMICARR_LOG_LEVEL` is setting the level, the page says so, names the level actually running and the one the next restart will bring back, and explains that the value you save here applies immediately but will not survive that restart until the pin is removed. When nothing overrides it, the page stays quiet and the dial simply is what runs.
+
+  The header shows where the log file lives and how much history is kept (`10 MB × 5 files`) so you can see the ceiling before turning verbosity up. You can pull the last 200, 1,000, or 5,000 lines. Provider secrets are still redacted before any line leaves the server, and only the current log file is read — rotated files stay where they are.
+
+### Patch Changes
+
+- 08e1f54: Docker containers now log normally. The image used to start Comicarr with `--quiet` hardcoded, so `docker logs` showed almost nothing and no setting could raise it — the level you chose in Settings was overruled on every start. That argument is gone: containers now run at the normal level, `docker logs` shows what the server is doing, and the level is yours to set. Change it in Settings, or set `COMICARR_LOG_LEVEL` to `0`, `1`, or `2` in your compose file when you want it fixed regardless of Settings. The container banner says which of the two is in effect at startup.
+
+  Expect more output than before after upgrading — that is the fix, not a side effect. Turn it down in Settings if you want less.
+
+- 173d9f9: Debug logging now includes useful folder-scan diagnostics without a second hidden switch. Comicarr removes the legacy `folder_scan_log_verbose` setting during the configuration upgrade; set the single Log level to `2 · Debug` when diagnosing scan matching. Candidate-heavy scans now summarize their work per input file instead of flooding the log with one line for every comparison.
+- 90e19a0: The logging level you save in Settings now takes effect immediately, with no restart. Previously the new level was written to the config file and then ignored until the server came back up — which is exactly the wrong moment, since you usually turn verbosity up to catch a problem that is happening right now, and restarting throws away the state you were trying to capture. Turn the dial up, reproduce the problem, read the logs. Out-of-range numbers are clamped to `0`–`2` as they are everywhere else, and a value that is not a number is refused rather than saved and silently dropped at the next start.
+- 25f839b: You can now set the logging verbosity without editing the config file. `--log-level 0|1|2` on the command line and the `COMICARR_LOG_LEVEL` environment variable both set it, and each is honoured only when you actually supply it — a startup argument wins over the environment variable, which wins over the level saved in Settings. An out-of-range number is clamped instead of refusing to start, an unreadable one is reported and skipped, and whichever source wins says on startup what it overrode. `--quiet` still works as before but now prints a deprecation notice pointing at `--log-level 0`.
+- 955504e: Changing the logging level now does what you asked for. Raising verbosity no longer silences console output — under Docker it previously did exactly that, so there was no way to get more detail out of a container. Lowering it now takes effect immediately instead of leaving the previous, noisier level in place. Quiet mode means warnings and errors only rather than near-total silence, so a failure still reaches you with the dial turned down.
+- 16fe65d: The log level can now be set by name as well as by number. `warning`, `info`, and `debug` work anywhere the number did — `--log-level debug` on the command line, `COMICARR_LOG_LEVEL=debug` in your compose file, or `LOG_LEVEL = debug` in `config.ini`. Numbers are unchanged, so nothing you already have needs editing, and capitalisation does not matter.
+
+  The names describe what each level actually does: level `0` is `warning` because it emits warnings and errors. It was previously described as "quiet", which suggested silence and was never true — turning the dial down has always kept failures visible.
+
+  Startup messages now name the level both ways, so it is obvious which setting produced it: `Log level 2 (debug) from startup argument overrides 1 (info) from the config file`.
+
+  `--verbose` and `-v` are now deprecated aliases for `--log-level debug`, joining `--quiet` and `-q` (aliases for `--log-level warning`). All four keep working and will continue to — they print a note pointing at `--log-level`, which is the one flag that sets the level directly.
+
+- 22098c1: Warnings and errors now reach your logs on Docker. Comicarr chose between two different logging implementations based on your system locale, and the one containers ended up on was missing pieces: certain warnings — "No COMIC_DIR configured", "Cannot find import directory", and others like them — raised an internal error instead of being written down, and unexpected failures were dropped entirely while the server tried to record them. Startup even announced it: _"errors WILL NOT be captured in the logs"_. There is one logging implementation now, the same for every locale, so those messages appear in `comicarr.log`, in `docker logs`, and in the log list in the Web UI like everything else.
+
+  Two things to expect after upgrading. Log lines from containers change shape slightly — `INFO :: comicarr.backup_files.539 : MainThread` in place of `INFO :: MainThread : maintenance.py:backup_files:539 :` — so an existing log file will show both styles either side of the upgrade. And with the dial turned all the way down, `docker logs` now shows warnings and errors rather than nothing at all, which is what level 0 was always meant to mean.
+
 ## 0.28.0
 
 ### Minor Changes
