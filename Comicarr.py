@@ -98,7 +98,9 @@ def main():
     parser.add_argument(
         "-v", "--verbose", action="store_true", default=False, help="Increase console logging verbosity"
     )
-    parser.add_argument("-q", "--quiet", action="store_true", default=False, help="Turn off console logging")
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", default=False, help="Log warnings and errors only (log level 0)"
+    )
     parser.add_argument("-d", "--daemon", action="store_true", default=False, help="Run as a daemon")
     parser.add_argument("-p", "--port", type=int, default=0, help="Force Comicarr to run on a specified port")
     parser.add_argument(

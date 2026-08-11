@@ -12,12 +12,31 @@ the logger and to every sink it feeds. There is no second dial.
 | `1` — normal (default) | `INFO` | info and above | info and above | info and above |
 | `2` — verbose | `DEBUG` | everything | everything | everything |
 
-`None` — the value before configuration is read — resolves to level `1`.
 Levels below `0` clamp to `WARNING`; above `2` clamp to `DEBUG`.
 
 `logger.threshold_for_level()` is the only place this mapping lives, and
 `logger.current_log_level()` is the only supported way to ask what the dial is
 currently set to. Nothing else may branch on verbosity.
+
+### The two helpers disagree about `None`, on purpose
+
+`comicarr.LOG_LEVEL` is `None` until configuration is read, and the two helpers
+resolve that differently. This is deliberate, not an oversight:
+
+- `threshold_for_level(None)` → `INFO`. It answers *"how should the sinks be
+  configured?"*, and an unconfigured process should log normally rather than
+  start half-muted. In practice both callers pass a resolved integer, so this
+  is a defensive default rather than a live path.
+- `current_log_level()` → `0`. It answers *"how loud is the operator asking us
+  to be right now?"*, and before the config says otherwise the conservative
+  answer is the quiet one.
+
+Picking one shared value would break a caller either way. Making
+`current_log_level()` return `1` would stop the first-run setup token from being
+echoed to stdout before config load — and losing that token means the operator
+cannot finish setup at all. Making `threshold_for_level(None)` return `WARNING`
+would silently downgrade default logging. So they stay distinct, and callers
+choose by what they are actually asking.
 
 ## Two rules that fall out of it
 

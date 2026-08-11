@@ -1720,7 +1720,14 @@ class Config(object):
             try:
                 os.makedirs(self.LOG_DIR)
             except OSError:
-                logger.warn("Unable to create the log directory. Logging to screen only.")
+                # Same recovery as the startup path above, and it has to happen
+                # here too: this block runs after read() already nulled LOG_DIR,
+                # and the reset a few lines up put the uncreatable path back.
+                # Leaving it set makes the message a lie and, worse, makes the
+                # next configure_log_level() raise FileNotFoundError when the
+                # rotating file handler tries to open a file under it.
+                self.LOG_DIR = None
+                logger.warn("[CONFIG] Unable to create the log directory. Logging to screen only.")
 
         # if not update:
         #     logger.fdebug('[Cache Check] Cache directory currently set to : ' + self.CACHE_DIR)

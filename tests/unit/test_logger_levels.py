@@ -109,6 +109,34 @@ def test_console_can_still_be_detached_explicitly(isolated_logger):
     assert lg.level == logging.DEBUG
 
 
+def test_no_log_dir_degrades_to_screen_only(monkeypatch):
+    """A screen-only recovery has to actually be screen-only.
+
+    Both log-directory failure paths in config.py recover by setting
+    ``LOG_DIR = None``. That recovery is only real if a falsy log_dir produces
+    no file handler — otherwise the message lies and the next
+    ``configure_log_level()`` raises FileNotFoundError building the handler
+    over a directory that does not exist.
+    """
+    lg = logging.getLogger("comicarr")
+    saved_handlers = lg.handlers[:]
+    saved_level = lg.level
+    monkeypatch.setattr(comicarr, "LOG_LEVEL", 1, raising=False)
+    try:
+        comicarr_logger.initLogger(console=True, log_dir=None, loglevel=1)
+        sinks = _sink_levels(lg)
+
+        assert "RotatingFileHandler" not in sinks
+        assert "StreamHandler" in sinks
+    finally:
+        for handler in lg.handlers[:]:
+            lg.removeHandler(handler)
+            handler.close()
+        for handler in saved_handlers:
+            lg.addHandler(handler)
+        lg.setLevel(saved_level)
+
+
 @pytest.mark.parametrize(
     "level, threshold",
     [
