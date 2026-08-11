@@ -27,7 +27,8 @@ function OverrideStrip({ scenario }: { scenario: LogsPrototypeScenario }) {
     <div
       className="rounded-[5px] border px-3 py-2 text-[12.5px]"
       style={{
-        borderColor: "color-mix(in oklab, var(--status-paused) 40%, transparent)",
+        borderColor:
+          "color-mix(in oklab, var(--status-paused) 40%, transparent)",
         background: "var(--status-paused-bg)",
         color: "var(--status-paused)",
       }}

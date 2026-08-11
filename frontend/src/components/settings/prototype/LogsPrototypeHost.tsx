@@ -41,8 +41,8 @@ export function LogsPrototypeHost() {
         style={{ borderColor: "var(--border)" }}
       >
         <div className="text-[12px] text-muted-foreground">
-          <strong className="text-foreground">PROTOTYPE</strong> — mock data,
-          no API writes. Use ← → or the bar below to compare variants.
+          <strong className="text-foreground">PROTOTYPE</strong> — mock data, no
+          API writes. Use ← → or the bar below to compare variants.
         </div>
         <label className="flex cursor-pointer items-center gap-2 text-[12.5px]">
           <input

@@ -154,7 +154,9 @@ export function LogsVariantB({ simulateOverride }: Props) {
                 read-only
               </span>
             </div>
-            <div className="mt-0.5 font-mono text-[11px]">{scenario.logDir}</div>
+            <div className="mt-0.5 font-mono text-[11px]">
+              {scenario.logDir}
+            </div>
           </div>
         </div>
         <OverrideCard
@@ -183,7 +185,9 @@ export function LogsVariantB({ simulateOverride }: Props) {
                   className="rounded-full border px-2.5 py-0.5 text-[11.5px]"
                   style={{
                     borderColor: active ? "var(--primary)" : "var(--border)",
-                    color: active ? "var(--primary)" : "var(--muted-foreground)",
+                    color: active
+                      ? "var(--primary)"
+                      : "var(--muted-foreground)",
                     background: active
                       ? "color-mix(in oklab, var(--primary) 12%, transparent)"
                       : "transparent",
@@ -221,7 +225,9 @@ export function LogsVariantB({ simulateOverride }: Props) {
               style={{ background: "var(--card)" }}
             >
               <tr>
-                <th className="px-3 py-2 font-medium whitespace-nowrap">Time</th>
+                <th className="px-3 py-2 font-medium whitespace-nowrap">
+                  Time
+                </th>
                 <th className="px-2 py-2 font-medium">Level</th>
                 <th className="px-3 py-2 font-medium">Message</th>
               </tr>
