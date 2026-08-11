@@ -44,6 +44,18 @@ RETIRED_GLOBALS = {
         "cleared. Gate on logger.current_log_level(), or pass an explicit "
         "console= flag to logger.initLogger()."
     ),
+    "LOG_LANG": (
+        "retired with the RotatingLogger branch (#611/#619). Branching the "
+        "logger on locale gave non-English installs — which is every Docker "
+        "install, since python:3.12-slim sets LANG=C.UTF-8 — a second "
+        "implementation that dropped logger.warning and logger.exception "
+        "entirely. There is one logger for every locale now."
+    ),
+    "LOG_CHARSET": (
+        "retired with the RotatingLogger branch (#611/#619). It was assigned "
+        "at import and never read by anything, which is the clearest evidence "
+        "the locale branch never did the encoding job it claimed to."
+    ),
 }
 
 # Trees that hold source. Prose keeps the history — the ADR names the retired

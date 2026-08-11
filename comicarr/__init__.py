@@ -135,8 +135,6 @@ ACQUISITION_WORKERS_BLOCKED = True
 ACQUISITION_BLOCK_REASON = "schema_unavailable"
 LOG_DIR = None
 LOGTYPE = "log"
-LOG_LANG = "en"
-LOG_CHARSET = "UTF-8"
 LOG_LEVEL = None
 LOGLIST = []
 ARGS = None
@@ -444,8 +442,6 @@ def initialize(config_file):
             UPDATER_STATUS, \
             FORCE_STATUS, \
             DB_BACKFILL, \
-            LOG_LANG, \
-            LOG_CHARSET, \
             APILOCK, \
             SEARCHLOCK, \
             DDL_LOCK, \
