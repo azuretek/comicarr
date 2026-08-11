@@ -21,6 +21,7 @@ import comicarr
 if comicarr.LOG_LEVEL is None:
     comicarr.LOG_LEVEL = 0
 
+from comicarr.app.config import log_level
 from comicarr.app.core.context import AppContext
 from comicarr.app.core.security import (
     create_session_token,
@@ -2541,3 +2542,90 @@ class TestConfigTransactions:
         persisted.read(config_path)
         assert persisted.get("Import", "comic_dir") == "/old/library"
         assert persisted.get("General", "destination_dir") == "/direct/destination"
+
+
+class TestRecentLogs:
+    """Settings → Logs reads the tail of the current file and nothing else.
+
+    The surface exists for one path -- raise the level, reproduce, paste -- so
+    it reads the current `comicarr.log` only, never a rotated one, and carries
+    the level context the dial has to be honest about (#610, #616).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_recorded_argument(self):
+        log_level.record_startup_argument(None)
+        yield
+        log_level.record_startup_argument(None)
+
+    @staticmethod
+    def _ctx_with_log(tmp_path, lines, level=1):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "comicarr.log").write_text("".join(f"{line}\n" for line in lines))
+        (log_dir / "comicarr.log.1").write_text("rotated-line\n")
+        ctx = _make_test_ctx(data_dir=str(tmp_path))
+        ctx.config.LOG_DIR = str(log_dir)
+        ctx.config.LOG_LEVEL = level
+        ctx.config.EXTRA_NEWZNABS = []
+        ctx.config.EXTRA_TORZNABS = []
+        return ctx
+
+    def test_only_the_requested_tail_comes_back(self, tmp_path):
+        ctx = self._ctx_with_log(tmp_path, [f"line-{n}" for n in range(50)])
+
+        result = system_service.get_recent_logs(ctx, lines=5)
+
+        assert [line.strip() for line in result["logs"]] == [f"line-{n}" for n in range(45, 50)]
+        assert result["requested"] == 5
+
+    def test_rotated_files_are_not_read(self, tmp_path):
+        ctx = self._ctx_with_log(tmp_path, ["current-line"])
+
+        result = system_service.get_recent_logs(ctx, lines=200)
+
+        assert "rotated-line" not in "".join(result["logs"])
+
+    def test_a_request_beyond_the_ceiling_is_clamped_not_refused(self, tmp_path):
+        ctx = self._ctx_with_log(tmp_path, ["only-line"])
+
+        result = system_service.get_recent_logs(ctx, lines=10**6)
+
+        assert result["requested"] == system_service.MAX_LOG_LINES
+
+    def test_the_level_context_reports_saved_effective_and_restart(self, tmp_path):
+        ctx = self._ctx_with_log(tmp_path, ["a-line"], level=1)
+
+        with patch.object(system_service.logger, "current_log_level", return_value=2):
+            level = system_service.get_recent_logs(ctx, lines=10)["level"]
+
+        assert level["saved"] == 1
+        assert level["effective"] == 2
+        assert level["effective_name"] == "debug"
+        assert level["restart_level"] == 1
+        assert level["pinned"] is False
+
+    def test_a_startup_argument_shows_up_as_pinned(self, tmp_path):
+        """The #610 shape: the dial's value cannot survive a restart, and says so."""
+        ctx = self._ctx_with_log(tmp_path, ["a-line"], level=2)
+        log_level.record_startup_argument(0)
+
+        with patch.object(system_service.logger, "current_log_level", return_value=2):
+            level = system_service.get_recent_logs(ctx, lines=10)["level"]
+
+        assert level["pinned"] is True
+        assert level["restart_level"] == 0
+        assert level["restart_source"] == log_level.SOURCE_ARGUMENT
+        assert level["saved"] == 2
+
+    def test_a_missing_log_file_still_carries_the_level_context(self, tmp_path):
+        """An operator opening an empty viewer needs the dial to work anyway."""
+        ctx = _make_test_ctx(data_dir=str(tmp_path))
+        ctx.config.LOG_DIR = str(tmp_path / "logs")
+        ctx.config.LOG_LEVEL = 0
+
+        result = system_service.get_recent_logs(ctx)
+
+        assert result["logs"] == []
+        assert result["level"]["saved"] == 0
+        assert result["path"].endswith("comicarr.log")

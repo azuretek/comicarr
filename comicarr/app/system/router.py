@@ -18,7 +18,7 @@ import asyncio
 import json
 import threading
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
@@ -346,9 +346,17 @@ def check_version_now(ctx: AppContext = Depends(get_context)):
 
 
 @router.get("/system/logs", dependencies=[Depends(require_session)])
-def get_logs(ctx: AppContext = Depends(get_context)):
-    """Return recent log entries."""
-    return system_service.get_recent_logs(ctx)
+def get_logs(
+    lines: int = Query(
+        system_service.DEFAULT_LOG_LINES,
+        ge=1,
+        le=system_service.MAX_LOG_LINES,
+        description="How many trailing lines of comicarr.log to return.",
+    ),
+    ctx: AppContext = Depends(get_context),
+):
+    """Return the tail of the current log file plus the effective log level."""
+    return system_service.get_recent_logs(ctx, lines=lines)
 
 
 @router.get("/system/jobs", dependencies=[Depends(require_session)])

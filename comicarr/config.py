@@ -35,7 +35,7 @@ from pathlib import Path
 
 import comicarr
 from comicarr import db, encrypted, filechecker, helpers, logger, maintenance
-from comicarr.app.config.log_level import resolve_startup_log_level
+from comicarr.app.config.log_level import record_startup_argument, resolve_startup_log_level
 from comicarr.app.config.registry import as_legacy_definitions
 
 config = configparser.ConfigParser()
@@ -415,6 +415,10 @@ class Config(object):
             # COMICARR_LOG_LEVEL, then the config file. See
             # comicarr/app/config/log_level.py and
             # docs/architecture/logging-levels.md.
+            # Capture the argument before the line below overwrites the global
+            # with the resolved level: the Settings page has to be able to name
+            # a `--log-level` flag as the reason its dial keeps losing.
+            record_startup_argument(comicarr.LOG_LEVEL)
             resolution = resolve_startup_log_level(
                 argument_level=comicarr.LOG_LEVEL,
                 config_level=self.LOG_LEVEL,
