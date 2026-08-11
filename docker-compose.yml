@@ -17,5 +17,10 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
+      # Logging verbosity: 0 warnings and errors, 1 normal, 2 everything.
+      # Leave it commented out to control the level from Settings — setting it
+      # here wins over Settings on every restart, which is what you want while
+      # debugging and not what you want the rest of the time.
+      # - COMICARR_LOG_LEVEL=2
     restart: unless-stopped
     stop_grace_period: 30s

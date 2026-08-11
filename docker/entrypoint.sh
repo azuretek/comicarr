@@ -13,6 +13,11 @@ echo "  PUID:  ${PUID}"
 echo "  PGID:  ${PGID}"
 echo "  UMASK: ${UMASK}"
 echo "  TZ:    ${TZ:-not set}"
+if [ -n "${COMICARR_LOG_LEVEL}" ]; then
+    echo "  LOG:   level ${COMICARR_LOG_LEVEL} (COMICARR_LOG_LEVEL)"
+else
+    echo "  LOG:   level from Settings; set COMICARR_LOG_LEVEL to 0, 1 or 2 to override"
+fi
 echo "───────────────────────────────────"
 
 # Create group — use existing group if GID is already taken
@@ -57,6 +62,13 @@ for dir in /comics /downloads /manga; do
     fi
 done
 
-# Drop privileges and exec the application
+# Drop privileges and exec the application.
+#
+# No verbosity argument here, deliberately: a startup argument outranks both
+# COMICARR_LOG_LEVEL and the level saved in Settings, so hardcoding one takes
+# the dial away from the operator entirely. That is #610 — the image passed
+# --quiet, and no amount of configuration could raise the level past it.
+# gosu execs in place and keeps the environment, so COMICARR_LOG_LEVEL reaches
+# the app from here.
 exec gosu comicarr python /opt/comicarr/Comicarr.py \
-    --nolaunch --quiet --datadir /config/comicarr "$@"
+    --nolaunch --datadir /config/comicarr "$@"
