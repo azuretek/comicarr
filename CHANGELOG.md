@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.28.0
+
+### Minor Changes
+
+- 047e8a8: Settings → About can create a Support bundle for troubleshooting. Review the three files in the ZIP before attaching it to a public issue; share it privately with a maintainer if anything looks sensitive.
+
 ## 0.27.1
 
 ### Patch Changes
