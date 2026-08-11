@@ -57,6 +57,34 @@ _POSTPROCESS_JOURNAL_STAGE = PostProcessJournalStage()
 _POSTPROCESS_INPUT_STAGE = PostProcessInputStage()
 
 
+def format_scan_summary(filename, candidate_count, selected_items, annual_count, story_arc):
+    """Format the bounded Debug summary emitted once for each scanned file."""
+    selected = (
+        ", ".join("%s/%s" % (item.get("ComicID", "?"), item.get("ComicName", "?")) for item in selected_items) or "none"
+    )
+    return "[SCAN SUMMARY] %s: candidates=%s, selected=%s, annual_or_special=%s, story_arc=%s" % (
+        filename,
+        candidate_count,
+        selected,
+        annual_count,
+        story_arc,
+    )
+
+
+def log_scan_summary(module, filename, candidate_count, selected_items, annual_count, story_arc):
+    logger.fdebug(
+        "%s%s" % (module, format_scan_summary(filename, candidate_count, selected_items, annual_count, story_arc))
+    )
+
+
+def summarize_scan_matches(normal_items, arc_items):
+    """Build summary fields from the matches selected for one input file."""
+    selected_items = normal_items + arc_items
+    annual_count = sum(1 for item in selected_items if item.get("AnnualType"))
+    story_arc = bool(arc_items or any(item.get("IssueArcID") for item in normal_items))
+    return selected_items, annual_count, story_arc
+
+
 class PostProcessor(object):
     """
     A class which will process a media file according to the post processing settings in the config.
@@ -666,7 +694,6 @@ class PostProcessor(object):
                     self.comicid = cid["ComicID"]
                 else:
                     if "_" in self.issueid:
-                        logger.fdebug("Story Arc post-processing request detected.")
                         self.issuearcid = self.issueid
                         self.issueid = None
                         logger.fdebug(
@@ -713,6 +740,8 @@ class PostProcessor(object):
             oneoff_issuelist = []
             manual_list = []
             for fl in filelist["comiclist"]:
+                manual_list_start = len(manual_list)
+                manual_arclist_start = len(manual_arclist)
                 if (
                     all([fl["series_name"] is not None, fl["series_name"] != ""])
                     and comicarr.CONFIG.IGNORE_COVERS is True
@@ -1132,7 +1161,6 @@ class PostProcessor(object):
                             #    continue
                 watchvals = []
                 for wv in comicseries:
-                    logger.info("Now checking: %s [%s]" % (wv["ComicName"], wv["ComicID"]))
                     # do some extra checks in here to ignore these types:
                     # check for valid issue number - if not, don't even bother checking it
                     try:
@@ -1201,11 +1229,6 @@ class PostProcessor(object):
                     wv_latestissue = wv["LatestIssue"]
                     wv_intlatestissue = wv["intLatestIssue"]
                     wv_forcecontinuing = bool(wv["ForceContinuing"])
-                    if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                        logger.fdebug(
-                            "Queuing to Check: %s [%s] -- %s" % (wv["ComicName"], wv["ComicYear"], wv["ComicID"])
-                        )
-
                     # force it to use the Publication Date of the latest issue instead of the Latest Date (which could be anything)
                     ld_check = db.select_one(
                         select(issues.c.ReleaseDate, issues.c.Issue_Number, issues.c.Int_IssueNumber)
@@ -2897,6 +2920,19 @@ class PostProcessor(object):
                                 )  # helpers.conversion(fl['comicfilename'])))
                                 self.matched = True
                                 break
+
+                selected_items, annual_count, story_arc_matched = summarize_scan_matches(
+                    manual_list[manual_list_start:],
+                    manual_arclist[manual_arclist_start:],
+                )
+                log_scan_summary(
+                    module,
+                    fl["comicfilename"],
+                    len(watchvals),
+                    selected_items,
+                    annual_count,
+                    story_arc_matched,
+                )
 
             if filelist["comiccount"] > 0:
                 logger.fdebug(

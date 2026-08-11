@@ -184,6 +184,14 @@ choose by what they are actually asking.
 
 ## Two rules that fall out of it
 
+**Subsystem diagnostics are entries, not dials.** Folder scanning used to put
+some of its `DEBUG` entries behind `FOLDER_SCAN_LOG_VERBOSE`, a hidden legacy
+`config.ini` key. That made level `2` an incomplete promise: an operator could
+ask for everything and still miss the matching details they needed. Folder-scan
+diagnostics now follow the log level like every other entry. High-cardinality
+matching work is summarized per input file instead of requiring a second switch
+to keep candidate-by-candidate chatter manageable.
+
 **Level 0 is "warnings and errors", not silence.** An operator who turns the
 dial down is asking for less noise, not for failures to be hidden. This is why
 the setup-token announcement in `app/system/service.py` echoes to stdout at

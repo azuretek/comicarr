@@ -254,7 +254,7 @@ class Config(object):
                 count = 0
 
             # this is the current version at this particular point in time.
-            self.newconfig = 17
+            self.newconfig = 18
 
             OLDCONFIG_VERSION = 0
             if count == 0:
@@ -503,6 +503,14 @@ class Config(object):
                     logger.info(
                         "[CONFIG] Removed host_return: the SABnzbd handoff now uploads the "
                         "nzb directly and no download client is given a Comicarr address."
+                    )
+            if self.CONFIG_VERSION < 18:
+                # Folder-scan diagnostics now follow the single LOG_LEVEL dial;
+                # remove the retired, hidden verbosity switch from old configs.
+                if config.has_option("General", "folder_scan_log_verbose"):
+                    config.remove_option("General", "folder_scan_log_verbose")
+                    logger.info(
+                        "[CONFIG] Removed folder_scan_log_verbose: folder-scan diagnostics now follow LOG_LEVEL=debug."
                     )
             self.OLDCONFIG_VERSION = str(self.CONFIG_VERSION)
             self.CONFIG_VERSION = self.newconfig

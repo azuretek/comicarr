@@ -34,7 +34,32 @@ from tests.conftest import placement_result
 if comicarr.LOG_LEVEL is None:
     comicarr.LOG_LEVEL = 0
 
-from comicarr.postprocessor import PostProcessor
+from comicarr.postprocessor import PostProcessor, log_scan_summary, summarize_scan_matches
+
+
+def test_scan_summary_emits_one_bounded_line_without_candidate_chatter():
+    selected = [{"ComicID": "42", "ComicName": "Saga"}]
+    with patch("comicarr.postprocessor.logger.fdebug") as fdebug:
+        log_scan_summary("[PP] ", "Saga 1.cbz", 3, selected, 1, True)
+
+    fdebug.assert_called_once()
+    message = fdebug.call_args.args[0]
+    assert "candidates=3" in message
+    assert "selected=42/Saga" in message
+    assert "annual_or_special=1" in message
+    assert "story_arc=True" in message
+    assert "Now checking" not in message
+
+
+def test_scan_summary_reports_a_selected_story_arc_after_matching():
+    normal = [{"ComicID": "42", "ComicName": "Saga"}]
+    arc = [{"ComicID": "42", "ComicName": "Saga: Compendium One", "IssueArcID": "S7"}]
+
+    selected, annual_count, story_arc = summarize_scan_matches(normal, arc)
+
+    assert selected == normal + arc
+    assert annual_count == 0
+    assert story_arc is True
 
 
 def _make_pp(nzb_name, nzb_folder, comicid=None, issueid=None, apicall=False):

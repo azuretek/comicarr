@@ -310,16 +310,13 @@ class FileChecker(object):
         # if it's a story-arc, make sure to remove any leading reading order #'s
         if self.sarc and comicarr.CONFIG.READ2FILENAME:
             removest = modfilename.find("-")  # the - gets removed above so we test for the first blank space...
-            if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                logger.fdebug(
-                    "[SARC] Checking filename for Reading Order sequence - Reading Sequence Order found #: %s"
-                    % modfilename[:removest]
-                )
+            logger.fdebug(
+                "[SARC] Checking filename for Reading Order sequence - candidate: %s" % modfilename[:removest]
+            )
             if modfilename[:removest].isdigit() and removest <= 3:
                 reading_order = {"reading_sequence": str(modfilename[:removest]), "filename": filename[removest + 1 :]}
                 modfilename = modfilename[removest + 1 :]
-                if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                    logger.fdebug("[SARC] Removed Reading Order sequence from subname. Now set to : %s" % modfilename)
+                logger.fdebug("[SARC] Validated and removed Reading Order sequence. Filename is now: %s" % modfilename)
 
         # make sure all the brackets are properly spaced apart
         if modfilename.find(r"\s") == -1:
@@ -1846,11 +1843,7 @@ class FileChecker(object):
                     == re.sub(r"[\|\s]", "", nspace_seriesname.lower()).strip()
                 ]
                 if len(loopchk) > 0 and loopchk[0] != "":
-                    if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                        logger.fdebug("[FILECHECKER] This should be an alternate: %s" % loopchk)
                     if any(["annual" in series_name.lower(), "special" in series_name.lower()]):
-                        if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                            logger.fdebug("[FILECHECKER] Annual/Special detected - proceeding")
                         enable_annual = True
 
                 else:
@@ -1866,13 +1859,9 @@ class FileChecker(object):
                     loopchk.append(nspace_watchcomic)
                     if any(["annual" in nspace_seriesname.lower(), "special" in nspace_seriesname.lower()]):
                         if "biannual" in nspace_seriesname.lower():
-                            if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                                logger.fdebug("[FILECHECKER] BiAnnual detected - wouldn't Deadpool be proud?")
                             nspace_seriesname = re.sub("biannual", "", nspace_seriesname).strip()
                             enable_annual = True
                         elif "annual" in nspace_seriesname.lower():
-                            if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                                logger.fdebug("[FILECHECKER] Annual detected - proceeding cautiously.")
                             off_year_check = re.findall(r"(\d{4})(?=[\s]|annual\b|$)", self.watchcomic, flags=re.I)
                             if off_year_check:
                                 n_name = "%s%s" % (off_year_check[0], "annual")
@@ -1880,50 +1869,22 @@ class FileChecker(object):
                             nspace_seriesname = re.sub("annual", "", nspace_seriesname.lower()).strip()
                             enable_annual = False
                         elif "special" in nspace_seriesname.lower():
-                            if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                                logger.fdebug("[FILECHECKER] Special detected - proceeding cautiously.")
                             nspace_seriesname = re.sub("special", "", nspace_seriesname).strip()
                             enable_annual = False
 
-                if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                    logger.fdebug(
-                        "[FILECHECKER] Complete matching list of names to this file [%s] : %s" % (len(loopchk), loopchk)
-                    )
-
-                for loopit in loopchk:
-                    # now that we have the list of all possible matches for the watchcomic + alternate search names, we go through the list until we find a match.
-                    modseries_name = loopit
-                    if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                        logger.fdebug("[FILECHECKER] AS_Tuple : %s" % self.AS_Tuple)
-                        for ATS in self.AS_Tuple:
-                            if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                                logger.fdebug(
-                                    "[FILECHECKER] %s comparing to %s" % (ATS["AS_Alternate"], nspace_seriesname)
-                                )
-                            if (
-                                re.sub(r"\|", "", ATS["AS_Alternate"].lower()).strip()
-                                == re.sub(r"\|", "", nspace_seriesname.lower()).strip()
-                            ):
-                                if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                                    logger.fdebug("[FILECHECKER] Associating ComiciD : %s" % ATS["ComicID"])
-                                annual_comicid = str(ATS["ComicID"])
-                                modseries_name = ATS["AS_Alternate"]
-                                break
-
-                    logger.fdebug("[FILECHECKER] %s - watchlist match on : %s" % (modseries_name, filename))
+                for ATS in self.AS_Tuple:
+                    if (
+                        re.sub(r"\|", "", ATS["AS_Alternate"].lower()).strip()
+                        == re.sub(r"\|", "", nspace_seriesname.lower()).strip()
+                    ):
+                        annual_comicid = str(ATS["ComicID"])
+                        break
 
             if enable_annual:
                 if annual_comicid is not None:
-                    if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                        logger.fdebug("enable annual is on")
-                        logger.fdebug("annual comicid is %s" % annual_comicid)
                     if "biannual" in nspace_watchcomic.lower():
-                        if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                            logger.fdebug("bi annual detected")
                         justthedigits = "BiAnnual %s" % justthedigits
                     elif "annual" in nspace_watchcomic.lower():
-                        if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                            logger.fdebug("annual detected")
                         justthedigits = "Annual %s" % justthedigits
                     elif "special" in nspace_watchcomic.lower():
                         justthedigits = "Special %s" % justthedigits
@@ -2152,16 +2113,10 @@ class FileChecker(object):
                     # if it's !! present, it's the comicid associated with the series as an added annual.
                     # extract the !!, store it and then remove it so things will continue.
                     as_start = AS_Alternate.find("!!")
-                    if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                        logger.fdebug("as_start: %s --- %s" % (as_start, AS_Alternate[as_start:]))
                     as_end = AS_Alternate.find("##", as_start)
                     if as_end == -1:
                         as_end = len(AS_Alternate)
-                    if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                        logger.fdebug("as_start: %s --- %s" % (as_end, AS_Alternate[as_start:as_end]))
                     AS_ComicID = AS_Alternate[as_start + 2 : as_end]
-                    if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-                        logger.fdebug("[FILECHECKER] Extracted comicid for given annual : %s" % AS_ComicID)
                     AS_Alternate = re.sub("!!" + str(AS_ComicID), "", AS_Alternate)
                     AS_tupled = True
                 as_dyninfo = self.dynamic_replace(AS_Alternate)
@@ -2318,10 +2273,6 @@ def calculate_match_confidence(parsed_info, comic_info):
         ratio = difflib.SequenceMatcher(None, parsed_name, comic_name).ratio()
         name_score = int(ratio * 40)
         score += name_score
-        if comicarr.CONFIG.FOLDER_SCAN_LOG_VERBOSE:
-            logger.fdebug(
-                '[CONFIDENCE] Name match: "%s" vs "%s" = %.2f (%d pts)' % (parsed_name, comic_name, ratio, name_score)
-            )
 
     # 2. Year Match (15 pts)
     parsed_year = parsed_info.get("issue_year") or parsed_info.get("ComicYear")

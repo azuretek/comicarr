@@ -37,7 +37,7 @@ test("Settings → About creates a Support bundle ZIP", async ({
   );
 
   await page.goto("/settings?section=about");
-  await expect(page.getByText("Support bundle")).toBeVisible();
+  await expect(page.getByText("Support bundle", { exact: true })).toBeVisible();
   await expect(page.getByText("1. Create")).toBeVisible();
   await expect(page.getByText("2. Inspect")).toBeVisible();
   await expect(page.getByText("3. Share")).toBeVisible();
@@ -87,7 +87,12 @@ test("Settings → About creates a Support bundle ZIP", async ({
   }
 
   // Unauthenticated request cannot invoke the endpoint.
-  const bare = await page.context().browser()!.newContext();
+  const bare = await page
+    .context()
+    .browser()!
+    .newContext({
+      storageState: { cookies: [], origins: [] },
+    });
   const bareResp = await bare.request.post("/api/system/support-bundle", {
     headers: { "X-Requested-With": "ComicarrFrontend" },
   });
