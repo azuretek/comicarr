@@ -290,8 +290,7 @@ def main():
         print("Verbose/Debugging mode enabled...")
         comicarr.LOG_LEVEL = 2
     elif args_quiet:
-        comicarr.QUIET = True
-        print("Quiet logging mode enabled...")
+        print("Quiet logging mode enabled (warnings and errors only)...")
         comicarr.LOG_LEVEL = 0
     else:
         comicarr.LOG_LEVEL = None

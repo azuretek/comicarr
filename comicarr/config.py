@@ -390,11 +390,13 @@ class Config(object):
                 try:
                     os.makedirs(self.LOG_DIR)
                 except OSError:
-                    if not comicarr.QUIET:
-                        self.LOG_DIR = None
-                        print("Unable to create the log directory. Logging to screen only.")
+                    # Dropping LOG_DIR is the actual recovery, so it must happen
+                    # whatever the verbosity — the old code did it only when the
+                    # console was live, leaving an uncreatable path behind.
+                    self.LOG_DIR = None
+                    print("Unable to create the log directory. Logging to screen only.")
 
-            # Start the logger, silence console logging if we need to
+            # Start the logger.
             # quick check to make sure log_level isn't just blank in the config
             if self.LOG_LEVEL is None:
                 self.LOG_LEVEL = 1  # default it to INFO level (1) if not set.
@@ -409,7 +411,7 @@ class Config(object):
             )
             if logger.LOG_LANG.startswith("en"):
                 logger.initLogger(
-                    console=not comicarr.QUIET,
+                    console=True,
                     log_dir=self.LOG_DIR,
                     max_logsize=self.MAX_LOGSIZE,
                     max_logfiles=self.MAX_LOGFILES,
@@ -1718,8 +1720,7 @@ class Config(object):
             try:
                 os.makedirs(self.LOG_DIR)
             except OSError:
-                if not comicarr.QUIET:
-                    logger.warn("Unable to create the log directory. Logging to screen only.")
+                logger.warn("Unable to create the log directory. Logging to screen only.")
 
         # if not update:
         #     logger.fdebug('[Cache Check] Cache directory currently set to : ' + self.CACHE_DIR)
