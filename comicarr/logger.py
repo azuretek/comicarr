@@ -48,9 +48,26 @@ LOG_LANG = language
 LOG_CHARSET = charset
 
 
-def _current_log_level():
+def current_log_level():
     """Return the numeric log level, treating startup/unconfigured state as quiet."""
     return comicarr.LOG_LEVEL or 0
+
+
+def threshold_for_level(loglevel):
+    """Map the operator-facing verbosity dial onto a stdlib logging threshold.
+
+    The dial is the *only* verbosity control: whatever it resolves to is applied
+    identically to the logger and to every sink it feeds (file, console, Web UI
+    list). Level 0 is "warnings and errors", not "silence" — an operator who
+    turns the dial down still needs to see that something broke.
+    """
+    if loglevel is None:
+        loglevel = 1
+    if loglevel <= 0:
+        return logging.WARNING
+    if loglevel == 1:
+        return logging.INFO
+    return logging.DEBUG
 
 
 if not LOG_LANG.startswith("en"):
@@ -142,7 +159,7 @@ if not LOG_LANG.startswith("en"):
                 method = ""
                 lineno = ""
 
-            if level != "DEBUG" or _current_log_level() >= 2:
+            if level != "DEBUG" or current_log_level() >= 2:
                 comicarr.LOGLIST.insert(0, (helpers.now(), message, level, threadname))
                 if len(comicarr.LOGLIST) > 2500:
                     del comicarr.LOGLIST[-1]
@@ -161,15 +178,15 @@ if not LOG_LANG.startswith("en"):
     filename = "comicarr.log"
 
     def debug(message, *args, **kwargs):
-        if _current_log_level() > 1:
+        if current_log_level() > 1:
             comicarr_log.log(message, "DEBUG", *args, **kwargs)
 
     def fdebug(message, *args, **kwargs):
-        if _current_log_level() > 1:
+        if current_log_level() > 1:
             comicarr_log.log(message, "DEBUG", *args, **kwargs)
 
     def info(message, *args, **kwargs):
-        if _current_log_level() > 0:
+        if current_log_level() > 0:
             comicarr_log.log(message, "INFO", *args, **kwargs)
 
     def warn(message, *args, **kwargs):
@@ -192,7 +209,7 @@ else:
             message = message.replace("\n", "<br />")
             comicarr.LOGLIST.insert(0, (helpers.now(), message, record.levelname, record.threadName))
 
-    def initLogger(console=False, log_dir=False, init=False, loglevel=1, max_logsize=None, max_logfiles=5):
+    def initLogger(console=True, log_dir=False, init=False, loglevel=1, max_logsize=None, max_logfiles=5):
         # concurrentLogHandler/0.8.7 (to deal with windows locks)
         # since this only happens on windows boxes, if it's nix/mac use the default logger.
         if platform.system() == "Windows":
@@ -240,17 +257,16 @@ else:
         # Configure the logger to accept all messages
         logger.propagate = False
 
-        if init is True:
-            logger.setLevel(logging.INFO)
-        else:
-            if loglevel == 1:  # normal
-                logger.setLevel(logging.INFO)
-            elif loglevel >= 2:  # verbose
-                logger.setLevel(logging.DEBUG)
+        # One threshold, derived once, applied to the logger and to every sink.
+        # Setting it unconditionally matters: the old code left the level alone
+        # at loglevel 0, so turning the dial *down* at runtime never took effect
+        # and level 0 silently inherited root's WARNING by accident.
+        threshold = logging.INFO if init is True else threshold_for_level(loglevel)
+        logger.setLevel(threshold)
 
         # Add list logger
         loglist_handler = LogListHandler()
-        loglist_handler.setLevel(logging.DEBUG)
+        loglist_handler.setLevel(threshold)
         logger.addHandler(loglist_handler)
 
         # Setup file logger
@@ -261,10 +277,7 @@ else:
                 "%d-%b-%Y %H:%M:%S",
             )
             file_handler = RFHandler(filename, "a", maxBytes=max_logsize, backupCount=max_logfiles)
-            if loglevel == 1:  # normal
-                file_handler.setLevel(logging.INFO)
-            elif loglevel >= 2:  # verbose
-                file_handler.setLevel(logging.DEBUG)
+            file_handler.setLevel(threshold)
             file_handler.setFormatter(file_formatter)
 
             logger.addHandler(file_handler)
@@ -277,10 +290,7 @@ else:
             )
             console_handler = logging.StreamHandler()
             console_handler.setFormatter(console_formatter)
-            if loglevel == 1:  # normal
-                console_handler.setLevel(logging.INFO)
-            elif loglevel >= 2:  # verbose
-                console_handler.setLevel(logging.DEBUG)
+            console_handler.setLevel(threshold)
 
             logger.addHandler(console_handler)
 
@@ -354,7 +364,7 @@ def configure_log_level(level):
     comicarr.LOG_LEVEL = level
     if LOG_LANG.startswith("en"):
         initLogger(
-            console=comicarr.QUIET if level == 0 else not comicarr.QUIET,
+            console=True,
             log_dir=comicarr.CONFIG.LOG_DIR,
             max_logsize=comicarr.CONFIG.MAX_LOGSIZE,
             max_logfiles=comicarr.CONFIG.MAX_LOGFILES,

@@ -166,22 +166,28 @@ def test_maintenance_logging_uses_logger_boundary(monkeypatch):
     legacy_toggle.assert_not_called()
 
 
-def test_configure_log_level_preserves_quiet_console_behavior(monkeypatch):
+def test_configure_log_level_keeps_the_console_attached_at_every_level(monkeypatch):
+    """The dial sets severity; it never detaches the console.
+
+    Replaces test_configure_log_level_preserves_quiet_console_behavior, which
+    pinned an inverted console expression: under Docker it silenced stdout the
+    moment an operator raised verbosity, the exact defect #610 reported. See
+    docs/architecture/logging-levels.md.
+    """
     calls = []
     config = SimpleNamespace(LOG_DIR="/tmp/logs", MAX_LOGSIZE=1024, MAX_LOGFILES=3)
     monkeypatch.setattr(comicarr, "CONFIG", config, raising=False)
-    monkeypatch.setattr(comicarr, "QUIET", False, raising=False)
     monkeypatch.setattr(comicarr, "LOG_LEVEL", 1, raising=False)
     monkeypatch.setattr(logger, "LOG_LANG", "en_US", raising=False)
     monkeypatch.setattr(logger, "initLogger", lambda **kwargs: calls.append(kwargs), raising=False)
 
     logger.configure_log_level(0)
-    logger.configure_log_level(1)
+    logger.configure_log_level(2)
     logger.configure_log_level(None)
 
     assert comicarr.LOG_LEVEL == 1
     assert calls == [
-        {"console": False, "log_dir": "/tmp/logs", "max_logsize": 1024, "max_logfiles": 3, "loglevel": 0},
-        {"console": True, "log_dir": "/tmp/logs", "max_logsize": 1024, "max_logfiles": 3, "loglevel": 1},
+        {"console": True, "log_dir": "/tmp/logs", "max_logsize": 1024, "max_logfiles": 3, "loglevel": 0},
+        {"console": True, "log_dir": "/tmp/logs", "max_logsize": 1024, "max_logfiles": 3, "loglevel": 2},
         {"console": True, "log_dir": "/tmp/logs", "max_logsize": 1024, "max_logfiles": 3, "loglevel": 1},
     ]

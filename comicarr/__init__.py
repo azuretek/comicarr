@@ -148,7 +148,6 @@ USER_AGENT = None
 DAEMON = False
 PIDFILE = None
 CREATEPID = False
-QUIET = False
 MAX_LOGSIZE = 5000000
 SAFESTART = False
 NOWEEKLY = False
@@ -367,7 +366,6 @@ def initialize(config_file):
         global \
             CONFIG, \
             _INITIALIZED, \
-            QUIET, \
             CONFIG_FILE, \
             MINIMUM_PY_VERSION, \
             OS_DETECT, \

@@ -154,7 +154,7 @@ def _migrate_password(ctx, plaintext_password):
 
 
 def announce_setup_token(setup_token):
-    """Announce the first-run setup token, including stdout in quiet mode."""
+    """Announce the first-run setup token, including stdout at level 0."""
     messages = [
         "[SETUP] *** First-run setup required ***",
         "[SETUP] Setup token: %s" % setup_token,
@@ -164,7 +164,9 @@ def announce_setup_token(setup_token):
     for message in messages:
         logger.info(message)
 
-    if comicarr.QUIET or comicarr.LOG_LEVEL == 0:
+    # At level 0 the console sink is at WARNING, so the INFO lines above never
+    # reach it — and without the token the operator cannot finish setup at all.
+    if logger.current_log_level() == 0:
         for message in messages:
             print(message, flush=True)
 

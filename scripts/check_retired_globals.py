@@ -38,6 +38,12 @@ RETIRED_GLOBALS = {
         "comicarr.app.activity.events.record_activity, and publish through "
         "the EventBus 'activity' event."
     ),
+    "QUIET": (
+        "retired by the single log-level dial (#611/#612). It was a second "
+        "verbosity control that only --quiet ever set and nothing ever "
+        "cleared. Gate on logger.current_log_level(), or pass an explicit "
+        "console= flag to logger.initLogger()."
+    ),
 }
 
 # Trees that hold source. Prose keeps the history — the ADR names the retired

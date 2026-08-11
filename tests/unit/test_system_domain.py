@@ -323,56 +323,45 @@ class TestJWTIntegration:
 
 
 class TestAnnounceSetupToken:
-    def test_quiet_mode_prints_token_and_logs(self, monkeypatch, capsys):
-        """Quiet mode still prints the setup token to container stdout."""
-        expected = [
-            "[SETUP] *** First-run setup required ***",
-            "[SETUP] Setup token: secret-token",
-            "[SETUP] Provide this token when setting up credentials via the web interface.",
-        ]
-        monkeypatch.setattr(comicarr, "QUIET", True)
-        monkeypatch.setattr(comicarr, "LOG_LEVEL", 1)
+    EXPECTED = [
+        "[SETUP] *** First-run setup required ***",
+        "[SETUP] Setup token: secret-token",
+        "[SETUP] Provide this token when setting up credentials via the web interface.",
+    ]
 
-        with patch.object(system_service.logger, "info") as mock_info:
-            system_service.announce_setup_token("secret-token")
-
-        captured = capsys.readouterr()
-        assert captured.out.splitlines() == expected
-        assert [call.args[0] for call in mock_info.call_args_list] == expected
-
-    def test_normal_mode_logs_without_stdout_duplicate(self, monkeypatch, capsys):
-        """Normal logging mode relies on the configured logger only."""
-        expected = [
-            "[SETUP] *** First-run setup required ***",
-            "[SETUP] Setup token: secret-token",
-            "[SETUP] Provide this token when setting up credentials via the web interface.",
-        ]
-        monkeypatch.setattr(comicarr, "QUIET", False)
-        monkeypatch.setattr(comicarr, "LOG_LEVEL", 1)
-
-        with patch.object(system_service.logger, "info") as mock_info:
-            system_service.announce_setup_token("secret-token")
-
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert [call.args[0] for call in mock_info.call_args_list] == expected
-
-    def test_log_level_zero_prints_token_even_when_not_quiet(self, monkeypatch, capsys):
-        """Console-suppressed log level still exposes the setup token."""
-        expected = [
-            "[SETUP] *** First-run setup required ***",
-            "[SETUP] Setup token: secret-token",
-            "[SETUP] Provide this token when setting up credentials via the web interface.",
-        ]
-        monkeypatch.setattr(comicarr, "QUIET", False)
+    def test_level_zero_prints_token_to_stdout(self, monkeypatch, capsys):
+        """At level 0 the console sink is at WARNING, so the INFO lines never land."""
         monkeypatch.setattr(comicarr, "LOG_LEVEL", 0)
 
         with patch.object(system_service.logger, "info") as mock_info:
             system_service.announce_setup_token("secret-token")
 
         captured = capsys.readouterr()
-        assert captured.out.splitlines() == expected
-        assert [call.args[0] for call in mock_info.call_args_list] == expected
+        assert captured.out.splitlines() == self.EXPECTED
+        assert [call.args[0] for call in mock_info.call_args_list] == self.EXPECTED
+
+    def test_unconfigured_level_prints_token_to_stdout(self, monkeypatch, capsys):
+        """LOG_LEVEL is None until config is read; treat that as level 0, not INFO."""
+        monkeypatch.setattr(comicarr, "LOG_LEVEL", None)
+
+        with patch.object(system_service.logger, "info") as mock_info:
+            system_service.announce_setup_token("secret-token")
+
+        captured = capsys.readouterr()
+        assert captured.out.splitlines() == self.EXPECTED
+        assert [call.args[0] for call in mock_info.call_args_list] == self.EXPECTED
+
+    @pytest.mark.parametrize("level", [1, 2])
+    def test_visible_levels_log_without_stdout_duplicate(self, monkeypatch, capsys, level):
+        """Once the console sink shows INFO, the logger alone carries the token."""
+        monkeypatch.setattr(comicarr, "LOG_LEVEL", level)
+
+        with patch.object(system_service.logger, "info") as mock_info:
+            system_service.announce_setup_token("secret-token")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert [call.args[0] for call in mock_info.call_args_list] == self.EXPECTED
 
 
 class TestInitialSetup:
