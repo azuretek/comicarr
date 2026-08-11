@@ -523,6 +523,7 @@ class Config(object):
         extra_newznabs, extra_torznabs = self.get_extras()
         self.EXTRA_NEWZNABS = extra_newznabs
         self.EXTRA_TORZNABS = extra_torznabs
+        self._absorb_legacy_torznab()
         self.IGNORED_PUBLISHERS = self.get_ignored_pubs()
 
         provider_migration_needed = self._load_provider_extra_credentials()
@@ -538,6 +539,99 @@ class Config(object):
             if self.writeconfig(startup=startup) is False:
                 raise OSError("Unable to persist configuration")
         return self
+
+    def _absorb_legacy_torznab(self):
+        """Fold populated legacy torznab_* fields into EXTRA_TORZNABS (#631).
+
+        The single-provider [Torznab] fields were retired at config_version 8,
+        but the keys still exist and a hand-edited config.ini can repopulate
+        them on any modern version — where they were silently inert. Runs on
+        every read so the entry is either migrated or loudly flagged.
+        """
+        legacy = {
+            "name": self.TORZNAB_NAME,
+            "host": self.TORZNAB_HOST,
+            "apikey": self.TORZNAB_APIKEY,
+            "category": self.TORZNAB_CATEGORY,
+        }
+        if all(value is None for value in legacy.values()):
+            return
+
+        def _scrub():
+            for option in (
+                "torznab_name",
+                "torznab_host",
+                "torznab_verify",
+                "torznab_apikey",
+                "torznab_category",
+            ):
+                if config.has_option("Torznab", option):
+                    config.remove_option("Torznab", option)
+            self.TORZNAB_NAME = None
+            self.TORZNAB_HOST = None
+            self.TORZNAB_VERIFY = None
+            self.TORZNAB_APIKEY = None
+            self.TORZNAB_CATEGORY = None
+            self.WRITE_THE_CONFIG = True
+
+        missing = [key for key, value in legacy.items() if value is None]
+        if missing:
+            logger.warn(
+                "[CONFIG] Legacy torznab_* fields under [Torznab] are set but incomplete "
+                "(missing: %s) and are NOT used for searching. Configure the provider via "
+                "the Settings UI (extra_torznabs) instead. Ignoring the legacy entry."
+                % ", ".join("torznab_%s" % m for m in missing)
+            )
+            return
+
+        if any(str(existing[1]).strip() == str(legacy["host"]).strip() for existing in self.EXTRA_TORZNABS):
+            logger.warn(
+                "[CONFIG] Legacy torznab_* fields under [Torznab] duplicate an existing "
+                "extra_torznabs entry for %s. Removing the inert legacy fields." % legacy["host"]
+            )
+            _scrub()
+            return
+
+        canonical_name = str(legacy["name"]).strip().casefold()
+        # Provider names must be unique across BOTH extras lists — validation
+        # shares one namespace for newznabs and torznabs.
+        existing_names = {
+            str(entry[0] or entry[1]).strip().casefold()
+            for entries in (self.EXTRA_NEWZNABS, self.EXTRA_TORZNABS)
+            for entry in entries
+        }
+        if canonical_name in existing_names | self._reserved_provider_names():
+            logger.warn(
+                "[CONFIG] Legacy torznab_* fields under [Torznab] reuse the provider name "
+                "'%s' and are NOT used for searching. Rename or remove the legacy fields, or "
+                "configure the provider via the Settings UI (extra_torznabs) instead." % legacy["name"]
+            )
+            return
+
+        # Skip ids held by the built-in providers (experimental/DDL) or
+        # _validate_loaded_provider_extras will reject the migrated entry.
+        reserved_ids = self._reserved_provider_ids()
+        candidate_id = comicarr.PROVIDER_START_ID + 1
+        while candidate_id in reserved_ids:
+            candidate_id += 1
+        comicarr.PROVIDER_START_ID = candidate_id
+        self.EXTRA_TORZNABS.append(
+            (
+                legacy["name"],
+                legacy["host"],
+                self.TORZNAB_VERIFY,
+                legacy["apikey"],
+                legacy["category"],
+                str(int(bool(self.ENABLE_TORZNAB))),
+                candidate_id,
+            )
+        )
+        logger.info(
+            "[CONFIG] Migrated legacy torznab_* fields under [Torznab] into extra_torznabs "
+            "as provider '%s' (%s). The legacy single-provider fields are no longer read; "
+            "manage this provider via the Settings UI from now on." % (legacy["name"], legacy["host"])
+        )
+        _scrub()
 
     def config_update(self):
         logger.info("Updating Configuration from %s to %s" % (self.CONFIG_VERSION, self.newconfig))

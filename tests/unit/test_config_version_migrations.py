@@ -155,3 +155,154 @@ folder_scan_log_verbose = True
     info.assert_any_call(
         "[CONFIG] Removed folder_scan_log_verbose: folder-scan diagnostics now follow LOG_LEVEL=debug."
     )
+
+
+def test_legacy_torznab_fields_absorbed_on_modern_config(tmp_path, monkeypatch):
+    """#631: torznab_* single-provider fields repopulated on a modern config are
+    folded into extra_torznabs instead of sitting silently inert."""
+    cfg, ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Torznab]
+enable_torznab = True
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+
+    assert cfg.read(startup=False) is cfg
+
+    hosts = [entry[1] for entry in cfg.EXTRA_TORZNABS]
+    assert "http://prowlarr.example:9696/1/api" in hosts
+    migrated = cfg.EXTRA_TORZNABS[hosts.index("http://prowlarr.example:9696/1/api")]
+    assert migrated[0] == "Nyaa"
+    assert migrated[3] == "abc123"
+    assert migrated[4] == "8020"
+    assert migrated[5] == "1"
+
+    assert cfg.TORZNAB_NAME is None
+    assert cfg.TORZNAB_HOST is None
+    text = ini.read_text(encoding="utf-8").lower()
+    assert "torznab_host" not in text
+    assert "extra_torznabs" in text
+
+
+def test_legacy_torznab_migration_skips_reserved_provider_ids(tmp_path, monkeypatch):
+    """The migrated entry must not claim an id held by a built-in provider
+    (experimental=101, DDL=200/201) or provider validation rejects it."""
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Experimental]
+experimental = True
+
+[Torznab]
+enable_torznab = True
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+    monkeypatch.setattr(comicarr, "PROVIDER_START_ID", 100, raising=False)
+
+    assert cfg.read(startup=False) is cfg
+
+    migrated = next(entry for entry in cfg.EXTRA_TORZNABS if entry[1] == "http://prowlarr.example:9696/1/api")
+    assert migrated[6] == 102  # 101 is reserved by experimental
+    assert comicarr.PROVIDER_START_ID == 102
+
+
+def test_legacy_torznab_name_collision_warns_and_stays_unmigrated(tmp_path, monkeypatch):
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Torznab]
+enable_torznab = True
+extra_torznabs = Nyaa, http://other.example:9696/api, False, zzz, 8020, 1, 7
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+    warn = MagicMock()
+    monkeypatch.setattr(config_module.logger, "warn", warn)
+
+    assert cfg.read(startup=False) is cfg
+
+    hosts = [entry[1] for entry in cfg.EXTRA_TORZNABS]
+    assert "http://prowlarr.example:9696/1/api" not in hosts
+    assert any("reuse the provider name" in call[0][0] for call in warn.call_args_list)
+
+
+def test_legacy_torznab_name_collision_with_newznab_warns_and_stays_unmigrated(tmp_path, monkeypatch):
+    """Provider names share one namespace across newznabs and torznabs — a
+    migrated entry reusing a Newznab name would fail provider validation."""
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Newznab]
+extra_newznabs = Nyaa, http://usenet.example:5000/api, False, zzz, 7030, 1, 3
+
+[Torznab]
+enable_torznab = True
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+    warn = MagicMock()
+    monkeypatch.setattr(config_module.logger, "warn", warn)
+
+    assert cfg.read(startup=False) is cfg
+
+    hosts = [entry[1] for entry in cfg.EXTRA_TORZNABS]
+    assert "http://prowlarr.example:9696/1/api" not in hosts
+    assert any("reuse the provider name" in call[0][0] for call in warn.call_args_list)
+
+
+def test_legacy_torznab_incomplete_fields_warn_and_stay_unmigrated(tmp_path, monkeypatch):
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Torznab]
+torznab_host = http://prowlarr.example:9696/1/api
+""",
+    )
+    warn = MagicMock()
+    monkeypatch.setattr(config_module.logger, "warn", warn)
+
+    assert cfg.read(startup=False) is cfg
+
+    assert cfg.EXTRA_TORZNABS == []
+    assert warn.called
+    assert "NOT used for searching" in warn.call_args_list[0][0][0]

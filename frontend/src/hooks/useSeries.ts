@@ -175,6 +175,35 @@ export function useResumeSeries(): UseMutationResult<unknown, Error, string> {
   });
 }
 
+export interface SeriesSearchSettingsInput {
+  comicId: string;
+  allowPacks?: boolean;
+  ignoreType?: boolean;
+}
+
+/**
+ * Update per-series search flags (pack matching / booktype override)
+ */
+export function useUpdateSeriesSearchSettings(): UseMutationResult<
+  unknown,
+  Error,
+  SeriesSearchSettingsInput
+> {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ comicId, allowPacks, ignoreType }) =>
+      apiRequest("PATCH", `/api/series/${comicId}/search-settings`, {
+        ...(allowPacks !== undefined && { allow_packs: allowPacks }),
+        ...(ignoreType !== undefined && { ignore_type: ignoreType }),
+      }),
+    onSuccess: (_, { comicId }) => {
+      queryClient.invalidateQueries({ queryKey: ["series"] });
+      queryClient.invalidateQueries({ queryKey: ["series", comicId] });
+    },
+  });
+}
+
 /**
  * Refresh series metadata
  */

@@ -909,9 +909,10 @@ def NZB_SEARCH(
     smode=None,
 ):
 
-    if any([allow_packs == 1, allow_packs == "1"]) and all(
-        [comicarr.CONFIG.ENABLE_TORRENT_SEARCH, comicarr.CONFIG.ENABLE_32P]
-    ):
+    # Pack eligibility only requires torrent search to be enabled; historically it
+    # was also gated behind ENABLE_32P, which blocked packs from every other
+    # torrent/Torznab provider (#632).
+    if any([allow_packs == 1, allow_packs == "1", allow_packs is True]) and comicarr.CONFIG.ENABLE_TORRENT_SEARCH:
         allow_packs = True
     else:
         allow_packs = False
