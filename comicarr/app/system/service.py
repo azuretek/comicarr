@@ -44,6 +44,7 @@ from comicarr import db, logger
 from comicarr.app.acquisition.models import DispatchState
 from comicarr.app.common.dates import normalize_utc_datetime
 from comicarr.app.common.redaction import redact_sensitive_text
+from comicarr.app.config.log_level import MAX_LEVEL, MIN_LEVEL, SOURCE_SETTINGS, parse_level
 from comicarr.app.config.registry import (
     readable_keys,
     scheduler_job_intervals,
@@ -402,6 +403,23 @@ def update_config(ctx, key_values):
     if not filtered:
         return {"success": False, "error": "No valid config keys provided"}
 
+    if "LOG_LEVEL" in filtered:
+        # Read by the same rules as every other source of the level, so a value
+        # typed into Settings behaves like one passed on the command line:
+        # out of range clamps, non-numeric is refused. A startup source is
+        # clamped rather than rejected because refusing to boot helps nobody;
+        # an HTTP request can simply be told it was wrong, and persisting
+        # garbage would leave the level silently ignored at the next start.
+        level, notices = parse_level(filtered["LOG_LEVEL"], SOURCE_SETTINGS)
+        if level is None:
+            return {
+                "success": False,
+                "error": "LOG_LEVEL must be a number between %s and %s" % (MIN_LEVEL, MAX_LEVEL),
+            }
+        for notice in notices:
+            logger.info("[CONFIG] %s" % notice)
+        filtered["LOG_LEVEL"] = level
+
     if "NZB_DOWNLOADER" in filtered:
         nzb_downloader = filtered["NZB_DOWNLOADER"]
         if isinstance(nzb_downloader, bool) or not isinstance(nzb_downloader, int) or not 0 <= nzb_downloader <= 3:
@@ -441,7 +459,35 @@ def update_config(ctx, key_values):
     # Sync back to globals during transition
     comicarr.CONFIG = ctx.config
 
+    if "LOG_LEVEL" in filtered:
+        # After the global sync: configure_log_level rebuilds the handlers from
+        # comicarr.CONFIG, so it has to see the config this save just wrote.
+        _apply_log_level_now(filtered["LOG_LEVEL"])
+
     return {"success": True}
+
+
+def _apply_log_level_now(level):
+    """Make a saved log level take effect immediately, without a restart.
+
+    The point of raising verbosity is to catch a problem *while it is
+    happening* (#610); a dial that waits for a restart destroys the state the
+    operator was trying to capture. `logger.configure_log_level` has always
+    done the live reconfigure — until now its only caller was maintenance
+    mode, so the settings key was writable, invisible, and inert until startup.
+
+    Persisting comes first and stays committed even if this fails: a level that
+    survives the restart but is not yet live is a far smaller failure than a
+    live level the next start forgets. Rebuilding the handlers can fail on a
+    log directory that has become unwritable, and that is not a reason to
+    report the save itself as failed.
+    """
+    try:
+        logger.configure_log_level(level)
+        return True
+    except Exception as e:
+        logger.error("[CONFIG] Saved log level %s but could not apply it until restart: %s" % (level, e))
+        return False
 
 
 def regenerate_api_key(ctx, username, ip):
