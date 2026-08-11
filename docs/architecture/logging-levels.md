@@ -18,6 +18,50 @@ Levels below `0` clamp to `WARNING`; above `2` clamp to `DEBUG`.
 `logger.current_log_level()` is the only supported way to ask what the dial is
 currently set to. Nothing else may branch on verbosity.
 
+## Where the level comes from
+
+The dial says what a level *means*; this says where the number is *read from*.
+Three sources, highest priority first:
+
+| Priority | Source | Set by |
+| --- | --- | --- |
+| 1 | a startup argument — `--log-level N`, or the `--verbose` / `--quiet` aliases | the command line, a systemd unit, a container entrypoint |
+| 2 | the `COMICARR_LOG_LEVEL` environment variable | a compose file, the shell |
+| 3 | `LOG_LEVEL` in `config.ini` | the Settings UI |
+
+If none of them supplies a value, the level is `1`.
+
+**A source counts only when it explicitly supplies a value.** That qualifier is
+the whole rule, and it is what #610 got wrong: the Docker entrypoint passed
+`--quiet` on every start, so the top of the chain was permanently occupied and
+nothing an operator set below it could ever be heard. An argument that was not
+passed must leave the layer beneath it alone. In particular, level `0` is a
+value, not an absence — a falsy check here reintroduces the bug.
+
+Resolution happens once, when config is read at startup, in
+`comicarr/app/config/log_level.py`. Every source is parsed even when a
+higher-priority one has already won, so an operator who typoed
+`COMICARR_LOG_LEVEL` is told about it, and the winning source announces what it
+overrode. Runtime changes from the Settings UI go through
+`logger.configure_log_level()` and are not part of this chain — they apply
+immediately and are re-decided by it on the next start.
+
+Values outside `0`–`2` are clamped rather than rejected: a compose file asking
+for `3` wants maximum verbosity, and refusing to boot over it helps nobody. A
+non-numeric value is ignored with a notice, and the next source down is used.
+
+`COMICARR_LOG_LEVEL` is a deliberate one-off for this one key. Comicarr does not
+read the environment for any other setting, and a general `COMICARR_<KEY>`
+mechanism is a separate question — it raises precedence, secrets-in-env, and
+UI-honesty problems that have nothing to do with logging.
+
+### `--quiet` and `--verbose`
+
+`--quiet` is a deprecated alias for `--log-level 0` and prints a notice saying
+so. It stays because it is in existing compose files and systemd units; deleting
+it would break them for a cosmetic gain. `--verbose` maps to level `2`. When
+more than one is passed, `--log-level` wins, then `--verbose`, then `--quiet`.
+
 ### The two helpers disagree about `None`, on purpose
 
 `comicarr.LOG_LEVEL` is `None` until configuration is read, and the two helpers

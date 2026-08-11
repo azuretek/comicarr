@@ -34,6 +34,7 @@ try:
         maintenance,
         versioncheck,
     )
+    from comicarr.app.config import log_level as log_level_source  # noqa: E402
     from comicarr.app.core.pidfile import check_stale_pidfile  # noqa: E402
 except ModuleNotFoundError as e:
     missing_dependency = e.name or "an application dependency"
@@ -96,10 +97,25 @@ def main():
 
     # main parser
     parser.add_argument(
+        "--log-level",
+        dest="log_level",
+        type=int,
+        default=None,
+        metavar="{0,1,2}",
+        help=(
+            "Logging verbosity: 0 warnings and errors, 1 normal, 2 everything. "
+            "Overrides COMICARR_LOG_LEVEL and the config file; omit it and those apply."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", default=False, help="Increase console logging verbosity"
     )
     parser.add_argument(
-        "-q", "--quiet", action="store_true", default=False, help="Log warnings and errors only (log level 0)"
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Deprecated alias for --log-level 0 (warnings and errors only)",
     )
     parser.add_argument("-d", "--daemon", action="store_true", default=False, help="Run as a daemon")
     parser.add_argument("-p", "--port", type=int, default=0, help="Force Comicarr to run on a specified port")
@@ -208,6 +224,7 @@ def main():
     args_maintenance = args.get("maintenance")
     args_verbose = args.get("verbose")
     args_quiet = args.get("quiet")
+    args_log_level = args.get("log_level")
     args_ignoreupdate = args.get("ignoreupdate")
     args_daemon = args.get("daemon")
     args_pidfile = args.get("pidfile")
@@ -288,14 +305,19 @@ def main():
         print("Exiting....")
         sys.exit()
 
-    if args_verbose:
+    # Startup args are the top of the precedence chain (args > COMICARR_LOG_LEVEL
+    # > config), but only when one was actually passed: leaving this None is what
+    # lets the environment and the config file be heard at all.
+    comicarr.LOG_LEVEL = None
+    if args_log_level is not None:
+        comicarr.LOG_LEVEL = log_level_source.clamp_level(args_log_level)
+        print("Log level set to %s by startup argument." % comicarr.LOG_LEVEL)
+    elif args_verbose:
         print("Verbose/Debugging mode enabled...")
         comicarr.LOG_LEVEL = 2
     elif args_quiet:
-        print("Quiet logging mode enabled (warnings and errors only)...")
+        print("--quiet is deprecated; use --log-level 0. Logging warnings and errors only...")
         comicarr.LOG_LEVEL = 0
-    else:
-        comicarr.LOG_LEVEL = None
 
     if args_ignoreupdate:
         comicarr.MAINTENANCE = False
