@@ -13,6 +13,7 @@ import { NotificationsTab } from "@/components/settings/NotificationsTab";
 import { MediaManagementTab } from "@/components/settings/MediaManagementTab";
 import { AcquisitionHealthTab } from "@/components/settings/AcquisitionHealthTab";
 import { AboutTab } from "@/components/settings/AboutTab";
+import { LogsPrototypeHost } from "@/components/settings/prototype/LogsPrototypeHost";
 import { SaveButton } from "@/components/settings/SaveButton";
 import PageHeader from "@/components/layout/PageHeader";
 import { prepareConfigSaveData } from "@/lib/configSave";
@@ -35,7 +36,9 @@ type SectionId =
   | "notifications"
   | "clients"
   | "ai"
-  | "about";
+  | "about"
+  // PROTOTYPE — Settings → Logs surface (#616). DEV-only nav entry.
+  | "logs";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "general", label: "General" },
@@ -48,6 +51,9 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "clients", label: "Download clients" },
   { id: "ai", label: "AI" },
   { id: "about", label: "About" },
+  ...(import.meta.env.DEV
+    ? ([{ id: "logs" as const, label: "Logs (prototype)" }] as const)
+    : []),
 ];
 
 const SECTION_IDS = new Set(SECTIONS.map((s) => s.id));
@@ -396,6 +402,9 @@ export default function SettingsPage() {
             {section === "clients" && <DownloadClientsTab {...tabProps} />}
             {section === "ai" && <AiTab {...tabProps} />}
             {section === "about" && <AboutTab {...aboutProps} />}
+            {import.meta.env.DEV && section === "logs" && (
+              <LogsPrototypeHost />
+            )}
           </div>
         </div>
       </div>
