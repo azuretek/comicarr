@@ -118,10 +118,30 @@ Three defects came out of it, all fixed alongside the retirement:
 - Failing to create the log directory dropped `LOG_DIR` only when `QUIET` was
   false, so a quiet process kept an uncreatable path and lost the recovery.
 
-## Not covered here
+## Not covered here — and "not covered" includes Docker
 
-The non-English `RotatingLogger` path (`logger.py`, taken when `LOG_LANG` does
-not start with `en`) does **not** implement this contract: its file handler is
-pinned at `DEBUG` and its `initLogger` takes no `console` argument at all.
-Whether it adopts the contract or is retired is tracked on
-[Wayfinder: One log level dial, everywhere](https://github.com/frankieramirez/comicarr/issues/611).
+The `RotatingLogger` path (`logger.py`, taken when `LOG_LANG` does not start
+with `en`) does **not** implement this contract. Read it as the *non-English*
+path and you will conclude it is a rare edge case. It is not:
+
+**Every Docker install takes it.** `python:3.12-slim` sets `LANG=C.UTF-8`, so
+`locale.getdefaultlocale()` returns `('C', 'UTF-8')` and `LOG_LANG` is `"C"`.
+Verified inside an image built from this repo — the giveaway in `docker logs` is
+the message format, `INFO :: MainThread : maintenance.py:backup_files:539 :`
+rather than the English path's `INFO :: comicarr.backup_files.539 : MainThread`.
+
+On that path the dial is enforced in the module-level `debug()` / `info()`
+wrappers rather than by handler levels, so the log *file* does follow it. The
+console does not: `initLogger` creates the `StreamHandler` inside `if loglevel:`,
+so **level 0 attaches no console sink at all** and `docker logs` goes silent
+rather than showing warnings and errors. That is the same shape as the #610
+defect — a level that removes a sink instead of raising its threshold — and it
+is why the contract's "level 0 is not silence" rule is currently aspirational
+for containers.
+
+One consequence worth knowing before designing a fix: a single `ENV
+LANG=en_US.UTF-8` in the `Dockerfile` would move every container onto the
+contract-compliant path without touching `logger.py`. Whether that, adopting the
+contract in `RotatingLogger`, or retiring the path is right is the decision on
+[Decide the fate of the non-English RotatingLogger path](https://github.com/frankieramirez/comicarr/issues/619),
+under [Wayfinder: One log level dial, everywhere](https://github.com/frankieramirez/comicarr/issues/611).

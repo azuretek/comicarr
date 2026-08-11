@@ -168,6 +168,19 @@ In **Settings**, configure:
 
 If you are migrating from Mylar3, the first-run onboarding wizard can import an existing install. For Docker, mount the Mylar3 config directory read-only (see comments in `docker-compose.yml`, typically at `/mylar3`).
 
+### Logging verbosity
+
+One dial, three levels: **0** warnings and errors, **1** normal (the default), **2** everything. It applies to the console, the log file, and the log list in the web UI alike.
+
+Set it wherever suits the install — a startup argument wins over the environment variable, which wins over the level saved in Settings, and each only counts when you actually supply it:
+
+```bash
+docker run -e COMICARR_LOG_LEVEL=2 ...   # Docker / Compose
+python3 Comicarr.py --log-level 2        # source install
+```
+
+Changing it in **Settings** takes effect immediately, no restart. Leave `COMICARR_LOG_LEVEL` unset unless you are debugging: setting it wins over Settings on every restart. (`--quiet` still works as an alias for `--log-level 0`, but it is deprecated.)
+
 ## Project Structure
 
 ```
