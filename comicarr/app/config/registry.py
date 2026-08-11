@@ -260,8 +260,12 @@ _KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("MAL_ENABLED", bool, "MAL", False, readable=True, writable=True),
     ConfigKey("MAL_CLIENT_ID", str, "MAL", None, writable=True),
     ConfigKey("LOG_DIR", str, "Logs", None, readable=True),
-    ConfigKey("MAX_LOGSIZE", int, "Logs", 10000000),
-    ConfigKey("MAX_LOGFILES", int, "Logs", 5),
+    # Readable, never writable: Settings → Logs shows the retention ceiling as
+    # context because turning the level up to debug fills it fast, but the knob
+    # itself is one almost nobody should turn and every writable key is a
+    # permanent API surface.
+    ConfigKey("MAX_LOGSIZE", int, "Logs", 10000000, readable=True),
+    ConfigKey("MAX_LOGFILES", int, "Logs", 5, readable=True),
     ConfigKey("LOG_LEVEL", int, "Logs", 1, readable=True, writable=True),
     ConfigKey("GIT_PATH", str, "Git", None),
     ConfigKey("GIT_USER", str, "Git", "frankieramirez"),

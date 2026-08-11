@@ -125,6 +125,30 @@ consequence is what stops the next "I set it to 0 and expected silence". This
 supersedes the `quiet / normal / verbose` labels locked while designing the
 surface; the layout of that design is unaffected.
 
+### The dial must say when it is not the one deciding
+
+Because Settings writes the bottom rung of the chain and the write applies live,
+three numbers can disagree at once: the level the process is logging at, the
+level saved in `config.ini`, and the level the next start will resolve to. A
+page that shows only the saved number is #610 in miniature — the UI stating one
+thing while the process does another.
+
+`resolve_effective_log_level` (`comicarr/app/config/log_level.py`) reports all
+three, and `GET /system/logs` carries them alongside the log lines. The restart
+half is the startup chain *re-run now*, not a replay of the boot resolution:
+the environment and the config file are read fresh, and only the startup
+argument is remembered, because it is the one input that cannot be re-read
+later. `record_startup_argument` captures it in `comicarr/config.py` before
+`comicarr.LOG_LEVEL` is overwritten with the resolved level.
+
+`pinned` is true when the winner is a startup argument or `COMICARR_LOG_LEVEL`.
+Settings → Logs shows its override callout on exactly that flag, and on nothing
+else: when the config file is the top of the chain there is nothing to say, and
+an always-visible status card would be noise. Note that `pinned` is a statement
+about *source*, not about a mismatch in numbers — `--log-level info` against a
+saved `1` shows no disagreement and still means the dial cannot change what a
+restart does.
+
 ### `--quiet` and `--verbose`
 
 Both are deprecated aliases — `--quiet` for `--log-level warning`, `--verbose`

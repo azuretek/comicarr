@@ -26,7 +26,7 @@ import shlex
 import subprocess
 import sys
 import threading
-from collections import namedtuple
+from collections import deque, namedtuple
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -44,7 +44,13 @@ from comicarr import db, logger
 from comicarr.app.acquisition.models import DispatchState
 from comicarr.app.common.dates import normalize_utc_datetime
 from comicarr.app.common.redaction import redact_sensitive_text
-from comicarr.app.config.log_level import ACCEPTED_FORMS, SOURCE_SETTINGS, parse_level
+from comicarr.app.config.log_level import (
+    ACCEPTED_FORMS,
+    NAME_FOR_LEVEL,
+    SOURCE_SETTINGS,
+    parse_level,
+    resolve_effective_log_level,
+)
 from comicarr.app.config.registry import (
     readable_keys,
     scheduler_job_intervals,
@@ -830,32 +836,77 @@ def get_build_identity(ctx):
     }
 
 
-def get_recent_logs(ctx):
-    """Return recent log entries."""
+# How many trailing lines Settings → Logs asks for by default, and the ceiling
+# on what it may ask for. The file is capped at MAX_LOGSIZE anyway; the ceiling
+# is here so one request cannot be made to hold an entire rotation in memory.
+DEFAULT_LOG_LINES = 200
+MAX_LOG_LINES = 5000
+
+
+def _log_level_context(ctx):
+    """The three levels the Settings dial has to be honest about.
+
+    `saved` is what the dial edits, `effective` is what the process is logging
+    at this second, and `restart` is what the startup chain resolves to next
+    time. They can all differ, and #610 is what happens when the UI shows only
+    the first one.
+    """
+    config_level = getattr(ctx.config, "LOG_LEVEL", None) if ctx.config else None
+    effective = resolve_effective_log_level(logger.current_log_level(), config_level=config_level)
+    return {
+        "effective": effective.level,
+        "effective_name": NAME_FOR_LEVEL[effective.level],
+        "saved": effective.saved,
+        "saved_name": NAME_FOR_LEVEL[effective.saved],
+        "restart_level": effective.restart_level,
+        "restart_name": NAME_FOR_LEVEL[effective.restart_level],
+        "restart_source": effective.restart_source,
+        "pinned": effective.pinned,
+    }
+
+
+def get_recent_logs(ctx, lines=DEFAULT_LOG_LINES):
+    """Return the tail of `comicarr.log`, with the level context the dial needs.
+
+    Only the current file: rotated `comicarr.log.1` and friends are deliberately
+    unreachable here, and there is no pagination — the surface exists so an
+    operator can raise the level, reproduce, and paste, not to browse history.
+    """
+    requested = max(1, min(int(lines or DEFAULT_LOG_LINES), MAX_LOG_LINES))
+    level = _log_level_context(ctx)
+
     log_dir = getattr(ctx.config, "LOG_DIR", None) if ctx.config else None
     if not log_dir:
         log_dir = os.path.join(ctx.data_dir, "logs") if ctx.data_dir else None
 
     if not log_dir:
-        return {"logs": []}
+        return {"logs": [], "level": level, "requested": requested, "path": None}
 
     log_file = os.path.join(log_dir, "comicarr.log")
     if not os.path.exists(log_file):
-        return {"logs": []}
+        return {"logs": [], "level": level, "requested": requested, "path": log_file}
 
     try:
+        # A deque with a maxlen keeps only the tail in memory. `readlines()` on a
+        # 10 MB log allocated the whole file on every Refresh, and the viewer was
+        # always going to throw all but the last N away.
         with open(log_file, "r") as f:
-            lines = f.readlines()
+            tail = deque(f, maxlen=requested)
         provider_secrets = []
         if ctx.config:
             for attr_name in ("EXTRA_NEWZNABS", "EXTRA_TORZNABS"):
                 for entry in getattr(ctx.config, attr_name, []) or []:
                     if isinstance(entry, (list, tuple)) and len(entry) > 3:
                         provider_secrets.append(entry[3])
-        return {"logs": [redact_sensitive_text(line, provider_secrets) for line in lines[-200:]]}
+        return {
+            "logs": [redact_sensitive_text(line, provider_secrets) for line in tail],
+            "level": level,
+            "requested": requested,
+            "path": log_file,
+        }
     except Exception as e:
         logger.error("[SYSTEM] Error reading logs: %s" % e)
-        return {"logs": [], "error": str(e)}
+        return {"logs": [], "level": level, "requested": requested, "path": log_file, "error": str(e)}
 
 
 def get_job_info(ctx, include_acquisition=True):

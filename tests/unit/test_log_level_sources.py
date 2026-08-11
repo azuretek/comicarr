@@ -19,7 +19,10 @@ import pytest
 
 from comicarr.app.config.log_level import (
     ACCEPTED_FORMS,
+    DEFAULT_LEVEL,
     ENV_VAR,
+    MAX_LEVEL,
+    MIN_LEVEL,
     SOURCE_ARGUMENT,
     SOURCE_CONFIG,
     SOURCE_DEFAULT,
@@ -27,6 +30,8 @@ from comicarr.app.config.log_level import (
     clamp_level,
     describe_level,
     parse_level,
+    record_startup_argument,
+    resolve_effective_log_level,
     resolve_startup_log_level,
 )
 
@@ -198,3 +203,64 @@ class TestNotices:
         """The operator's typo is worth surfacing even though it changed nothing."""
         resolution = resolve_startup_log_level(argument_level=2, config_level=1, environ={ENV_VAR: "loud"})
         assert any("'loud'" in notice for notice in resolution.notices)
+
+
+class TestEffectiveLevel:
+    """What Settings → Logs is allowed to claim about the running process.
+
+    The dial writes the bottom rung of the chain and the write applies live, so
+    the running level, the saved level, and the level a restart would resolve to
+    can all disagree at once. `pinned` is the flag that stops the UI repeating
+    #610 -- a page that shows only the saved number is a page that lies.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_recorded_argument(self):
+        record_startup_argument(None)
+        yield
+        record_startup_argument(None)
+
+    def test_nothing_pinned_when_the_config_is_the_top_of_the_chain(self):
+        effective = resolve_effective_log_level(1, config_level=1, environ={})
+        assert effective.restart_source == SOURCE_CONFIG
+        assert effective.pinned is False
+
+    def test_a_recorded_startup_argument_pins_the_level(self):
+        record_startup_argument(0)
+        effective = resolve_effective_log_level(0, config_level=2, environ={})
+        assert effective.restart_level == 0
+        assert effective.restart_source == SOURCE_ARGUMENT
+        assert effective.saved == 2
+        assert effective.pinned is True
+
+    def test_the_environment_pins_the_level_too(self):
+        effective = resolve_effective_log_level(2, config_level=1, environ={ENV_VAR: "debug"})
+        assert effective.restart_source == SOURCE_ENVIRONMENT
+        assert effective.pinned is True
+
+    def test_a_live_save_under_a_pin_shows_all_three_numbers(self):
+        """Saved 2 applies now; the argument still wins the next start."""
+        record_startup_argument(0)
+        effective = resolve_effective_log_level(2, config_level=2, environ={})
+        assert (effective.level, effective.saved, effective.restart_level) == (2, 2, 0)
+        assert effective.pinned is True
+
+    def test_the_dial_falls_back_to_the_registry_default_not_the_winner(self):
+        """An empty config still has a dial position, and it is not the argument's."""
+        record_startup_argument(2)
+        effective = resolve_effective_log_level(2, config_level=None, environ={})
+        assert effective.saved == DEFAULT_LEVEL
+        assert effective.restart_level == 2
+
+    def test_a_named_config_level_is_read_as_the_saved_value(self):
+        effective = resolve_effective_log_level(0, config_level="warning", environ={})
+        assert effective.saved == 0
+
+    def test_the_running_level_is_clamped_like_every_other_reading(self):
+        effective = resolve_effective_log_level(9, config_level=1, environ={})
+        assert effective.level == MAX_LEVEL
+
+    def test_an_unconfigured_running_level_reads_as_zero_not_a_crash(self):
+        """`logger.current_log_level()` returns 0 before the logger is set up."""
+        effective = resolve_effective_log_level(None, config_level=1, environ={})
+        assert effective.level == MIN_LEVEL

@@ -41,6 +41,9 @@ ENV_VAR = "COMICARR_LOG_LEVEL"
 
 MIN_LEVEL = 0
 MAX_LEVEL = 2
+# What the dial sits at when nothing supplies a level. Matches the `LOG_LEVEL`
+# default in the config registry.
+DEFAULT_LEVEL = 1
 
 # One name per level, and the threshold picks it: level 0 is `WARNING`, so it is
 # called `warning`. The tempting `quiet`/`normal`/`verbose` triple is not here on
@@ -75,6 +78,30 @@ class LogLevelResolution:
     level: int
     source: str
     notices: list[str] = field(default_factory=list)
+
+
+@dataclass
+class EffectiveLogLevel:
+    """What the process is logging at now, and what a restart would make of it.
+
+    The Settings dial writes `config.ini`, the *bottom* of the chain, and the
+    write applies live. So three numbers can disagree at once: the level running
+    right now, the level saved in the config file, and the level the next start
+    resolves to. `pinned` is the one an operator needs -- when it is true, a
+    source the UI cannot edit wins the chain, and the dial's value will not
+    survive a restart. That is the #610 failure said out loud instead of
+    discovered later.
+    """
+
+    level: int
+    saved: int
+    restart_level: int
+    restart_source: str
+
+    @property
+    def pinned(self) -> bool:
+        """True when something above the config file decides the level."""
+        return self.restart_source in (SOURCE_ARGUMENT, SOURCE_ENVIRONMENT)
 
 
 def clamp_level(level: int) -> int:
@@ -130,6 +157,25 @@ def parse_level(raw, origin: str) -> tuple[int | None, list[str]]:
     return clamped, notices
 
 
+# The one thing about the chain that cannot be re-read later. The environment
+# and the config file are still there to be consulted at any moment; the startup
+# argument is consumed once at boot and `comicarr.LOG_LEVEL` is overwritten with
+# the resolved level straight after, so without this the Settings page could not
+# tell an operator that a `--log-level` flag is what keeps overruling their dial.
+_startup_argument: int | None = None
+
+
+def record_startup_argument(level) -> None:
+    """Remember the level a startup argument supplied, if one did."""
+    global _startup_argument
+    _startup_argument = level
+
+
+def startup_argument() -> int | None:
+    """The level the startup argument supplied, or None when none was passed."""
+    return _startup_argument
+
+
 def resolve_startup_log_level(
     argument_level=None,
     config_level=None,
@@ -153,7 +199,7 @@ def resolve_startup_log_level(
             supplied.append((level, source))
 
     if not supplied:
-        return LogLevelResolution(level=1, source=SOURCE_DEFAULT, notices=notices)
+        return LogLevelResolution(level=DEFAULT_LEVEL, source=SOURCE_DEFAULT, notices=notices)
 
     level, source = supplied[0]
     # Say what lost, so an operator who edits the Settings dial and sees nothing
@@ -166,3 +212,32 @@ def resolve_startup_log_level(
     if overridden:
         notices.append(f"Log level {describe_level(level)} from {source} overrides {', '.join(overridden)}.")
     return LogLevelResolution(level=level, source=source, notices=notices)
+
+
+def resolve_effective_log_level(
+    running_level,
+    config_level=None,
+    environ: Mapping[str, str] | None = None,
+) -> EffectiveLogLevel:
+    """Report the running level next to the one a restart would resolve to.
+
+    The restart half is the startup chain run again, now: the argument is the
+    recorded one, the environment and the config file are read fresh. Re-running
+    it rather than replaying the boot resolution is what keeps the answer true
+    after the operator saves a new level -- the chain's bottom rung has moved.
+    """
+    restart = resolve_startup_log_level(
+        argument_level=startup_argument(),
+        config_level=config_level,
+        environ=environ,
+    )
+    # A config file with no usable `LOG_LEVEL` still has a dial position: the
+    # registry default. Borrowing the resolved level instead would show the
+    # operator a startup argument's value in a field that edits the config.
+    saved, _ = parse_level(config_level, SOURCE_CONFIG)
+    return EffectiveLogLevel(
+        level=clamp_level(int(running_level or 0)),
+        saved=DEFAULT_LEVEL if saved is None else saved,
+        restart_level=restart.level,
+        restart_source=restart.source,
+    )

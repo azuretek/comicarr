@@ -45,6 +45,8 @@ export interface ReadableConfig {
   mangadex_content_rating?: string;
   mal_enabled?: boolean;
   log_dir?: string;
+  max_logsize?: number;
+  max_logfiles?: number;
   log_level?: number;
   check_github?: boolean;
   announce_releases?: boolean;
