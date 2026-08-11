@@ -44,7 +44,7 @@ from comicarr import db, logger
 from comicarr.app.acquisition.models import DispatchState
 from comicarr.app.common.dates import normalize_utc_datetime
 from comicarr.app.common.redaction import redact_sensitive_text
-from comicarr.app.config.log_level import MAX_LEVEL, MIN_LEVEL, SOURCE_SETTINGS, parse_level
+from comicarr.app.config.log_level import ACCEPTED_FORMS, SOURCE_SETTINGS, parse_level
 from comicarr.app.config.registry import (
     readable_keys,
     scheduler_job_intervals,
@@ -407,16 +407,18 @@ def update_config(ctx, key_values):
     level_notices = []
     if "LOG_LEVEL" in filtered:
         # Read by the same rules as every other source of the level, so a value
-        # typed into Settings behaves like one passed on the command line:
-        # out of range clamps, non-numeric is refused. A startup source is
-        # clamped rather than rejected because refusing to boot helps nobody;
-        # an HTTP request can simply be told it was wrong, and persisting
-        # garbage would leave the level silently ignored at the next start.
+        # typed into Settings behaves like one passed on the command line: both
+        # notations are accepted, out of range clamps, and anything else is
+        # refused. A startup source is clamped rather than rejected because
+        # refusing to boot helps nobody; an HTTP request can simply be told it
+        # was wrong, and persisting garbage would leave the level silently
+        # ignored at the next start. Whichever form arrives, an integer is what
+        # gets stored.
         level, level_notices = parse_level(filtered["LOG_LEVEL"], SOURCE_SETTINGS)
         if level is None:
             return {
                 "success": False,
-                "error": "LOG_LEVEL must be a number between %s and %s" % (MIN_LEVEL, MAX_LEVEL),
+                "error": "LOG_LEVEL must be %s" % ACCEPTED_FORMS,
             }
         filtered["LOG_LEVEL"] = level
 

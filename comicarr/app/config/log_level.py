@@ -16,6 +16,10 @@ fixes where the number is *read from*. Three sources, highest first:
 2. the `COMICARR_LOG_LEVEL` environment variable
 3. `LOG_LEVEL` in the config file (the Settings UI writes this one)
 
+Each of them accepts the level in either notation -- `0`/`1`/`2` or
+`warning`/`info`/`debug` -- and the integer is what gets stored, whichever form
+was typed.
+
 A source only counts when it *explicitly supplies* a value. That qualifier is
 the whole point: Docker used to pass `--quiet` on every start, which pinned the
 escape hatch permanently open and left an operator with no way to raise
@@ -37,6 +41,19 @@ ENV_VAR = "COMICARR_LOG_LEVEL"
 
 MIN_LEVEL = 0
 MAX_LEVEL = 2
+
+# One name per level, and the threshold picks it: level 0 is `WARNING`, so it is
+# called `warning`. The tempting `quiet`/`normal`/`verbose` triple is not here on
+# purpose -- level 0 emits warnings and errors, and a dial labelled "quiet" is
+# the same lie #610 was about. `warn`, `error`, and `critical` are rejected too:
+# the first is a second name for one level, and the last two name a severity no
+# level can deliver on its own.
+LEVEL_NAMES = {"warning": 0, "info": 1, "debug": 2}
+NAME_FOR_LEVEL = {level: name for name, level in LEVEL_NAMES.items()}
+
+# Every source accepts both notations, so every rejection describes both. One
+# string because the CLI notice and the Settings HTTP error must not drift.
+ACCEPTED_FORMS = "%s-%s or one of %s" % (MIN_LEVEL, MAX_LEVEL, ", ".join(LEVEL_NAMES))
 
 # Named for the source, not the mechanism, because these strings are echoed to
 # the operator when the level is decided.
@@ -65,8 +82,23 @@ def clamp_level(level: int) -> int:
     return max(MIN_LEVEL, min(MAX_LEVEL, level))
 
 
+def describe_level(level: int) -> str:
+    """Render a level the way every operator-facing surface says it: `2 (debug)`.
+
+    The number is what an operator's `config.ini` and compose file contain; the
+    name is what `--help` and the Settings dial show them. Saying both keeps the
+    two notations from drifting apart in anyone's head.
+    """
+    return "%s (%s)" % (level, NAME_FOR_LEVEL[clamp_level(level)])
+
+
 def parse_level(raw, origin: str) -> tuple[int | None, list[str]]:
     """Read one source's value into a usable level.
+
+    Both notations are accepted from every source -- `2` and `debug` are the same
+    instruction, so an operator who reads `Debug` on the Settings dial can type
+    `--log-level debug` and have it work. Names are matched case-insensitively
+    and never need clamping; a number does.
 
     Returns `(None, notices)` when the source supplied nothing usable, so the
     caller falls through to the next layer rather than starting at a level
@@ -85,13 +117,16 @@ def parse_level(raw, origin: str) -> tuple[int | None, list[str]]:
         text = str(raw).strip()
         if not text:
             return None, notices
+        named = LEVEL_NAMES.get(text.casefold())
+        if named is not None:
+            return named, notices
         try:
             parsed = int(text)
         except ValueError:
-            return None, [f"Ignoring {origin}: {text!r} is not a number. Expected {MIN_LEVEL}-{MAX_LEVEL}."]
+            return None, [f"Ignoring {origin}: {text!r} is not a log level. Expected {ACCEPTED_FORMS}."]
     clamped = clamp_level(parsed)
     if clamped != parsed:
-        notices.append(f"Log level {parsed} from {origin} is out of range; using {clamped}.")
+        notices.append(f"Log level {parsed} from {origin} is out of range; using {describe_level(clamped)}.")
     return clamped, notices
 
 
@@ -124,8 +159,10 @@ def resolve_startup_log_level(
     # Say what lost, so an operator who edits the Settings dial and sees nothing
     # change has the reason in front of them rather than in the source.
     overridden = [
-        f"{other_level} from {other_source}" for other_level, other_source in supplied[1:] if other_level != level
+        f"{describe_level(other_level)} from {other_source}"
+        for other_level, other_source in supplied[1:]
+        if other_level != level
     ]
     if overridden:
-        notices.append(f"Log level {level} from {source} overrides {', '.join(overridden)}.")
+        notices.append(f"Log level {describe_level(level)} from {source} overrides {', '.join(overridden)}.")
     return LogLevelResolution(level=level, source=source, notices=notices)

@@ -8,11 +8,30 @@ the logger and to every sink it feeds. There is no second dial.
 
 | Level | Threshold | Console | `comicarr.log` | Web UI log list |
 | --- | --- | --- | --- | --- |
-| `0` — quiet | `WARNING` | warnings and errors | warnings and errors | warnings and errors |
-| `1` — normal (default) | `INFO` | info and above | info and above | info and above |
-| `2` — verbose | `DEBUG` | everything | everything | everything |
+| `0` — `warning` | `WARNING` | warnings and errors | warnings and errors | warnings and errors |
+| `1` — `info` (default) | `INFO` | info and above | info and above | info and above |
+| `2` — `debug` | `DEBUG` | everything | everything | everything |
 
 Levels below `0` clamp to `WARNING`; above `2` clamp to `DEBUG`.
+
+### The names are determined, not chosen
+
+Each level *is* a stdlib threshold, so the threshold names it. That rules out
+the obvious `quiet` / `normal` / `verbose` triple, which this document used
+until #620: level `0` emits warnings and errors, and calling it "quiet" is the
+same class of lie as #610 — a control describing behaviour the process does not
+have. An operator who reads "quiet" and hears "silence" will turn the dial down
+and believe failures stopped.
+
+There is exactly one name per level. `warn` is refused as a second spelling of
+one level; `error` and `critical` are refused because no level delivers them —
+`--log-level error` could only mean "warnings and errors", which is level `0`
+under a name that promises something narrower.
+
+`quiet` and `verbose` survive only as the flag spellings `--quiet` and
+`--verbose`, which is a different thing from a level name and is covered below.
+Neither is accepted as a *value*: `--log-level` was `type=int` before #620, so
+nobody could ever have typed them and there is no back-compatibility to keep.
 
 `logger.threshold_for_level()` is the only place this mapping lives, and
 `logger.current_log_level()` is the only supported way to ask what the dial is
@@ -31,6 +50,18 @@ Three sources, highest priority first:
 
 If none of them supplies a value, the level is `1`.
 
+**Every source accepts both notations.** `--log-level debug`,
+`COMICARR_LOG_LEVEL=debug`, `LOG_LEVEL = debug` in `config.ini`, and a `"debug"`
+sent to the Settings endpoint all mean level `2`. Matching is
+case-insensitive and tolerates surrounding whitespace. One grammar everywhere is
+the point: an operator who reads `Debug` on the Settings dial and types
+`--log-level debug` must not meet an error, and a source that quietly accepted
+less than its neighbours would only ever be discovered by tripping over it.
+
+**The stored value is always the integer.** A name is normalised by
+`parse_level` at the boundary and never reaches `config.ini`, so `LOG_LEVEL`
+stays the `int` the registry declares and the generated frontend types expect.
+
 **A source counts only when it explicitly supplies a value.** That qualifier is
 the whole rule, and it is what #610 got wrong: the Docker entrypoint passed
 `--quiet` on every start, so the top of the chain was permanently occupied and
@@ -46,7 +77,13 @@ overrode.
 
 Values outside `0`–`2` are clamped rather than rejected: a compose file asking
 for `3` wants maximum verbosity, and refusing to boot over it helps nobody. A
-non-numeric value is ignored with a notice, and the next source down is used.
+value that is neither a number nor one of the three names is ignored with a
+notice, and the next source down is used.
+
+Operator-facing text names the level in both notations — `Log level 2 (debug)
+from startup argument overrides 1 (info) from the config file`. The number is
+what an operator's config and compose files contain; the name is what `--help`
+and the Settings dial show them. `describe_level()` is the single renderer.
 
 `COMICARR_LOG_LEVEL` is a deliberate one-off for this one key. Comicarr does not
 read the environment for any other setting, and a general `COMICARR_<KEY>`
@@ -69,22 +106,37 @@ is the realistic case), the save still reports success and the failure is
 logged; the level applies at the next start.
 
 The value is read by `parse_level`, exactly as the three startup sources are,
-so a level typed into Settings clamps to range the same way. It differs on one
-point: a non-numeric value is *refused* with an error rather than ignored. A
-startup source has a layer beneath it to fall through to, and an HTTP request
-has somewhere to put the complaint — persisting `"verbose"` would leave the
-operator's setting silently discarded at the next start.
+so a level typed into Settings clamps to range the same way and accepts the same
+two notations. It differs on one point: an unrecognised value is *refused* with
+an error rather than ignored. A startup source has a layer beneath it to fall
+through to, and an HTTP request has somewhere to put the complaint — persisting
+`"loud"` would leave the operator's setting silently discarded at the next
+start. The rejection names both accepted forms, from the same `ACCEPTED_FORMS`
+string the startup notice uses, so the two can never describe different rules.
 
 On the next start the chain runs again, so a startup argument or
 `COMICARR_LOG_LEVEL` will override what Settings saved. That is the documented
 precedence, and it is why the winning source announces what it overrode.
 
+The dial itself shows number, name, and consequence together — `0 · Warning —
+warnings and errors` — rather than a bare one-word label. The number is what the
+operator's config file contains, the name is what the CLI accepts, and the
+consequence is what stops the next "I set it to 0 and expected silence". This
+supersedes the `quiet / normal / verbose` labels locked while designing the
+surface; the layout of that design is unaffected.
+
 ### `--quiet` and `--verbose`
 
-`--quiet` is a deprecated alias for `--log-level 0` and prints a notice saying
-so. It stays because it is in existing compose files and systemd units; deleting
-it would break them for a cosmetic gain. `--verbose` maps to level `2`. When
-more than one is passed, `--log-level` wins, then `--verbose`, then `--quiet`.
+Both are deprecated aliases — `--quiet` for `--log-level warning`, `--verbose`
+for `--log-level debug` — and both print a notice saying so. Both keep their
+short forms `-q` and `-v`, and neither has a removal date: they are in existing
+compose files and systemd units, and deleting them would break those for a
+cosmetic gain. `--log-level` is the only flag that sets the dial directly.
+
+When more than one is passed, `--log-level` wins, then `--verbose`, then
+`--quiet`. A `--log-level` whose value is unusable supplies *nothing*, so it
+loses to an alias that was also passed — same rule as the precedence chain, one
+level down.
 
 ### The two helpers disagree about `None`, on purpose
 
