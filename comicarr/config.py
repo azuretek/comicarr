@@ -591,7 +591,23 @@ class Config(object):
             _scrub()
             return
 
-        comicarr.PROVIDER_START_ID += 1
+        canonical_name = str(legacy["name"]).strip().casefold()
+        existing_names = {str(entry[0] or entry[1]).strip().casefold() for entry in self.EXTRA_TORZNABS}
+        if canonical_name in existing_names | self._reserved_provider_names():
+            logger.warn(
+                "[CONFIG] Legacy torznab_* fields under [Torznab] reuse the provider name "
+                "'%s' and are NOT used for searching. Rename or remove the legacy fields, or "
+                "configure the provider via the Settings UI (extra_torznabs) instead." % legacy["name"]
+            )
+            return
+
+        # Skip ids held by the built-in providers (experimental/DDL) or
+        # _validate_loaded_provider_extras will reject the migrated entry.
+        reserved_ids = self._reserved_provider_ids()
+        candidate_id = comicarr.PROVIDER_START_ID + 1
+        while candidate_id in reserved_ids:
+            candidate_id += 1
+        comicarr.PROVIDER_START_ID = candidate_id
         self.EXTRA_TORZNABS.append(
             (
                 legacy["name"],
@@ -600,7 +616,7 @@ class Config(object):
                 legacy["apikey"],
                 legacy["category"],
                 str(int(bool(self.ENABLE_TORZNAB))),
-                comicarr.PROVIDER_START_ID,
+                candidate_id,
             )
         )
         logger.info(

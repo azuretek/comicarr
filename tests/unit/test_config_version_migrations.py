@@ -194,6 +194,65 @@ torznab_category = 8020
     assert "extra_torznabs" in text
 
 
+def test_legacy_torznab_migration_skips_reserved_provider_ids(tmp_path, monkeypatch):
+    """The migrated entry must not claim an id held by a built-in provider
+    (experimental=101, DDL=200/201) or provider validation rejects it."""
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Experimental]
+experimental = True
+
+[Torznab]
+enable_torznab = True
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+    monkeypatch.setattr(comicarr, "PROVIDER_START_ID", 100, raising=False)
+
+    assert cfg.read(startup=False) is cfg
+
+    migrated = next(entry for entry in cfg.EXTRA_TORZNABS if entry[1] == "http://prowlarr.example:9696/1/api")
+    assert migrated[6] == 102  # 101 is reserved by experimental
+    assert comicarr.PROVIDER_START_ID == 102
+
+
+def test_legacy_torznab_name_collision_warns_and_stays_unmigrated(tmp_path, monkeypatch):
+    cfg, _ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 18
+minimal_ini = False
+encrypt_passwords = False
+
+[Torznab]
+enable_torznab = True
+extra_torznabs = Nyaa, http://other.example:9696/api, False, zzz, 8020, 1, 7
+torznab_name = Nyaa
+torznab_host = http://prowlarr.example:9696/1/api
+torznab_apikey = abc123
+torznab_category = 8020
+""",
+    )
+    warn = MagicMock()
+    monkeypatch.setattr(config_module.logger, "warn", warn)
+
+    assert cfg.read(startup=False) is cfg
+
+    hosts = [entry[1] for entry in cfg.EXTRA_TORZNABS]
+    assert "http://prowlarr.example:9696/1/api" not in hosts
+    assert any("reuse the provider name" in call[0][0] for call in warn.call_args_list)
+
+
 def test_legacy_torznab_incomplete_fields_warn_and_stay_unmigrated(tmp_path, monkeypatch):
     cfg, _ini = _load_config(
         tmp_path,
