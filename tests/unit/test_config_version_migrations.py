@@ -7,7 +7,7 @@
 #  the Free Software Foundation, either version 3 of the License, or
 #  (at your option) any later version.
 
-"""CONFIG_VERSION migrations: 15 → 16 (CHECK_GITHUB) and 16 → 17 (host_return)."""
+"""CONFIG_VERSION migrations: 15 → 16 → 17 → 18."""
 
 import configparser
 from pathlib import Path
@@ -64,10 +64,10 @@ check_github_on_startup = True
 
     assert cfg.read(startup=False) is cfg
 
-    assert cfg.CONFIG_VERSION == 17
+    assert cfg.CONFIG_VERSION == 18
     assert cfg.CHECK_GITHUB is True
     assert REGISTRY["CHECK_GITHUB"].default is True
-    assert REGISTRY["CONFIG_VERSION"].default == 17
+    assert REGISTRY["CONFIG_VERSION"].default == 18
     assert "AUTO_UPDATE" not in REGISTRY
     assert "CHECK_GITHUB_ON_STARTUP" not in REGISTRY
 
@@ -94,7 +94,7 @@ check_github = False
 
     assert cfg.read(startup=False) is cfg
 
-    assert cfg.CONFIG_VERSION == 17
+    assert cfg.CONFIG_VERSION == 18
     assert cfg.CHECK_GITHUB is False
 
 
@@ -121,7 +121,7 @@ host_return = http://comicarr.example:8090/
 
     assert cfg.read(startup=False) is cfg
 
-    assert cfg.CONFIG_VERSION == 17
+    assert cfg.CONFIG_VERSION == 18
     assert "HOST_RETURN" not in REGISTRY
     assert not hasattr(cfg, "HOST_RETURN")
 
@@ -129,3 +129,29 @@ host_return = http://comicarr.example:8090/
     assert "host_return" not in text
     # Neighbouring keys in the same section survive the scrub.
     assert "http_port" in text
+
+
+def test_migration_removes_legacy_folder_scan_verbosity(tmp_path, monkeypatch):
+    """17 → 18 removes the hidden scan switch and explains the new policy once."""
+    cfg, ini = _load_config(
+        tmp_path,
+        monkeypatch,
+        """[General]
+config_version = 17
+minimal_ini = False
+folder_scan_log_verbose = True
+""",
+    )
+    info = MagicMock()
+    monkeypatch.setattr(config_module.logger, "info", info)
+
+    assert cfg.read(startup=False) is cfg
+
+    assert cfg.CONFIG_VERSION == 18
+    assert REGISTRY["CONFIG_VERSION"].default == 18
+    assert "FOLDER_SCAN_LOG_VERBOSE" not in REGISTRY
+    assert not hasattr(cfg, "FOLDER_SCAN_LOG_VERBOSE")
+    assert "folder_scan_log_verbose" not in ini.read_text(encoding="utf-8").lower()
+    info.assert_any_call(
+        "[CONFIG] Removed folder_scan_log_verbose: folder-scan diagnostics now follow LOG_LEVEL=debug."
+    )

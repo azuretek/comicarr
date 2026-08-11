@@ -114,7 +114,7 @@ class ConfigKey:
 # ---------------------------------------------------------------------------
 
 _KEYS: tuple[ConfigKey, ...] = (
-    ConfigKey("CONFIG_VERSION", int, "General", 17),
+    ConfigKey("CONFIG_VERSION", int, "General", 18),
     ConfigKey("MINIMAL_INI", bool, "General", False),
     ConfigKey("CACHE_DIR", str, "General", None, readable=True),
     ConfigKey("DYNAMIC_UPDATE", int, "General", 0),
@@ -136,7 +136,6 @@ _KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("UPDATE_ENDED", bool, "General", False),
     ConfigKey("NEWCOM_DIR", str, "Update", None),
     ConfigKey("FFTONEWCOM_DIR", bool, "Update", False),
-    ConfigKey("FOLDER_SCAN_LOG_VERBOSE", bool, "General", False),
     ConfigKey("INTERFACE", str, "General", "carbon"),
     ConfigKey("CORRECT_METADATA", bool, "General", False),
     ConfigKey("MOVE_FILES", bool, "General", False),
