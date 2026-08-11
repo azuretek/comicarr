@@ -42,9 +42,7 @@ Resolution happens once, when config is read at startup, in
 `comicarr/app/config/log_level.py`. Every source is parsed even when a
 higher-priority one has already won, so an operator who typoed
 `COMICARR_LOG_LEVEL` is told about it, and the winning source announces what it
-overrode. Runtime changes from the Settings UI go through
-`logger.configure_log_level()` and are not part of this chain — they apply
-immediately and are re-decided by it on the next start.
+overrode.
 
 Values outside `0`–`2` are clamped rather than rejected: a compose file asking
 for `3` wants maximum verbosity, and refusing to boot over it helps nobody. A
@@ -54,6 +52,32 @@ non-numeric value is ignored with a notice, and the next source down is used.
 read the environment for any other setting, and a general `COMICARR_<KEY>`
 mechanism is a separate question — it raises precedence, secrets-in-env, and
 UI-honesty problems that have nothing to do with logging.
+
+### Saving the level from Settings applies it now
+
+The Settings page is not part of the startup chain: it writes `LOG_LEVEL` to
+`config.ini` *and* reconfigures the running logger, so the change takes effect
+without a restart. The whole point of turning verbosity up is to catch a
+problem while it is happening, and a dial that waits for a restart destroys the
+state the operator was trying to capture.
+
+`update_config` (`comicarr/app/system/service.py`) persists first and calls
+`logger.configure_log_level()` after — a level that survives the restart but is
+not yet live is a much smaller failure than a live level the next start
+forgets. If the reconfigure fails (a log directory that has become unwritable
+is the realistic case), the save still reports success and the failure is
+logged; the level applies at the next start.
+
+The value is read by `parse_level`, exactly as the three startup sources are,
+so a level typed into Settings clamps to range the same way. It differs on one
+point: a non-numeric value is *refused* with an error rather than ignored. A
+startup source has a layer beneath it to fall through to, and an HTTP request
+has somewhere to put the complaint — persisting `"verbose"` would leave the
+operator's setting silently discarded at the next start.
+
+On the next start the chain runs again, so a startup argument or
+`COMICARR_LOG_LEVEL` will override what Settings saved. That is the documented
+precedence, and it is why the winning source announces what it overrode.
 
 ### `--quiet` and `--verbose`
 

@@ -44,6 +44,11 @@ SOURCE_ARGUMENT = "startup argument"
 SOURCE_ENVIRONMENT = f"the {ENV_VAR} environment variable"
 SOURCE_CONFIG = "the config file"
 SOURCE_DEFAULT = "the built-in default"
+# Not a startup source -- the Settings page writes `LOG_LEVEL` while the process
+# is running, and `resolve_startup_log_level` re-decides it on the next start.
+# It shares `parse_level` so a level typed into the UI is read by exactly the
+# same rules as one passed on the command line.
+SOURCE_SETTINGS = "the Settings page"
 
 
 @dataclass
