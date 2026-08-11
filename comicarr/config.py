@@ -35,6 +35,7 @@ from pathlib import Path
 
 import comicarr
 from comicarr import db, encrypted, filechecker, helpers, logger, maintenance
+from comicarr.app.config.log_level import resolve_startup_log_level
 from comicarr.app.config.registry import as_legacy_definitions
 
 config = configparser.ConfigParser()
@@ -396,15 +397,20 @@ class Config(object):
                     self.LOG_DIR = None
                     print("Unable to create the log directory. Logging to screen only.")
 
-            # Start the logger.
-            # quick check to make sure log_level isn't just blank in the config
+            # Start the logger. The level comes from the first source that
+            # explicitly supplies one -- startup argument, then
+            # COMICARR_LOG_LEVEL, then the config file. See
+            # comicarr/app/config/log_level.py and
+            # docs/architecture/logging-levels.md.
+            resolution = resolve_startup_log_level(
+                argument_level=comicarr.LOG_LEVEL,
+                config_level=self.LOG_LEVEL,
+            )
+            for notice in resolution.notices:
+                print(notice)
+            log_level = resolution.level
             if self.LOG_LEVEL is None:
                 self.LOG_LEVEL = 1  # default it to INFO level (1) if not set.
-
-            log_level = self.LOG_LEVEL
-            if comicarr.LOG_LEVEL is not None:
-                log_level = comicarr.LOG_LEVEL
-                print("Logging level in config over-ridden by startup value. Logging level set to : %s" % (log_level))
 
             comicarr.LOG_LEVEL = (
                 log_level  # set this to the calculated log_leve value so that logs display fine in the GUI
