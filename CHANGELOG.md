@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.29.1
+
+### Patch Changes
+
+- a5a7dc1: Hand-edited legacy `torznab_*` fields under `[Torznab]` in config.ini no longer sit silently inert. A complete legacy entry (name, host, API key, category) is folded into the real multi-provider `extra_torznabs` list on startup and the stale keys are removed; an incomplete one is called out in the log with a pointer to the Settings UI instead of being ignored. (#631)
+- a5a7dc1: Pack and bundle releases can now actually be matched. Each series page has two new Search options — **Allow packs** accepts multi-issue/volume bundle releases (the norm for manga and manhwa torrents), and **Ignore book type** lets results through when the release's book type (TPB, GN, …) differs from the series. These per-series flags existed in the database but had no way to be set, so packs were rejected for every series. Pack matching also no longer requires the 32P tracker to be enabled — any torrent or Torznab provider qualifies once torrent search is on. (#632, #633)
+
 ## 0.29.0
 
 ### Minor Changes
@@ -28,7 +35,7 @@
 
   `--verbose` and `-v` are now deprecated aliases for `--log-level debug`, joining `--quiet` and `-q` (aliases for `--log-level warning`). All four keep working and will continue to — they print a note pointing at `--log-level`, which is the one flag that sets the level directly.
 
-- 22098c1: Warnings and errors now reach your logs on Docker. Comicarr chose between two different logging implementations based on your system locale, and the one containers ended up on was missing pieces: certain warnings — "No COMIC_DIR configured", "Cannot find import directory", and others like them — raised an internal error instead of being written down, and unexpected failures were dropped entirely while the server tried to record them. Startup even announced it: _"errors WILL NOT be captured in the logs"_. There is one logging implementation now, the same for every locale, so those messages appear in `comicarr.log`, in `docker logs`, and in the log list in the Web UI like everything else.
+- 22098c1: Warnings and errors now reach your logs on Docker. Comicarr chose between two different logging implementations based on your system locale, and the one containers ended up on was missing pieces: certain warnings — "No COMIC*DIR configured", "Cannot find import directory", and others like them — raised an internal error instead of being written down, and unexpected failures were dropped entirely while the server tried to record them. Startup even announced it: *"errors WILL NOT be captured in the logs"\_. There is one logging implementation now, the same for every locale, so those messages appear in `comicarr.log`, in `docker logs`, and in the log list in the Web UI like everything else.
 
   Two things to expect after upgrading. Log lines from containers change shape slightly — `INFO :: comicarr.backup_files.539 : MainThread` in place of `INFO :: MainThread : maintenance.py:backup_files:539 :` — so an existing log file will show both styles either side of the upgrade. And with the dial turned all the way down, `docker logs` now shows warnings and errors rather than nothing at all, which is what level 0 was always meant to mean.
 
