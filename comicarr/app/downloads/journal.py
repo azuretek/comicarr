@@ -76,7 +76,8 @@ TERMINAL_STAGES = (POST_PROCESSED, MANUAL_REVIEW, FAILED)
 # Open stages: rows replay must consider as still-in-flight obligations.
 OPEN_STAGES = (RESERVED, SNATCHED, DOWNLOADED, POST_PROCESSING, MOVED)
 
-# Stages that populate the needs-attention band (Timeline work queue).
+# Terminal stages eligible for low-level resolution stamps. Attention applies
+# its own admission policy before exposing either stage to an operator.
 BAND_STAGES = (FAILED, MANUAL_REVIEW)
 
 # R9 resolution stamps — written by operator actions (and FAILED_AUTO retry)
@@ -86,22 +87,6 @@ STATUS_RETRIED = "retried"
 STATUS_IGNORED = "ignored"
 STATUS_IMPORTED = "imported"
 RESOLVED_STATUSES = (STATUS_RETRIED, STATUS_IGNORED, STATUS_IMPORTED)
-
-# Operator exits, keyed by the stage that admits them (#525 naming). One
-# definition: the resolver validates against these and the group DTO derives
-# `available_actions` from the same sets, so a group can never offer an action
-# the resolver would then reject. `stop_wanting` replaces the old `ignore`
-# action id at every layer; the durable stamp stays `STATUS_IGNORED`, because
-# renaming a persisted status would silently re-admit every stamped row.
-ACTION_RETRY = "retry"
-ACTION_SEARCH_AGAIN = "search_again"
-ACTION_IMPORT = "import"
-ACTION_STOP_WANTING = "stop_wanting"
-
-FAILED_ACTIONS = (ACTION_RETRY, ACTION_STOP_WANTING)
-MANUAL_REVIEW_ACTIONS = (ACTION_IMPORT, ACTION_SEARCH_AGAIN, ACTION_STOP_WANTING)
-STAGE_ACTIONS = {FAILED: FAILED_ACTIONS, MANUAL_REVIEW: MANUAL_REVIEW_ACTIONS}
-BAND_ACTIONS = frozenset(FAILED_ACTIONS) | frozenset(MANUAL_REVIEW_ACTIONS)
 
 # Fresh re-snatch stages that may supersede a supersedable terminal row under
 # the same release_key (same issue|provider). DDL handoff writes RESERVED
@@ -589,13 +574,28 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
             )
         )
         if quarantined.rowcount:
-            logger.error("[JOURNAL] quarantined release_key=%s: %s" % (key, reason))
-            # Clause 2 (#541): re-want + log loudly. Quarantine already logged;
-            # re-want returns the issue to the acquisition cycle.
-            try:
-                from comicarr.app.activity.reconcile import reconcile_excluded
+            # Clause 2 (#541): re-want + log loudly. This transition cannot
+            # call Attention.record recursively, so it invokes Attention's
+            # private post-transition reconciliation hook.
+            from comicarr.app.attention._reconciliation import reconcile_excluded
 
-                mapping = existing_row._mapping
+            mapping = existing_row._mapping
+            # `strict=True` so a reconciliation failure is loud, but caught so
+            # it cannot veto the quarantine. `conn` here is the CALLER's
+            # transaction (post-processing), and postprocess_pipeline re-raises
+            # when `conn is not None` — letting this propagate would roll back
+            # the quarantine UPDATE above and leave the row non-terminal, i.e.
+            # blind-replayable, which is exactly what this block exists to
+            # prevent. The asymmetry with `attention.record()`'s owned
+            # transaction (all-or-nothing, lock-retried) is deliberate: there
+            # the exclusion and its reconciliation are the same durable fact,
+            # whereas here the quarantine is the safety property and has no
+            # catch-up mechanism, while the reconciliation obligation does —
+            # `recovery.reconcile_existing_excluded_rows()` re-scans unresolved
+            # failed/manual_review rows every boot and re-discharges them
+            # idempotently, and a MANUAL_REVIEW row carrying
+            # `immutable_payload_conflict:*` is inside that scan set.
+            try:
                 reconcile_excluded(
                     reason,
                     issueid=mapping.get("issueid") or fields.get("issueid"),
@@ -604,9 +604,11 @@ def _apply_transition(conn, key, stage, new_rank, fields, payload, when):
                     hash=mapping.get("hash") or fields.get("hash"),
                     payload=existing_payload,
                     conn=conn,
+                    strict=True,
                 )
             except Exception as e:
                 logger.error("[JOURNAL] band reconciliation after immutable conflict %s: %s" % (key, e))
+            logger.error("[JOURNAL] quarantined release_key=%s: %s" % (key, reason))
         return False
 
     # Same-stage calls are not a new side-effect claim, but may safely fill in
@@ -782,7 +784,7 @@ def _emit_activity_for_won_transition(
         return None
 
 
-def record_transition(release_key, stage, payload=None, conn=None, **fields):
+def record_transition(release_key, stage, payload=None, conn=None, _activity_sink=None, **fields):
     """Forward-only conditional advance for one release_key.
 
     Implemented as a monotonic conditional update plus insert-if-absent, the
@@ -824,7 +826,7 @@ def record_transition(release_key, stage, payload=None, conn=None, **fields):
             logger.fdebug("[JOURNAL] advanced release_key=%s -> stage=%s (caller txn)" % (release_key, stage))
             # Co-commit narrative; SSE publish is left to the transaction owner
             # (or the next query-backed refetch — best-effort contract).
-            _emit_activity_for_won_transition(
+            activity_payload = _emit_activity_for_won_transition(
                 stage,
                 release_key,
                 fields,
@@ -834,6 +836,8 @@ def record_transition(release_key, stage, payload=None, conn=None, **fields):
                 prior_provider=prior_provider,
                 conn=conn,
             )
+            if activity_payload is not None and _activity_sink is not None:
+                _activity_sink.append(activity_payload)
         return won
 
     # Own transaction with bounded retry-then-raise (mirrors db.upsert).
@@ -898,7 +902,7 @@ def record_transition(release_key, stage, payload=None, conn=None, **fields):
 # ---------------------------------------------------------------------------
 
 
-def mark_failed(release_key, fail_reason, payload=None, conn=None, **fields):
+def mark_failed(release_key, fail_reason, payload=None, conn=None, _activity_sink=None, **fields):
     """Advance a row to the terminal `failed` stage, retaining payload/reason
     so a future manual-retry layer (R9) can act on it."""
     return record_transition(
@@ -906,6 +910,7 @@ def mark_failed(release_key, fail_reason, payload=None, conn=None, **fields):
         FAILED,
         payload=payload,
         conn=conn,
+        _activity_sink=_activity_sink,
         fail_reason=fail_reason,
         **fields,
     )
@@ -923,13 +928,14 @@ def mark_done(release_key, payload=None, conn=None, **fields):
     )
 
 
-def mark_manual_review(release_key, reason, payload=None, conn=None, **fields):
+def mark_manual_review(release_key, reason, payload=None, conn=None, _activity_sink=None, **fields):
     """Quarantine an obligation whose safe automatic continuation is unknown."""
     return record_transition(
         release_key,
         MANUAL_REVIEW,
         payload=payload,
         conn=conn,
+        _activity_sink=_activity_sink,
         status=MANUAL_REVIEW,
         fail_reason=str(reason)[:1000],
         **fields,
@@ -958,29 +964,6 @@ def read_one(release_key):
     """Cheap point lookup of a single journal row by release_key (used by the
     U6 replay snapshot-then-recheck), or None."""
     return db.select_one(select(pipeline_journal).where(pipeline_journal.c.release_key == release_key))
-
-
-def read_needs_attention(*, issueid=None):
-    """Settled needs-attention band query (#437 / #457 / #483).
-
-    ``stage IN (failed, manual_review)`` and unresolved R9 status
-    (``status`` null or not in ``{retried, ignored, imported}``).
-    Newest ``updated_date`` first. Optional ``issueid`` scopes the band.
-    """
-    stmt = (
-        select(pipeline_journal)
-        .where(pipeline_journal.c.stage.in_(BAND_STAGES))
-        .where(
-            or_(
-                pipeline_journal.c.status.is_(None),
-                pipeline_journal.c.status.notin_(RESOLVED_STATUSES),
-            )
-        )
-        .order_by(pipeline_journal.c.updated_date.desc())
-    )
-    if issueid not in (None, ""):
-        stmt = stmt.where(pipeline_journal.c.issueid == str(issueid))
-    return db.select_all(stmt)
 
 
 def stamp_resolution(release_key, status, *, increment_retry=False, conn=None):

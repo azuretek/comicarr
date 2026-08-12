@@ -31,15 +31,6 @@ export type ActivityScope = {
 /** Wire ids (#525). The URL segment is the same id with `_` swapped for `-`. */
 export type BandResolutionAction = BandAction;
 
-interface BandResolutionResult {
-  success: boolean;
-  error?: string;
-  message?: string;
-  status?: string;
-  action?: string;
-  release_key?: string;
-}
-
 export interface BandBatchResultRow {
   release_key: string;
   ok: boolean;
@@ -231,43 +222,11 @@ export function useActivityBand(scope: ActivityScope = {}) {
       const qs = params.toString();
       return apiRequest<BandPage>(
         "GET",
-        qs ? `/api/activity/band?${qs}` : "/api/activity/band",
+        qs ? `/api/attention?${qs}` : "/api/attention",
       );
     },
     staleTime: ACTIVITY_POLL_MS,
     refetchInterval: ACTIVITY_POLL_MS,
-  });
-}
-
-/**
- * Operator exits for band rows via POST /api/downloads/needs-attention/...
- * Invalidates band + timeline on success.
- */
-export function useBandResolution() {
-  const queryClient = useQueryClient();
-  return useMutation<
-    BandResolutionResult,
-    Error,
-    { releaseKey: string; action: BandResolutionAction }
-  >({
-    mutationFn: async ({ releaseKey, action }) => {
-      const result = await apiRequest<BandResolutionResult>(
-        "POST",
-        `/api/downloads/needs-attention/${encodeURIComponent(releaseKey)}/${action.replace("_", "-")}`,
-      );
-      if (!result.success) {
-        throw new Error(
-          result.error || result.message || `Unable to ${action} this item.`,
-        );
-      }
-      return result;
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ACTIVITY_BAND_QUERY_KEY });
-      void queryClient.invalidateQueries({
-        queryKey: ACTIVITY_TIMELINE_QUERY_KEY,
-      });
-    },
   });
 }
 
@@ -289,7 +248,7 @@ export function useBandBatchResolution() {
     mutationFn: async ({ releaseKeys, action }) => {
       const result = await apiRequest<BandBatchResult>(
         "POST",
-        "/api/downloads/needs-attention/batch",
+        "/api/attention/resolve",
         { action, release_keys: releaseKeys },
       );
       if (!result.success) {

@@ -29,6 +29,7 @@ from sqlalchemy import select
 
 import comicarr
 from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
+from comicarr.app.attention import RecordOutcome
 from comicarr.app.downloads import journal, recovery, recovery_classify
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import ddl_info, issues, metadata, nzblog, pipeline_journal, snatched, storyarcs
@@ -312,6 +313,16 @@ def test_still_ddl_is_quarantined_without_duplicate_sender_call(queues):
     rkey = journal.release_key("40", "DDL", nzbname="Saga.DDL.cbz", discriminant="ddl-9")
     with get_engine().begin() as conn:
         conn.execute(nzblog.insert().values(IssueID="40", PROVIDER="DDL"))
+        conn.execute(issues.insert().values(IssueID="40", ComicID="C4", Status="Snatched"))
+        conn.execute(
+            ddl_info.insert().values(
+                ID="ddl-9",
+                issueid="40",
+                comicid="C4",
+                filename="Saga.DDL.cbz",
+                status="Downloading",
+            )
+        )
     _insert_journal(
         rkey,
         journal.SNATCHED,
@@ -331,7 +342,14 @@ def test_still_ddl_is_quarantined_without_duplicate_sender_call(queues):
     recovery.replay_pipeline(probes=_probe("still"))
     dl = _drain(queues["ddl"])
     assert dl == []
-    assert journal.read_one(rkey)["stage"] == journal.MANUAL_REVIEW
+    attention_row = journal.read_one(rkey)
+    assert attention_row["stage"] == journal.MANUAL_REVIEW
+    assert attention_row["fail_reason"] == "ambiguous_ddl_acceptance_after_restart"
+    with get_engine().connect() as conn:
+        issue = conn.execute(select(issues).where(issues.c.IssueID == "40")).mappings().one()
+        durable = conn.execute(select(ddl_info).where(ddl_info.c.ID == "ddl-9")).mappings().one()
+    assert issue["Status"] == "Wanted"
+    assert durable["status"] == "Manual Review"
     assert _drain(queues["nzb"]) == []
     assert _drain(queues["snatched"]) == []
 
@@ -401,6 +419,58 @@ def test_ae4_gone_marks_failed_not_enqueued(queues):
     row = _journal_row(rkey)
     assert row["stage"] == journal.FAILED
     assert row["fail_reason"] == recovery_classify.FAIL_REASON_GONE
+
+
+def test_apply_verdict_lost_transition_reports_no_write_and_makes_no_claim(monkeypatch):
+    """A lost journal transition is not a write. apply_verdict() must report
+    False (its docstring: "Returns True iff a journal write occurred") and must
+    NOT log the blocklisted/re-wanted claim for work another writer did."""
+    rkey = journal.release_key("31", "nzb.su", nzbname="L.cbz")
+    _insert_journal(
+        rkey,
+        journal.SNATCHED,
+        payload={"issueid": "31", "provider": "nzb.su"},
+        issueid="31",
+        provider="nzb.su",
+        downloader_type="nzb",
+    )
+    row = _journal_row(rkey)
+
+    monkeypatch.setattr(
+        recovery_classify,
+        "record",
+        lambda entry, conn=None: RecordOutcome(
+            transition_won=False,
+            base_reason=recovery_classify.FAIL_REASON_GONE,
+            actionable=True,
+            reconciliation="noop",
+        ),
+    )
+    warnings = []
+    monkeypatch.setattr(recovery_classify.logger, "warn", lambda message: warnings.append(message))
+
+    assert recovery_classify.apply_verdict(row, recovery_classify.GONE) is False
+    assert not any("release blocklisted and" in message for message in warnings)
+
+
+def test_apply_verdict_won_transition_reports_write_and_makes_the_claim(monkeypatch):
+    """The winner of the transition does report True and does make the claim."""
+    rkey = journal.release_key("32", "nzb.su", nzbname="W.cbz")
+    _insert_journal(
+        rkey,
+        journal.SNATCHED,
+        payload={"issueid": "32", "provider": "nzb.su"},
+        issueid="32",
+        provider="nzb.su",
+        downloader_type="nzb",
+    )
+    row = _journal_row(rkey)
+
+    warnings = []
+    monkeypatch.setattr(recovery_classify.logger, "warn", lambda message: warnings.append(message))
+
+    assert recovery_classify.apply_verdict(row, recovery_classify.GONE) is True
+    assert any("release blocklisted and" in message for message in warnings)
 
 
 # ---------------------------------------------------------------------------

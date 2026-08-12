@@ -10,16 +10,17 @@
 #  Tests for comicarr.app.downloads.journal — the U1 forward-only journal facade.
 
 import threading
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
-from unittest.mock import patch
 
 import comicarr
-from comicarr.db import get_engine, shutdown_engine
-from comicarr.tables import metadata, pipeline_journal
+from comicarr import db
 from comicarr.app.downloads import journal
+from comicarr.db import get_engine, shutdown_engine
+from comicarr.tables import issues, metadata, pipeline_journal
 
 
 @pytest.fixture(autouse=True)
@@ -45,9 +46,7 @@ def _all_rows():
 
 def _row(key):
     with get_engine().connect() as conn:
-        r = conn.execute(
-            select(pipeline_journal).where(pipeline_journal.c.release_key == key)
-        ).fetchone()
+        r = conn.execute(select(pipeline_journal).where(pipeline_journal.c.release_key == key)).fetchone()
         return dict(r._mapping) if r else None
 
 
@@ -559,6 +558,102 @@ def test_conflicting_immutable_payload_identity_is_quarantined():
     assert row["fail_reason"] == "immutable_payload_conflict:issueid"
 
 
+def _seed_conflict_row(issue_id, key):
+    """Reserve `key` against `issue_id` so the next write conflicts on issueid."""
+    with get_engine().begin() as conn:
+        conn.execute(
+            issues.insert().values(
+                IssueID=issue_id,
+                ComicID="comic-tx",
+                ComicName="Saga",
+                Issue_Number="1",
+                Status="Snatched",
+            )
+        )
+    journal.record_transition(
+        key,
+        journal.RESERVED,
+        payload={"issueid": issue_id, "provider": "nzb.su", "route": "sabnzbd"},
+        issueid=issue_id,
+        provider="nzb.su",
+    )
+
+
+def _break_rewant(monkeypatch):
+    """Make the clause-2 re-want upsert raise, leaving other writes intact.
+
+    Returns the list of connections the failing ``issues`` upsert was called
+    with. Tests must assert it is non-empty: without that, a reconciliation
+    path that stopped writing ``issues`` (or stopped running) would make the
+    fault injection silently inert and the quarantine assertions vacuous.
+    """
+    original_upsert_conn = db.upsert_conn
+    rewant_conns = []
+
+    def fail_rewant(conn, table_name, values, controls):
+        if table_name == "issues":
+            rewant_conns.append(conn)
+            raise RuntimeError("rewant persistence failed")
+        return original_upsert_conn(conn, table_name, values, controls)
+
+    monkeypatch.setattr(db, "upsert_conn", fail_rewant)
+    return rewant_conns
+
+
+def test_immutable_conflict_quarantine_survives_failing_reconciliation_hook(monkeypatch):
+    """The quarantine is the safety property and must never be vetoed.
+
+    Clause-2 reconciliation has a boot-time idempotent backstop
+    (``reconcile_existing_excluded_rows``); the quarantine has none. If a
+    reconciliation write failure could roll the quarantine back, the row would
+    stay non-terminal and be blind-replayed — exactly what quarantining exists
+    to prevent.
+    """
+    key = journal.release_key("safe-tx", "nzb.su")
+    _seed_conflict_row("safe-tx", key)
+    rewant_conns = _break_rewant(monkeypatch)
+
+    won = journal.record_transition(
+        key,
+        journal.SNATCHED,
+        payload={"issueid": "different-issue", "route": "sabnzbd", "nzo_id": "sab-job-tx"},
+    )
+
+    assert rewant_conns, "reconciliation never attempted the issues write — fault injection inert"
+    assert won is False
+    row = _row(key)
+    assert row["stage"] == journal.MANUAL_REVIEW
+    assert row["status"] == "manual_review"
+    assert row["fail_reason"] == "immutable_payload_conflict:issueid"
+
+
+def test_immutable_conflict_quarantine_commits_in_caller_transaction(monkeypatch):
+    """Caller-supplied ``conn`` (post-processing) must still see the quarantine.
+
+    ``postprocess_pipeline`` re-raises when ``conn is not None``, so a
+    propagating reconciliation failure here would roll back the caller's
+    transaction along with the quarantine UPDATE.
+    """
+    key = journal.release_key("safe-pp", "nzb.su")
+    _seed_conflict_row("safe-pp", key)
+    rewant_conns = _break_rewant(monkeypatch)
+
+    with get_engine().begin() as conn:
+        won = journal.record_transition(
+            key,
+            journal.SNATCHED,
+            payload={"issueid": "different-issue", "route": "sabnzbd", "nzo_id": "sab-job-pp"},
+            conn=conn,
+        )
+
+    assert rewant_conns, "reconciliation never attempted the issues write — fault injection inert"
+    assert all(seen is conn for seen in rewant_conns), "reconciliation must run on the caller-supplied transaction"
+    assert won is False
+    row = _row(key)
+    assert row["stage"] == journal.MANUAL_REVIEW
+    assert row["fail_reason"] == "immutable_payload_conflict:issueid"
+
+
 def test_read_open_orders_oldest_updated_date_first():
     """P1 #4: read_open() must return rows oldest-`updated_date` first so the
     U6 inline-PP re-drive cap rotates (oldest obligations drain first) instead
@@ -659,9 +754,7 @@ def test_transition_raises_after_retry_cap_exhausted():
 
     with patch("comicarr.app.downloads.journal.db.get_engine") as mock_engine:
         ctx = mock_engine.return_value.begin.return_value.__enter__
-        ctx.return_value.execute.side_effect = OperationalError(
-            "database is locked", None, None
-        )
+        ctx.return_value.execute.side_effect = OperationalError("database is locked", None, None)
         with pytest.raises(OperationalError):
             journal.record_transition(key, journal.SNATCHED)
 
@@ -671,9 +764,7 @@ def test_non_lock_db_error_raises_immediately():
 
     with patch("comicarr.app.downloads.journal.db.get_engine") as mock_engine:
         ctx = mock_engine.return_value.begin.return_value.__enter__
-        ctx.return_value.execute.side_effect = OperationalError(
-            "no such table", None, None
-        )
+        ctx.return_value.execute.side_effect = OperationalError("no such table", None, None)
         with pytest.raises(OperationalError):
             journal.record_transition(key, journal.SNATCHED)
 
