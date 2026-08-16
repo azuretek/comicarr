@@ -458,9 +458,9 @@ describe("ActivityPage", () => {
     expect(screen.getByText(/searching/i)).toBeTruthy();
     expect(screen.getByText(/post-processing/i)).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "In flight" }).getAttribute(
-        "aria-pressed",
-      ),
+      screen
+        .getByRole("button", { name: "In flight" })
+        .getAttribute("aria-pressed"),
     ).toBe("true");
 
     // Same set as the status-bar count — not the timeline and not the DDL queue.
@@ -471,6 +471,52 @@ describe("ActivityPage", () => {
     ).toBeNull();
     expect(inFlightCalls).toBeGreaterThan(0);
     expect(timelineCalls).toBe(0);
+  });
+
+  it("stops an in-flight row through the cancel endpoint", async () => {
+    let cancelBody: unknown;
+    server.use(
+      http.get("/api/activity/in-flight", () =>
+        HttpResponse.json({
+          results: [
+            {
+              kind: "run",
+              item_id: 11,
+              run_id: "run-1",
+              state: "running",
+              label: "Saga #1",
+              entity_type: "issue",
+              entity_id: "iss-1",
+              comicid: "42",
+              issueid: "iss-1",
+              command_kind: "search_issue",
+              updated_at: "2026-07-10 10:01:00",
+            },
+          ],
+          total: 1,
+        }),
+      ),
+      http.post("/api/activity/in-flight/cancel", async ({ request }) => {
+        cancelBody = await request.json();
+        return HttpResponse.json({
+          ok: true,
+          kind: "run",
+          item_id: 11,
+          state: "cancelled",
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<ActivityPage />, {
+      route: "/activity?state=in_flight",
+      useMemoryRouter: true,
+    });
+
+    await screen.findByText("Saga #1");
+    await user.click(screen.getByRole("button", { name: "Stop Saga #1" }));
+    await waitFor(() => {
+      expect(cancelBody).toEqual({ kind: "run", item_id: 11 });
+    });
   });
 
   it("uses the shared table for history with newest-first defaults", async () => {
