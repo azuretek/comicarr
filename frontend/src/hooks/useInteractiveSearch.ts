@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/components/ui/toast";
 import { apiRequest } from "@/lib/api";
@@ -12,7 +12,7 @@ const INTERACTIVE_POLL_MS = 2_000;
 const ACTIVE_STATES = new Set(["queued", "running"]);
 
 export interface StartInteractiveSearchInput {
-  entityType: "issue" | "annual" | "story_arc_issue";
+  entityType: "issue" | "annual" | "story_arc_issue" | "series";
   entityId: string;
 }
 
@@ -84,12 +84,17 @@ export function useInteractiveReview() {
   const [reviewSessionId, setReviewSessionId] = useState<string | null>(null);
   const [reviewTarget, setReviewTarget] =
     useState<StartInteractiveSearchInput | null>(null);
+  // Guards overlapping starts. `isPending` from the closure is stale for two
+  // clicks in the same tick, so the in-flight flag lives in a ref instead.
+  const startInFlight = useRef(false);
 
   const startReview = async (
     issue: ReleaseReviewIssue,
     target: StartInteractiveSearchInput,
   ) => {
     if (!target.entityId) return;
+    if (startInFlight.current) return;
+    startInFlight.current = true;
     setReviewIssue(issue);
     setReviewTarget(target);
     setReviewSessionId(null);
@@ -99,6 +104,10 @@ export function useInteractiveReview() {
       setReviewSessionId(session.session_id);
     } catch {
       // The sheet owns the actionable error and retry affordance.
+    } finally {
+      // Always clears, so a failed start still allows retry and closing the
+      // sheet mid-flight cannot strand the flag.
+      startInFlight.current = false;
     }
   };
 
