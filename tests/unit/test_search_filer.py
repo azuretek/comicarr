@@ -422,7 +422,73 @@ def test_non_ddl_volume_pack_is_detected_and_accepted(monkeypatch):
     assert entry["issues"] == "1-14"
     assert entry["series"] == "Example Series"
     assert calls["args"][2] == "1-14"
-    assert calls["kwargs"] == {"kind": "volume"}
+    assert calls["kwargs"] == {"kind": "volume", "span_end": None}
+
+
+def test_non_ddl_numberless_series_pack_is_detected_and_accepted(monkeypatch):
+    # "Solo Leveling (2021-2026) (Digital)" carries no issue range at all;
+    # the complete-series detector claims it when packs are allowed (#744).
+    calls = {}
+
+    def fake_issue_find_ids(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return {"valid": True, "issues": [{"issueid": "id-1"}]}
+
+    monkeypatch.setattr(search_filer.helpers, "issue_find_ids", fake_issue_find_ids)
+    info = _info(
+        nzbprov="torznab",
+        tmpprov="nyaa [api]",
+        booktype="manga",
+        allow_packs=True,
+        RSS="yes",
+        torznab_host=("nyaa", "https://nyaa.test", "0", "key"),
+    )
+    entry = _entry(title="Example Series (2021-2026) (Digital) (1r0n)", site="torznab")
+
+    evaluation = search_filer.search_check().evaluate_entry(entry, info)
+
+    assert _reason(evaluation) == "accepted.pack"
+    assert evaluation.verdict["match_kind"] == "pack"
+    assert evaluation.legacy_match["pack"] is True
+    assert evaluation.legacy_match["pack_numbers"] == "all"
+    assert entry["pack"] is True
+    assert entry["issues"] == "all"
+    assert entry["series"] == "Example Series"
+    assert calls["args"][2] == "all"
+    assert calls["kwargs"] == {"kind": "series", "span_end": "2026"}
+
+
+def test_numberless_series_pack_without_allow_packs_is_not_detected():
+    entry = _entry(title="Example Series (2021-2026) (Digital)")
+
+    evaluation = search_filer.search_check().evaluate_entry(entry, _info(booktype="manga"))
+
+    assert evaluation.legacy_match["pack"] is False
+
+
+def test_numberless_series_pack_is_not_detected_for_print_series(monkeypatch):
+    # On a print comic "(2021-2026)" states when the series ran, not what the
+    # release holds. Claiming it would sweep every open issue row into the
+    # pack and mark it Snatched, so the detector stays manga-only.
+    def fail_issue_find_ids(*_args, **_kwargs):
+        raise AssertionError("a print series must never claim a numberless series pack")
+
+    monkeypatch.setattr(search_filer.helpers, "issue_find_ids", fail_issue_find_ids)
+    info = _info(
+        nzbprov="torznab",
+        tmpprov="nyaa [api]",
+        booktype="Print",
+        allow_packs=True,
+        RSS="yes",
+        torznab_host=("nyaa", "https://nyaa.test", "0", "key"),
+    )
+    entry = _entry(title="Example Series (2021-2026) (Digital) (1r0n)", site="torznab")
+
+    evaluation = search_filer.search_check().evaluate_entry(entry, info)
+
+    assert evaluation.legacy_match["pack"] is False
+    assert entry["pack"] is False
 
 
 def test_non_ddl_issue_range_pack_is_accepted_for_print_series(monkeypatch):
