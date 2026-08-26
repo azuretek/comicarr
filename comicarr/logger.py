@@ -18,6 +18,7 @@
 #  along with Comicarr.  If not, see <http://www.gnu.org/licenses/>.
 
 import logging
+import logging.handlers
 import os
 import platform
 import sys
@@ -220,6 +221,43 @@ warning = logger.warning
 message = logger.info
 exception = logger.exception
 fdebug = logger.debug
+
+
+def rotate_log_file():
+    """Start a new log: roll `comicarr.log` over and empty the Web UI buffer.
+
+    From the viewer's perspective clearing and rotating are the same outcome,
+    so this is the only verb. The previous file survives as `comicarr.log.1`
+    under the normal retention settings — nothing is deleted. Returns True if
+    a file handler actually rotated; False means logging runs without a file
+    sink (no log_dir), in which case only the buffer is cleared.
+
+    `BaseRotatingHandler` covers both the stdlib `RotatingFileHandler` and the
+    `ConcurrentRotatingFileHandler` used on Windows.
+    """
+    rotated = False
+    for handler in logger.handlers:
+        if isinstance(handler, logging.handlers.BaseRotatingHandler):
+            # The handler lock keeps a concurrent emit() from writing into the
+            # file mid-rename.
+            handler.acquire()
+            try:
+                handler.doRollover()
+                # The Windows ConcurrentRotatingFileHandler catches a failed
+                # rename and "degrades" instead of raising, which would let
+                # this report a rotation that never happened. We hold the
+                # handler lock, so nothing can have written since the roll:
+                # a non-empty current file means the rollover did not land.
+                filename = handler.baseFilename
+                if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                    raise OSError("log rotation did not complete; the log file may be locked by another process")
+            finally:
+                handler.release()
+            rotated = True
+    # In place, not rebound: LogListHandler holds no reference of its own, but
+    # anything else that grabbed comicarr.LOGLIST must keep seeing new lines.
+    del comicarr.LOGLIST[:]
+    return rotated
 
 
 def configure_log_level(level):
