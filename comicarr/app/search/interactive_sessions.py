@@ -179,6 +179,10 @@ def _candidate_reconstruction(evaluation, public):
         "match_kind": str(verdict.get("match_kind") or "none")[:32],
         "pack": bool(candidate.get("pack")),
     }
+    if hint.get("search_mode") == "unfiltered":
+        # An unfiltered-mode candidate must be revalidated under the same
+        # bare-title pass, so the mode is part of the safe reconstruction.
+        reconstruction["search_mode"] = "unfiltered"
     satisfies = getattr(evaluation, "satisfies", None) or public.get("satisfies")
     if isinstance(satisfies, list) and satisfies and isinstance(satisfies[0], Mapping):
         anchor_type = str(satisfies[0].get("entity_type") or "").strip().lower()
@@ -446,6 +450,18 @@ def complete_search_session(
                 break
             records.append(record)
             total_bytes += record_bytes
+        if len(records) < len(evaluations):
+            # The candidate/byte bounds are deliberate, but hitting them must
+            # never read as "that was everything" (#767). Prepended so the
+            # failure-list bound cannot drop the notice itself.
+            provider_failures = [
+                {
+                    "provider": "Search",
+                    "code": "results_truncated",
+                    "detail": "Showing %d of %d collected results; the session storage bound dropped the rest"
+                    % (len(records), len(evaluations)),
+                }
+            ] + list(provider_failures or [])
         safe_failures = _bounded_failures(provider_failures)
         result = conn.execute(
             update(interactive_search_sessions)
