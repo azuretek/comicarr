@@ -1712,6 +1712,11 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                             link_type_failure[item["id"]].append(item["link_type"])
                         except KeyError:
                             link_type_failure[item["id"]] = [item["link_type"]]
+                        # parse_downloadresults re-queues this same id for the next link
+                        # (getcomics._queue_download_batch reuses item_id when there is one
+                        # link), so release in-process ownership first or the retry is
+                        # deduped away by _enqueue_ddl_queue_item and the item never runs (#784).
+                        comicarr.DDL_QUEUED.discard(item["id"])
                         ggc = getcomics.GC(comicid=item["comicid"], issueid=item["issueid"], oneoff=item["oneoff"])
                         ggc.parse_downloadresults(
                             item["id"],
@@ -1724,12 +1729,14 @@ def _ddl_downloader_loop(queue, link_type_failure, active_item):
                         nval = {"status": "Failed", "updated_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
                         db.upsert("ddl_info", nval, ctrlval)
                         reverse_the_pack_snatch(item["id"], item["comicid"])
-                        link_type_failure.pop(item["id"])
+                        comicarr.DDL_QUEUED.discard(item["id"])
                         comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
+                        link_type_failure.pop(item["id"], None)
                         ddl_cleanup(item["id"])
                 else:
                     with db.get_engine().begin() as conn:
                         conn.execute(delete(ddl_info).where(ddl_info.c.ID == item["id"]))
+                    comicarr.DDL_QUEUED.discard(item["id"])
                     comicarr.DDL_STUCK_NOTIFIED.discard(item["id"])
                     comicarr.search.FailedMark(
                         item["issueid"],
