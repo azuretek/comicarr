@@ -29,11 +29,26 @@ import time
 import traceback
 
 import sqlalchemy
-from sqlalchemy import delete, select, text
+from sqlalchemy import and_, delete, select, text
 
 import comicarr
 from comicarr import db, helpers, importer, locg, logger, mb, newpull, updater
 from comicarr.tables import annuals, comics, futureupcoming, issues, weekly
+
+
+def _weekly_pull_has_data(weeknumber, year):
+    """Return True if the weekly table already holds cached rows for the given week."""
+    try:
+        stmt = select(weekly.c.SHIPDATE).where(
+            and_(
+                weekly.c.weeknumber == int(weeknumber),
+                weekly.c.year == int(year),
+            )
+        )
+        return db.select_one(stmt) is not None
+    except Exception as e:
+        logger.warn("[PULL-LIST] Unable to check for cached pull-list data: %s" % e)
+        return False
 
 
 def pullit(forcecheck=None, weeknumber=None, year=None):
@@ -87,6 +102,7 @@ def pullit(forcecheck=None, weeknumber=None, year=None):
         weekly_info = helpers.weekly_info()
         current_weeknumber = weekly_info["weeknumber"]
         weekly_info["year"]
+        retry_hint = None
         for x in [1, 2]:
             # for now we'll query WS twice - once for the previous week & once for the current week
             # but only when requesting data for the current week. This is done in order to make sure that
@@ -136,9 +152,30 @@ def pullit(forcecheck=None, weeknumber=None, year=None):
                     "[PULL-LIST] Unable to retrieve weekly pull-list. Pull list for week %s, %s may be stale."
                     % (weeknumber_mod, year_mod)
                 )
+                retry_hint = chk_locg.get("retry_after") or retry_hint
+                if _weekly_pull_has_data(weeknumber_mod, year_mod):
+                    logger.info(
+                        "[PULL-LIST] Falling back to the cached pull-list already stored for week %s, %s."
+                        % (weeknumber_mod, year_mod)
+                    )
+                    comicarr.PULLNEW = "no"
+                    new_pullcheck(weeknumber_mod, year_mod)
+                    continue
+                if x == 1:
+                    logger.fdebug(
+                        "[PULL-LIST] No cached pull-list for the previous week %s, %s - continuing on to the current week."
+                        % (weeknumber_mod, year_mod)
+                    )
+                    continue
+                if retry_hint:
+                    return {"status": "failure", "retry_after": retry_hint}
                 return {"status": "failure"}
                 # comicarr.PULLBYFILE = pull_the_file(newrl)
                 # break
+        if retry_hint:
+            # A pass served stale cached data; surface upstream's hint so the
+            # scheduler can retry sooner than the regular interval.
+            return {"status": "success", "retry_after": retry_hint}
         return {"status": "success"}
 
     else:
