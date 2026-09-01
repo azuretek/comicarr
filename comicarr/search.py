@@ -2493,6 +2493,8 @@ def searchforissue(
                 allow_packs = False
                 ComicID = result["ComicID"]
                 content_type = "comic"
+                manga_chapter_number = None
+                manga_volume_number = None
                 if smode == "story_arc":
                     ComicName = result["ComicName"]
                     Comicname_filesafe = helpers.filesafe(ComicName)
@@ -2532,6 +2534,20 @@ def searchforissue(
                 else:
                     comic = db.select_one(select(comics).where(comics.c.ComicID == ComicID))
                     content_type = "manga" if series_kind.is_manga(comic) else "comic"
+                    if content_type == "manga":
+                        manga_row = db.select_one(
+                            select(issues.c.ChapterNumber, issues.c.VolumeNumber).where(
+                                issues.c.IssueID == issueid
+                            )
+                        )
+                        # Best-effort enrichment: a Series whose ledger row is
+                        # missing or does not carry these columns must still be
+                        # searched (by issue number), never fail outright.
+                        manga_keys = set(manga_row.keys()) if manga_row is not None else set()
+                        if "ChapterNumber" in manga_keys:
+                            manga_chapter_number = manga_row["ChapterNumber"]
+                        if "VolumeNumber" in manga_keys:
+                            manga_volume_number = manga_row["VolumeNumber"]
                     if smode == "want_ann":
                         ComicName = result["ReleaseComicName"]
                         Comicname_filesafe = None
@@ -2600,6 +2616,12 @@ def searchforissue(
                     booktype=booktype,
                     ignore_booktype=ignore_booktype,
                     content_type=content_type,
+                    chapter_number=(
+                        None if manga_chapter_number in (None, "") else str(manga_chapter_number)
+                    ),
+                    volume_number=(
+                        None if manga_volume_number in (None, "") else str(manga_volume_number)
+                    ),
                 )
                 if manual is True:
                     comicarr.SEARCHLOCK.release()
