@@ -166,18 +166,16 @@ def manga_volume_satisfies(found_volume, wanted_number):
     """Does a matched manga volume satisfy the ledger row being searched?
 
     A manga volume release carries no issue number -- "One-Punch Man v01 (2014)
-    (Digital)" -- so the issue-number arms can never accept it. The volume IS
-    the unit being acquired, so the release satisfies the row when the two
-    volume numbers agree. Compared numerically, since the release writes "v01"
-    and the ledger stores "1".
+    (Digital)" -- so the issue-number acceptance arms can never accept it. The
+    volume IS the unit being acquired, so the release satisfies the row when
+    the two volume numbers agree.
+
+    The comparison itself belongs to the ledger, which already owns what a
+    volume number means; this only names the acceptance question.
     """
-    if found_volume in (None, "") or wanted_number in (None, ""):
-        return False
-    found_digits = re.sub(r"[^0-9]", "", str(found_volume))
-    wanted_digits = re.sub(r"[^0-9]", "", str(wanted_number))
-    if not found_digits or not wanted_digits:
-        return False
-    return int(found_digits) == int(wanted_digits)
+    from comicarr.app.manga.ledger import volume_numbers_match
+
+    return volume_numbers_match(found_volume, wanted_number)
 
 
 class search_check(object):
