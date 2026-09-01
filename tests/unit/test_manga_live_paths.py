@@ -19,6 +19,7 @@ from comicarr.app.manga.parse import parse_in_series_context, parse_kwargs_for_s
 from comicarr.app.manga.sync import arm_manga_sync_job, next_interval_run
 from comicarr.rsscheck import mangaCheck
 from comicarr.search import _build_manga_search_terms, manga_volume_search_terms
+from comicarr.search_filer import manga_volume_satisfies
 
 _INIT_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "__init__.py"
 _SEARCH_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "search.py"
@@ -230,6 +231,23 @@ def test_manga_volume_search_terms_maps_volume_targets_to_the_real_name():
     assert manga_volume_search_terms("One Piece", "1161", None) == {}
     # Neither number available: nothing to search bare.
     assert manga_volume_search_terms("One Piece", None, None) == {}
+
+
+def test_manga_volume_satisfies_compares_volumes_numerically():
+    """A volume release has no issue number, so acceptance turns on the volume.
+
+    The release writes "v01" and the ledger stores "1"; both must be read as
+    the same volume or nothing is ever snatched.
+    """
+    assert manga_volume_satisfies("v01", "1") is True
+    assert manga_volume_satisfies("v1", 1) is True
+    assert manga_volume_satisfies("v12", "12") is True
+    assert manga_volume_satisfies("v02", "1") is False
+    # Never accept on missing data -- that would snatch an arbitrary volume.
+    assert manga_volume_satisfies(None, "1") is False
+    assert manga_volume_satisfies("v01", None) is False
+    assert manga_volume_satisfies("", "") is False
+    assert manga_volume_satisfies("vTPB", "1") is False
 
 
 def test_match_entry_prefers_the_manga_match_name():

@@ -162,6 +162,24 @@ def report_provider_failure(provider, code, detail):
         collector["failure"](str(provider), str(code), str(detail))
 
 
+def manga_volume_satisfies(found_volume, wanted_number):
+    """Does a matched manga volume satisfy the ledger row being searched?
+
+    A manga volume release carries no issue number -- "One-Punch Man v01 (2014)
+    (Digital)" -- so the issue-number arms can never accept it. The volume IS
+    the unit being acquired, so the release satisfies the row when the two
+    volume numbers agree. Compared numerically, since the release writes "v01"
+    and the ledger stores "1".
+    """
+    if found_volume in (None, "") or wanted_number in (None, ""):
+        return False
+    found_digits = re.sub(r"[^0-9]", "", str(found_volume))
+    wanted_digits = re.sub(r"[^0-9]", "", str(wanted_number))
+    if not found_digits or not wanted_digits:
+        return False
+    return int(found_digits) == int(wanted_digits)
+
+
 class search_check(object):
     def __init__(self):
         pass
@@ -320,6 +338,7 @@ class search_check(object):
             # parses as the plain series name, so comparing against the query
             # would fail every result. Match against the real name instead.
             match_name = is_info.get("manga_match_name") or ComicName
+            manga_volume_pass = bool(is_info.get("manga_match_name"))
             nzbprov = is_info["nzbprov"]
             RSS = is_info["RSS"]
             UseFuzzy = is_info["UseFuzzy"]
@@ -1126,6 +1145,16 @@ class search_check(object):
                     or all([cmloopit == 4, findcomiciss is None, pc_in is None])
                     or all([cmloopit == 4, findcomiciss is None, pc_in == 1])
                     or all([cmloopit == 4, findcomiciss == 1, pc_in is None])
+                    or all(
+                        [
+                            manga_volume_pass,
+                            pc_in is None,
+                            manga_volume_satisfies(
+                                filecomic.get("volume") or filecomic.get("series_volume"),
+                                findcomiciss,
+                            ),
+                        ]
+                    )
                 ):
                     nowrite = False
                     logger.info(
