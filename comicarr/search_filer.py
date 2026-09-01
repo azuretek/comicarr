@@ -316,6 +316,10 @@ class search_check(object):
     def _match_entry(self, entry, is_info):
         if is_info:
             ComicName = is_info["ComicName"]
+            # A manga volume pass searches "<series> v01", but the release
+            # parses as the plain series name, so comparing against the query
+            # would fail every result. Match against the real name instead.
+            match_name = is_info.get("manga_match_name") or ComicName
             nzbprov = is_info["nzbprov"]
             RSS = is_info["RSS"]
             UseFuzzy = is_info["UseFuzzy"]
@@ -665,7 +669,7 @@ class search_check(object):
                     "parse_status": "success",
                 }
             else:
-                p_comic = filechecker.FileChecker(file=ComicTitle, watchcomic=ComicName)
+                p_comic = filechecker.FileChecker(file=ComicTitle, watchcomic=match_name)
                 parsed_comic = p_comic.listFiles()
 
         logger.fdebug("parsed_info: %s" % parsed_comic)
@@ -692,7 +696,7 @@ class search_check(object):
             or re.sub("None", "issue", str(booktype)) in parsed_comic["booktype"]
         ):
             try:
-                fcomic = filechecker.FileChecker(watchcomic=ComicName)
+                fcomic = filechecker.FileChecker(watchcomic=match_name)
                 filecomic = fcomic.matchIT(parsed_comic)
             except Exception as e:
                 logger.error("[PARSE-ERROR]: %s" % e)
