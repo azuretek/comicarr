@@ -2567,9 +2567,7 @@ def searchforissue(
                     content_type = "manga" if series_kind.is_manga(comic) else "comic"
                     if content_type == "manga":
                         manga_row = db.select_one(
-                            select(issues.c.ChapterNumber, issues.c.VolumeNumber).where(
-                                issues.c.IssueID == issueid
-                            )
+                            select(issues.c.ChapterNumber, issues.c.VolumeNumber).where(issues.c.IssueID == issueid)
                         )
                         # Best-effort enrichment: a Series whose ledger row is
                         # missing or does not carry these columns must still be
@@ -2647,12 +2645,8 @@ def searchforissue(
                     booktype=booktype,
                     ignore_booktype=ignore_booktype,
                     content_type=content_type,
-                    chapter_number=(
-                        None if manga_chapter_number in (None, "") else str(manga_chapter_number)
-                    ),
-                    volume_number=(
-                        None if manga_volume_number in (None, "") else str(manga_volume_number)
-                    ),
+                    chapter_number=(None if manga_chapter_number in (None, "") else str(manga_chapter_number)),
+                    volume_number=(None if manga_volume_number in (None, "") else str(manga_volume_number)),
                 )
                 if manual is True:
                     comicarr.SEARCHLOCK.release()
@@ -4318,7 +4312,7 @@ def manga_volume_search_terms(series_name, chapter_num, volume_num):
 
     if not is_volume_target(chapter_num, volume_num):
         return {}
-    return {term: series_name for term in _build_manga_search_terms(series_name, chapter_num, volume_num)}
+    return dict.fromkeys(_build_manga_search_terms(series_name, chapter_num, volume_num), series_name)
 
 
 def get_findcomiciss(IssueNumber):
