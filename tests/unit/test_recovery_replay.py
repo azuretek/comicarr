@@ -1737,3 +1737,28 @@ def test_unfulfilled_rows_are_still_capped(queues, tmp_path, monkeypatch):
 
     assert ran["count"] == _MAX_INLINE_PP_REDRIVE_PER_PASS
     assert summary["actions"].get("skip-pp-cap-deferred") == 3
+
+
+def test_unanswerable_story_arc_clears_the_S_anchor_from_nzb_name(queues, tmp_path, monkeypatch):
+    """When the story-arc discriminator cannot answer, the fallback narrows the
+    nzblog delete by release NAME so it can safely clear both the plain and the
+    `S<issueid>` anchor. The PP seam writes that name as `nzb_name`, so reading
+    only `nzbname` left the fallback nameless, deleted just the unprefixed row,
+    and still advanced the journal to `post_processed` — stranding the `S`
+    anchor with no obligation left to clean it up."""
+    _placed_issue(tmp_path, "902", "Arc v01.cbz")
+    rkey = _pp_obligation(tmp_path, "902", "Arc.v01.cbz")
+    with get_engine().begin() as conn:
+        conn.execute(nzblog.insert().values(IssueID="902", PROVIDER="nzb.su", NZBName="Arc.v01.cbz"))
+        conn.execute(nzblog.insert().values(IssueID="S902", PROVIDER="nzb.su", NZBName="Arc.v01.cbz"))
+    # the discriminator's own unanswerable case: no issueid, or the lookup raised
+    monkeypatch.setattr(recovery, "_is_story_arc_obligation", lambda issueid: None)
+    _forbid_reimport(monkeypatch)
+
+    summary = recovery.replay_pipeline(probes=_probe("complete"))
+
+    assert _journal_row(rkey)["stage"] == journal.POST_PROCESSED
+    assert summary["actions"].get("post_processing-already-fulfilled") == 1
+    with get_engine().connect() as conn:
+        left = conn.execute(select(nzblog.c.IssueID).where(nzblog.c.IssueID.in_(["902", "S902"]))).fetchall()
+    assert left == [], "story-arc S anchor was stranded: %r" % (left,)
