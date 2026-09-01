@@ -481,7 +481,15 @@ def _finish_db_facts_only(rkey, row, payload):
         story_arc = payload.get("mode") == "story_arc"
     if story_arc is None:
         story_arc = _is_story_arc_obligation(issueid)
-    nzbname = (payload or {}).get("nzbname") if isinstance(payload, dict) else None
+    # Journal payloads persist the release name under EITHER spelling --
+    # `_PAYLOAD_KEYS` carries both `nzbname` and `nzb_name`, and the PP seam
+    # writes `nzb_name`. Reading only one of them leaves the unknown-story-arc
+    # fallback below without a name, which narrows the delete to the unprefixed
+    # IssueID and strands the `S<issueid>` anchor while the row still advances
+    # to `post_processed`.
+    nzbname = None
+    if isinstance(payload, dict):
+        nzbname = payload.get("nzbname") or payload.get("nzb_name")
     with db.get_engine().begin() as conn:
         if story_arc is False:
             id_pred = nzblog.c.IssueID == str(issueid)
@@ -741,8 +749,7 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
                 logger.warn(
                     "[RECOVERY] %s is `post_processing` but the inline PP re-drive "
                     "cap (%d) for this replay pass is reached — DEFERRING; it "
-                    "resumes next startup (replay is idempotent/re-runnable)."
-                    % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
+                    "resumes next startup (replay is idempotent/re-runnable)." % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
                 )
                 return "skip-pp-cap-deferred"
             if pp_cap is not None:
