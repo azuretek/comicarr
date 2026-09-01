@@ -1096,8 +1096,14 @@ def NZB_SEARCH(
     foundc["lastrun"] = provider_stat["lastrun"]
     done = False
 
+    # Set only when this pass is searching a manga volume term. Carries the
+    # real series name, because the term itself ("<series> v01") is a query
+    # rather than a name and would fail every series comparison.
+    manga_match_name = (manga_volume_terms or {}).get(ComicName)
+
     is_info = {
         "ComicName": ComicName,
+        "manga_match_name": manga_match_name,
         "nzbprov": nzbprov,
         "RSS": RSS,
         "UseFuzzy": UseFuzzy,
@@ -4283,18 +4289,26 @@ def _build_manga_search_terms(series_name, chapter_num, volume_num):
 
 
 def manga_volume_search_terms(series_name, chapter_num, volume_num):
-    """The generated manga terms that are VOLUME targets, as a set.
+    """Map each generated VOLUME search term to the real series name.
 
-    NZB_SEARCH takes this to decide which alternate names must be searched
-    bare. A volume term already carries its number in the search name
-    ("<series> v01") and volume releases are published without an issue number
-    -- "One-Punch Man v01 (2014) (Digital)" -- so appending one yields
-    "<series> v01 001", which matches nothing. Chapter terms are excluded:
-    they keep the normal issue-number handling.
+    Volume terms are injected into AlternateSearch so gen_altnames() hands them
+    to NZB_SEARCH as a ComicName, and that creates two problems this mapping
+    solves at once:
+
+      * The term already carries its number ("<series> v01") and volume
+        releases are published without an issue number -- "One-Punch Man v01
+        (2014) (Digital)" -- so NZB_SEARCH must not append one. Membership
+        answers "is this pass a volume search?".
+      * AlternateSearch means "another NAME for this series", but a volume term
+        is a query, not a name. The release still parses as the plain series
+        name, so the matcher must compare against the value here rather than
+        the volume-suffixed term, or every result is a series mismatch.
+
+    Chapter terms are excluded: they keep the normal issue-number handling.
     """
     if not _is_volume_target(chapter_num, volume_num):
-        return set()
-    return set(_build_manga_search_terms(series_name, chapter_num, volume_num))
+        return {}
+    return {term: series_name for term in _build_manga_search_terms(series_name, chapter_num, volume_num)}
 
 
 def get_findcomiciss(IssueNumber):
