@@ -21,6 +21,33 @@ from comicarr.rsscheck import mangaCheck
 from comicarr.search import _build_manga_search_terms
 
 _INIT_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "__init__.py"
+_SEARCH_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "search.py"
+
+
+def _is_search_init(func):
+    """Match both `search_init(...)` and `search.search_init(...)` call forms."""
+    if isinstance(func, ast.Name):
+        return func.id == "search_init"
+    return isinstance(func, ast.Attribute) and func.attr == "search_init"
+
+
+def _search_init_call_keywords(function_name, path):
+    """Keyword names passed to every search_init() call inside `function_name`.
+
+    search_init() is reached only through provider configuration and a global
+    search lock, so the wiring is asserted from source instead -- the same
+    approach test_init_arms_manga_sync_after_pause() takes.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != function_name:
+            continue
+        return [
+            {kw.arg for kw in call.keywords}
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and _is_search_init(call.func)
+        ]
+    raise AssertionError("%s not found in %s" % (function_name, path.name))
 
 
 def test_next_interval_run_fires_now_when_overdue():
@@ -164,3 +191,29 @@ def test_parse_kwargs_auto_passes_folder_bare_numbers():
     assert kwargs["bare_number_mode"] == "auto"
     assert kwargs["bare_numbers"] == ["1", "2"]
     assert kwargs["volume_count"] == 72
+
+
+def test_searchforissue_passes_manga_numbers_to_search_init():
+    """searchforissue() must supply the numbers manga search terms are built from.
+
+    search_init() turns chapter_number/volume_number into "<series> v01" or
+    "<series> c001" via _build_manga_search_terms(). Omit them and that helper
+    receives (None, None) and returns [], so a manga Series is searched by
+    issue number and volume-named releases are never queried -- silently, with
+    no [SEARCH-MANGA] line to show for it.
+    """
+    calls = _search_init_call_keywords("searchforissue", _SEARCH_PATH)
+    assert calls, "searchforissue() no longer calls search_init()"
+    for keywords in calls:
+        assert "content_type" in keywords
+        assert "chapter_number" in keywords
+        assert "volume_number" in keywords
+
+
+def test_manga_rss_path_passes_manga_numbers_to_search_init():
+    """The RSS lane already honours the contract; it guards against regression."""
+    rss_path = Path(__file__).resolve().parents[2] / "comicarr" / "rsscheck.py"
+    calls = _search_init_call_keywords("mangaCheck", rss_path)
+    assert calls, "mangaCheck() no longer calls search_init()"
+    for keywords in calls:
+        assert {"content_type", "chapter_number", "volume_number"} <= keywords
