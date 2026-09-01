@@ -551,7 +551,7 @@ def _obligation_already_fulfilled(row):
     return has_verified_library_file(series.get("ComicLocation"), issue.get("Location"))
 
 
-def finalize_post_processing(row, payload=None):
+def finalize_post_processing(row, payload=None, already_fulfilled=None):
     """Resolve a row already inside post-processing. The `moved` marker is the
     discriminator for whether the destructive move committed — there is NO
     SOURCE probe anywhere on this path (a surviving source is undecidable in
@@ -589,7 +589,9 @@ def finalize_post_processing(row, payload=None):
         return "moved-finish-dbfacts"
 
     if stage == journal.POST_PROCESSING:
-        if _obligation_already_fulfilled(row):
+        if already_fulfilled is None:
+            already_fulfilled = _obligation_already_fulfilled(row)
+        if already_fulfilled:
             _finish_db_facts_only(rkey, row, payload)
             logger.info(
                 "[RECOVERY] %s was `post_processing`, but its issue is already "
@@ -729,16 +731,23 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
     if cur_stage == journal.MOVED:
         return finalize_post_processing(row, payload=payload)
     if cur_stage == journal.POST_PROCESSING:
-        if pp_cap is not None and pp_cap.get("count", 0) >= _MAX_INLINE_PP_REDRIVE_PER_PASS:
-            logger.warn(
-                "[RECOVERY] %s is `post_processing` but the inline PP re-drive "
-                "cap (%d) for this replay pass is reached — DEFERRING; it "
-                "resumes next startup (replay is idempotent/re-runnable)." % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
-            )
-            return "skip-pp-cap-deferred"
-        if pp_cap is not None:
-            pp_cap["count"] = pp_cap.get("count", 0) + 1
-        return finalize_post_processing(row, payload=payload)
+        # A provably-fulfilled obligation costs only the same DB facts as
+        # `moved`, so — per this cap's own contract — it is NOT charged to the
+        # INLINE re-drive budget. Otherwise a backlog of already-done rows
+        # would need one restart per five to drain.
+        already_fulfilled = _obligation_already_fulfilled(row)
+        if not already_fulfilled:
+            if pp_cap is not None and pp_cap.get("count", 0) >= _MAX_INLINE_PP_REDRIVE_PER_PASS:
+                logger.warn(
+                    "[RECOVERY] %s is `post_processing` but the inline PP re-drive "
+                    "cap (%d) for this replay pass is reached — DEFERRING; it "
+                    "resumes next startup (replay is idempotent/re-runnable)."
+                    % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
+                )
+                return "skip-pp-cap-deferred"
+            if pp_cap is not None:
+                pp_cap["count"] = pp_cap.get("count", 0) + 1
+        return finalize_post_processing(row, payload=payload, already_fulfilled=already_fulfilled)
 
     if cur_stage == journal.DOWNLOADED:
         item = _pp_item_from_row(row, payload)

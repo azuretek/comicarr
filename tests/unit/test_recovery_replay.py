@@ -31,6 +31,7 @@ import comicarr
 from comicarr.app.acquisition.maintenance import ensure_acquisition_schema
 from comicarr.app.attention import RecordOutcome
 from comicarr.app.downloads import journal, recovery, recovery_classify
+from comicarr.app.downloads.recovery import _MAX_INLINE_PP_REDRIVE_PER_PASS
 from comicarr.db import get_engine, shutdown_engine
 from comicarr.tables import comics, ddl_info, issues, metadata, nzblog, pipeline_journal, snatched, storyarcs
 
@@ -1695,3 +1696,44 @@ def test_post_processing_with_file_outside_series_root_still_redrives(queues, tm
     recovery.replay_pipeline(probes=_probe("complete"))
 
     assert calls.get("ran") is True
+
+
+def test_fulfilled_backlog_larger_than_the_cap_drains_in_one_pass(queues, tmp_path, monkeypatch):
+    """The inline cap exists to bound expensive re-drives. A provably
+    fulfilled row costs only the same DB facts as `moved`, so it must not be
+    charged to that budget — otherwise a backlog of already-done rows needs
+    one restart per five to clear."""
+    keys = []
+    for n in range(_MAX_INLINE_PP_REDRIVE_PER_PASS + 3):
+        issueid = "95%d" % n
+        _placed_issue(tmp_path, issueid, "Series v%02d.cbz" % n)
+        keys.append(_pp_obligation(tmp_path, issueid, "Series.v%02d.cbz" % n))
+    _forbid_reimport(monkeypatch)
+
+    summary = recovery.replay_pipeline(probes=_probe("complete"))
+
+    assert summary["actions"].get("skip-pp-cap-deferred") is None
+    assert all(_journal_row(k)["stage"] == journal.POST_PROCESSED for k in keys)
+
+
+def test_unfulfilled_rows_are_still_capped(queues, tmp_path, monkeypatch):
+    """The cap still bounds real re-drives: with no placement evidence, only
+    _MAX_INLINE_PP_REDRIVE_PER_PASS rows run and the rest defer."""
+    for n in range(_MAX_INLINE_PP_REDRIVE_PER_PASS + 3):
+        _pp_obligation(tmp_path, "96%d" % n, "Nope.v%02d.cbz" % n)
+    ran = {"count": 0}
+    import comicarr.process as process_mod
+
+    class _FakeProc:
+        def __init__(self, *a, **k):
+            pass
+
+        def post_process(self):
+            ran["count"] += 1
+
+    monkeypatch.setattr(process_mod, "Process", _FakeProc)
+
+    summary = recovery.replay_pipeline(probes=_probe("complete"))
+
+    assert ran["count"] == _MAX_INLINE_PP_REDRIVE_PER_PASS
+    assert summary["actions"].get("skip-pp-cap-deferred") == 3
