@@ -1514,21 +1514,29 @@ def verification(verified_matches, is_info):
     done = False
     verified_index = 0
     if verified_matches != "no results":
-        for verified in verified_matches:
+        # verified_index has to track the candidate actually in hand: the post-loop
+        # block reads verified_matches[verified_index] for the pack check, the nzbid
+        # it hands nzblog(), and the snatch notification. search_filer also emits
+        # alt_match entries with downloadit=False into this same list, and those were
+        # skipped without advancing the index -- so any candidate sent after one of
+        # them was logged under an earlier entry's nzbid.
+        for verified_index, verified in enumerate(verified_matches):
             if verified["downloadit"]:
                 try:
                     if verified["chkit"]:
                         helpers.checkthe_id(ComicID, verified["chkit"])
                 except Exception:
                     pass
-                nzbname = nzbname_create(is_info["nzbprov"], info=verified_matches, title=verified["ComicTitle"])
+                # nzbname_create() reads ComicName, IssueNumber and comyear off
+                # info[0] for the blackhole name, so it needs the candidate being
+                # tried for the same reason searcher() below does.
+                nzbname = nzbname_create(is_info["nzbprov"], info=[verified], title=verified["ComicTitle"])
                 if nzbname is None:
                     logger.error(
                         "[NZBPROVIDER = NONE] Encountered an error using given "
                         "provider with requested information: %s. You have a blank "
                         "entry most likely in your newznabs, fix it & restart Comicarr" % verified
                     )
-                    verified_index += 1
                     continue
                 try:
                     links = {"id": verified["entry"]["id"], "link": verified["entry"]["link"]}
@@ -1561,7 +1569,6 @@ def verification(verified_matches, is_info):
                     ]
                 ):
                     is_info["foundc"]["status"] = False
-                    verified_index += 1
                     continue
                 elif any(
                     [
@@ -1573,7 +1580,6 @@ def verification(verified_matches, is_info):
                     ]
                 ):
                     is_info["foundc"]["status"] = False
-                    verified_index += 1
                     return is_info
 
                 searchresult["nzbid"]
