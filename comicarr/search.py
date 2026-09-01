@@ -316,6 +316,7 @@ def search_init(
         logger.fdebug("Story-ARC: %s" % SARC)
         logger.fdebug("IssueArcID: %s" % IssueArcID)
 
+    manga_volume_terms = set()
     if content_type == "manga":
         logger.fdebug("[SEARCH-MANGA] Manga content detected for %s" % ComicName)
         manga_terms = _build_manga_search_terms(ComicName, chapter_number, volume_number)
@@ -326,6 +327,7 @@ def search_init(
                 AlternateSearch = manga_alt_str + "##" + AlternateSearch
             else:
                 AlternateSearch = manga_alt_str
+            manga_volume_terms = manga_volume_search_terms(ComicName, chapter_number, volume_number)
 
     provider_list = provider_order(initial_run=True)
     if content_type == "manga":
@@ -665,6 +667,7 @@ def search_init(
                     "ignore_booktype": ignore_booktype,
                     "smode": smode,
                     "allow_packs": allow_packs,
+                    "manga_volume_terms": manga_volume_terms,
                     "findit": findit,
                 }
 
@@ -972,6 +975,7 @@ def NZB_SEARCH(
     chktpb=0,
     ignore_booktype=False,
     smode=None,
+    manga_volume_terms=None,
 ):
 
     if _allow_packs_enabled(allow_packs) and comicarr.CONFIG.ENABLE_TORRENT_SEARCH:
@@ -1092,8 +1096,14 @@ def NZB_SEARCH(
     foundc["lastrun"] = provider_stat["lastrun"]
     done = False
 
+    # Set only when this pass is searching a manga volume term. Carries the
+    # real series name, because the term itself ("<series> v01") is a query
+    # rather than a name and would fail every series comparison.
+    manga_match_name = (manga_volume_terms or {}).get(ComicName)
+
     is_info = {
         "ComicName": ComicName,
+        "manga_match_name": manga_match_name,
         "nzbprov": nzbprov,
         "RSS": RSS,
         "UseFuzzy": UseFuzzy,
@@ -1137,7 +1147,16 @@ def NZB_SEARCH(
             findloop = 99
             break
 
-        if IssueNumber is not None:
+        if IssueNumber is not None and ComicName in (manga_volume_terms or ()):
+            # Manga VOLUME target. comsrc is already the volume search name
+            # ("<series> v01"), and volume releases are published without an
+            # issue number -- "One-Punch Man v01 (2014) (Digital)" -- so
+            # appending one gives "<series> v01 001" and matches nothing.
+            # Search the volume name as-is, the way the TPB pass does.
+            comsearch = comsrc
+            issdig = ""
+            mod_isssearch = ""
+        elif IssueNumber is not None:
             if cmloopit == 3:
                 comsearch = comsrc + "%2000" + str(isssearch)
                 issdig = "00"
@@ -2499,6 +2518,8 @@ def searchforissue(
                 allow_packs = False
                 ComicID = result["ComicID"]
                 content_type = "comic"
+                manga_chapter_number = None
+                manga_volume_number = None
                 if smode == "story_arc":
                     ComicName = result["ComicName"]
                     Comicname_filesafe = helpers.filesafe(ComicName)
@@ -2538,6 +2559,20 @@ def searchforissue(
                 else:
                     comic = db.select_one(select(comics).where(comics.c.ComicID == ComicID))
                     content_type = "manga" if series_kind.is_manga(comic) else "comic"
+                    if content_type == "manga":
+                        manga_row = db.select_one(
+                            select(issues.c.ChapterNumber, issues.c.VolumeNumber).where(
+                                issues.c.IssueID == issueid
+                            )
+                        )
+                        # Best-effort enrichment: a Series whose ledger row is
+                        # missing or does not carry these columns must still be
+                        # searched (by issue number), never fail outright.
+                        manga_keys = set(manga_row.keys()) if manga_row is not None else set()
+                        if "ChapterNumber" in manga_keys:
+                            manga_chapter_number = manga_row["ChapterNumber"]
+                        if "VolumeNumber" in manga_keys:
+                            manga_volume_number = manga_row["VolumeNumber"]
                     if smode == "want_ann":
                         ComicName = result["ReleaseComicName"]
                         Comicname_filesafe = None
@@ -2606,6 +2641,12 @@ def searchforissue(
                     booktype=booktype,
                     ignore_booktype=ignore_booktype,
                     content_type=content_type,
+                    chapter_number=(
+                        None if manga_chapter_number in (None, "") else str(manga_chapter_number)
+                    ),
+                    volume_number=(
+                        None if manga_volume_number in (None, "") else str(manga_volume_number)
+                    ),
                 )
                 if manual is True:
                     comicarr.SEARCHLOCK.release()
@@ -4121,6 +4162,7 @@ def search_the_matrix(scarios):
         ignore_booktype=scarios["ignore_booktype"],
         smode=scarios["smode"],
         allow_packs=scarios.get("allow_packs"),
+        manga_volume_terms=scarios.get("manga_volume_terms"),
     )
 
 
@@ -4241,10 +4283,36 @@ def _build_manga_search_terms(series_name, chapter_num, volume_num):
     which kind to look for.
     """
     from comicarr.app.manga.acquisition import search_terms_for_target
+    from comicarr.app.manga.ledger import is_volume_target
 
-    if volume_num not in (None, "") and chapter_num in (None, ""):
+    if is_volume_target(chapter_num, volume_num):
         return search_terms_for_target(series_name, {"kind": "volume", "number": volume_num})
     return search_terms_for_target(series_name, {"kind": "chapter", "number": chapter_num})
+
+
+def manga_volume_search_terms(series_name, chapter_num, volume_num):
+    """Map each generated VOLUME search term to the real series name.
+
+    Volume terms are injected into AlternateSearch so gen_altnames() hands them
+    to NZB_SEARCH as a ComicName, and that creates two problems this mapping
+    solves at once:
+
+      * The term already carries its number ("<series> v01") and volume
+        releases are published without an issue number -- "One-Punch Man v01
+        (2014) (Digital)" -- so NZB_SEARCH must not append one. Membership
+        answers "is this pass a volume search?".
+      * AlternateSearch means "another NAME for this series", but a volume term
+        is a query, not a name. The release still parses as the plain series
+        name, so the matcher must compare against the value here rather than
+        the volume-suffixed term, or every result is a series mismatch.
+
+    Chapter terms are excluded: they keep the normal issue-number handling.
+    """
+    from comicarr.app.manga.ledger import is_volume_target
+
+    if not is_volume_target(chapter_num, volume_num):
+        return {}
+    return {term: series_name for term in _build_manga_search_terms(series_name, chapter_num, volume_num)}
 
 
 def get_findcomiciss(IssueNumber):

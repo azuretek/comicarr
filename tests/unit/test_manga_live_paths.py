@@ -18,9 +18,44 @@ from comicarr.app.manga.acquisition import search_plan_for_series
 from comicarr.app.manga.parse import parse_in_series_context, parse_kwargs_for_series
 from comicarr.app.manga.sync import arm_manga_sync_job, next_interval_run
 from comicarr.rsscheck import mangaCheck
-from comicarr.search import _build_manga_search_terms
+from comicarr.search import _build_manga_search_terms, manga_volume_search_terms
+from comicarr.app.manga.ledger import volume_numbers_match
+from comicarr.search_filer import manga_volume_satisfies
 
 _INIT_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "__init__.py"
+_SEARCH_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "search.py"
+
+
+def _is_search_init(func):
+    """Match both `search_init(...)` and `search.search_init(...)` call forms."""
+    if isinstance(func, ast.Name):
+        return func.id == "search_init"
+    return isinstance(func, ast.Attribute) and func.attr == "search_init"
+
+
+def _is_search_init_or_nzb(func):
+    """Match a call to either search_init(...) or NZB_SEARCH(...)."""
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    return name in {"search_init", "NZB_SEARCH"}
+
+
+def _search_init_call_keywords(function_name, path):
+    """Keyword names passed to every search_init() call inside `function_name`.
+
+    search_init() is reached only through provider configuration and a global
+    search lock, so the wiring is asserted from source instead -- the same
+    approach test_init_arms_manga_sync_after_pause() takes.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != function_name:
+            continue
+        return [
+            {kw.arg for kw in call.keywords}
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and _is_search_init(call.func)
+        ]
+    raise AssertionError("%s not found in %s" % (function_name, path.name))
 
 
 def test_next_interval_run_fires_now_when_overdue():
@@ -164,3 +199,113 @@ def test_parse_kwargs_auto_passes_folder_bare_numbers():
     assert kwargs["bare_number_mode"] == "auto"
     assert kwargs["bare_numbers"] == ["1", "2"]
     assert kwargs["volume_count"] == 72
+
+
+def test_searchforissue_passes_manga_numbers_to_search_init():
+    """searchforissue() must supply the numbers manga search terms are built from.
+
+    search_init() turns chapter_number/volume_number into "<series> v01" or
+    "<series> c001" via _build_manga_search_terms(). Omit them and that helper
+    receives (None, None) and returns [], so a manga Series is searched by
+    issue number and volume-named releases are never queried -- silently, with
+    no [SEARCH-MANGA] line to show for it.
+    """
+    calls = _search_init_call_keywords("searchforissue", _SEARCH_PATH)
+    assert calls, "searchforissue() no longer calls search_init()"
+    for keywords in calls:
+        assert "content_type" in keywords
+        assert "chapter_number" in keywords
+        assert "volume_number" in keywords
+
+
+def test_manga_volume_search_terms_maps_volume_targets_to_the_real_name():
+    """Volume terms search bare AND match against the unsuffixed series name."""
+    volume = manga_volume_search_terms("One-Punch Man", None, "1")
+    assert volume == {"One-Punch Man v01": "One-Punch Man"}
+    # The mapped value is what the matcher compares against: the release
+    # "One-Punch Man v01 (2014) (Digital)" parses as "One-Punch Man", so
+    # comparing against the query term would fail every result.
+    assert volume["One-Punch Man v01"] == "One-Punch Man"
+
+    # A chapter target must NOT be marked -- "<series> c001" is a real search
+    # whose issue-number handling is unchanged.
+    assert manga_volume_search_terms("One Piece", "1161", None) == {}
+    # Neither number available: nothing to search bare.
+    assert manga_volume_search_terms("One Piece", None, None) == {}
+
+
+def test_manga_volume_satisfies_defers_to_the_ledger_comparison():
+    """Acceptance asks the ledger; it does not carry its own volume rules.
+
+    The spellings and edge cases are covered once, in test_manga_ledger.py.
+    This only pins that acceptance uses that comparison -- a second copy here
+    is exactly how the two would drift apart.
+    """
+    assert manga_volume_satisfies("v01", "1") is volume_numbers_match("v01", "1")
+    assert manga_volume_satisfies("v02", "1") is volume_numbers_match("v02", "1")
+    assert manga_volume_satisfies(None, "1") is False
+
+
+def test_manga_volume_arm_precedes_the_comic_version_comparison():
+    """The manga reading of "vNN" must win before the comic-version arms run.
+
+    Those arms compare the release's vNN to the series' ComicVersion/year,
+    which is the comic meaning (which RUN this is). For manga it is which BOOK,
+    so a later volume is otherwise discarded as "Versions wrong" -- only volume
+    1 of a v1 series would ever slip through.
+    """
+    filer_path = Path(__file__).resolve().parents[2] / "comicarr" / "search_filer.py"
+    source = filer_path.read_text(encoding="utf-8")
+    manga_arm = source.index("if manga_volume_pass and manga_volume_satisfies(")
+    versions_wrong = source.index('logger.fdebug("Versions wrong. Ignoring possible match.")')
+    assert manga_arm < versions_wrong
+    # It must be the opening `if`, not an `elif` reached after a comic arm.
+    assert "\n            if manga_volume_pass and manga_volume_satisfies(" in source
+
+
+def test_match_entry_prefers_the_manga_match_name():
+    """search_filer must compare against manga_match_name when it is set."""
+    filer_path = Path(__file__).resolve().parents[2] / "comicarr" / "search_filer.py"
+    source = filer_path.read_text(encoding="utf-8")
+    assert 'is_info.get("manga_match_name")' in source
+    # Both the parse and the match must use it, or the series comparison fails.
+    assert source.count("watchcomic=match_name") == 2
+    assert "watchcomic=ComicName" not in source
+
+
+def test_nzb_search_accepts_and_receives_manga_volume_terms():
+    """The bare-volume signal must reach NZB_SEARCH, or the suffix is appended.
+
+    NZB_SEARCH builds "<series>%20<issue>" for anything with an IssueNumber. A
+    manga volume target already carries its number in the name, so without this
+    parameter the query becomes "<series> v01 001" and matches nothing.
+    """
+    tree = ast.parse(_SEARCH_PATH.read_text(encoding="utf-8"))
+    signature = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "NZB_SEARCH"
+    )
+    assert "manga_volume_terms" in {arg.arg for arg in signature.args.kwonlyargs + signature.args.args}
+
+    handoff = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "search_the_matrix"
+    )
+    passed = {
+        kw.arg
+        for call in ast.walk(handoff)
+        if isinstance(call, ast.Call) and _is_search_init_or_nzb(call.func)
+        for kw in call.keywords
+    }
+    assert "manga_volume_terms" in passed
+
+
+def test_manga_rss_path_passes_manga_numbers_to_search_init():
+    """The RSS lane already honours the contract; it guards against regression."""
+    rss_path = Path(__file__).resolve().parents[2] / "comicarr" / "rsscheck.py"
+    calls = _search_init_call_keywords("mangaCheck", rss_path)
+    assert calls, "mangaCheck() no longer calls search_init()"
+    for keywords in calls:
+        assert {"content_type", "chapter_number", "volume_number"} <= keywords
