@@ -18,7 +18,7 @@ from comicarr.app.manga.acquisition import search_plan_for_series
 from comicarr.app.manga.parse import parse_in_series_context, parse_kwargs_for_series
 from comicarr.app.manga.sync import arm_manga_sync_job, next_interval_run
 from comicarr.rsscheck import mangaCheck
-from comicarr.search import _build_manga_search_terms
+from comicarr.search import _build_manga_search_terms, manga_volume_search_terms
 
 _INIT_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "__init__.py"
 _SEARCH_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "search.py"
@@ -29,6 +29,12 @@ def _is_search_init(func):
     if isinstance(func, ast.Name):
         return func.id == "search_init"
     return isinstance(func, ast.Attribute) and func.attr == "search_init"
+
+
+def _is_search_init_or_nzb(func):
+    """Match a call to either search_init(...) or NZB_SEARCH(...)."""
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    return name in {"search_init", "NZB_SEARCH"}
 
 
 def _search_init_call_keywords(function_name, path):
@@ -208,6 +214,47 @@ def test_searchforissue_passes_manga_numbers_to_search_init():
         assert "content_type" in keywords
         assert "chapter_number" in keywords
         assert "volume_number" in keywords
+
+
+def test_manga_volume_search_terms_marks_only_volume_targets():
+    """Volume terms are searched bare; chapter terms keep the issue number."""
+    volume = manga_volume_search_terms("One-Punch Man", None, "1")
+    assert volume == {"One-Punch Man v01"}
+
+    # A chapter target must NOT be marked -- "<series> c001" is a real search
+    # whose issue-number handling is unchanged.
+    assert manga_volume_search_terms("One Piece", "1161", None) == set()
+    # Neither number available: nothing to search bare.
+    assert manga_volume_search_terms("One Piece", None, None) == set()
+
+
+def test_nzb_search_accepts_and_receives_manga_volume_terms():
+    """The bare-volume signal must reach NZB_SEARCH, or the suffix is appended.
+
+    NZB_SEARCH builds "<series>%20<issue>" for anything with an IssueNumber. A
+    manga volume target already carries its number in the name, so without this
+    parameter the query becomes "<series> v01 001" and matches nothing.
+    """
+    tree = ast.parse(_SEARCH_PATH.read_text(encoding="utf-8"))
+    signature = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "NZB_SEARCH"
+    )
+    assert "manga_volume_terms" in {arg.arg for arg in signature.args.kwonlyargs + signature.args.args}
+
+    handoff = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "search_the_matrix"
+    )
+    passed = {
+        kw.arg
+        for call in ast.walk(handoff)
+        if isinstance(call, ast.Call) and _is_search_init_or_nzb(call.func)
+        for kw in call.keywords
+    }
+    assert "manga_volume_terms" in passed
 
 
 def test_manga_rss_path_passes_manga_numbers_to_search_init():
