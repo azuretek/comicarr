@@ -470,10 +470,14 @@ def _resume_item_from_row(row, payload):
     return "nzb", item
 
 
-def _finish_db_facts_only(rkey, row, payload):
-    """Close an obligation whose physical move already committed: delete its
-    nzblog anchor and advance the journal to `post_processed`, in ONE atomic
-    begin(). Touches DB facts only — never re-imports or re-moves."""
+def _delete_nzblog_anchor(conn, row, payload):
+    """Delete one obligation's nzblog anchor on an open connection.
+
+    Every close path deletes the same anchor, so the story-arc ("S"-prefixed
+    IssueID) and nzbname disambiguation lives here once. A surviving anchor is
+    what lets a later pass reconstruct a phantom obligation for work that is
+    already finished.
+    """
     issueid = row.get("issueid")
     provider = row.get("provider")
     story_arc = None
@@ -490,37 +494,78 @@ def _finish_db_facts_only(rkey, row, payload):
     nzbname = None
     if isinstance(payload, dict):
         nzbname = payload.get("nzbname") or payload.get("nzb_name")
-    with db.get_engine().begin() as conn:
-        if story_arc is False:
-            id_pred = nzblog.c.IssueID == str(issueid)
-        elif story_arc is True:
-            id_pred = or_(
-                nzblog.c.IssueID == str(issueid),
-                nzblog.c.IssueID == "S" + str(issueid),
+    if story_arc is False:
+        id_pred = nzblog.c.IssueID == str(issueid)
+    elif story_arc is True:
+        id_pred = or_(
+            nzblog.c.IssueID == str(issueid),
+            nzblog.c.IssueID == "S" + str(issueid),
+        )
+    else:
+        if nzbname:
+            id_pred = and_(
+                or_(
+                    nzblog.c.IssueID == str(issueid),
+                    nzblog.c.IssueID == "S" + str(issueid),
+                ),
+                nzblog.c.NZBName == nzbname,
             )
         else:
-            if nzbname:
-                id_pred = and_(
-                    or_(
-                        nzblog.c.IssueID == str(issueid),
-                        nzblog.c.IssueID == "S" + str(issueid),
-                    ),
-                    nzblog.c.NZBName == nzbname,
-                )
-            else:
-                id_pred = nzblog.c.IssueID == str(issueid)
-        stmt = delete(nzblog).where(id_pred)
-        if provider:
-            stmt = stmt.where(nzblog.c.PROVIDER == provider)
-        conn.execute(stmt)
+            id_pred = nzblog.c.IssueID == str(issueid)
+    stmt = delete(nzblog).where(id_pred)
+    if provider:
+        stmt = stmt.where(nzblog.c.PROVIDER == provider)
+    conn.execute(stmt)
+
+
+def _finish_db_facts_only(rkey, row, payload):
+    """Close an obligation whose physical move already committed: delete its
+    nzblog anchor and advance the journal to `post_processed`, in ONE atomic
+    begin(). Touches DB facts only — never re-imports or re-moves."""
+    with db.get_engine().begin() as conn:
+        _delete_nzblog_anchor(conn, row, payload)
         journal.record_transition(
             rkey,
             journal.POST_PROCESSED,
             payload=payload,
             conn=conn,
-            issueid=issueid,
-            provider=provider,
+            issueid=row.get("issueid"),
+            provider=row.get("provider"),
         )
+
+
+def close_fulfilled_band_row(row, payload=None):
+    """Close a band row parked for an operator whose work is provably DONE.
+
+    A `manual_review` / `failed` row exists to ask a human to act. When the
+    obligation's own issue is already `Downloaded` with a verified file beneath
+    the series root, there is nothing left to ask for: the entry is noise no
+    operator action can usefully clear, and both stages are TERMINAL, so
+    `replay_pipeline` — which builds its work list from OPEN stages only — never
+    revisits it. Left alone such a row sits in the band forever.
+
+    Reaches the same end state a successful operator "Import" produces (anchor
+    gone, row stamped `imported`) WITHOUT re-running the import: the file is
+    already placed, and re-driving post-processing against a source folder that
+    is legitimately gone is what parked several of these rows to begin with.
+
+    Deliberately stamps the R9 resolution rather than advancing the stage. The
+    lattice is forward-only and `manual_review` (rank 55) sits ABOVE
+    `post_processed` (50), so `record_transition` would log a no-op and leave the
+    row admitted — the close would look like it worked and change nothing.
+
+    Fails CLOSED: returns False unless fulfilment is proven and the stamp lands.
+    """
+    if not _obligation_already_fulfilled(row):
+        return False
+    rkey = row.get("release_key")
+    if not rkey:
+        return False
+    if payload is None:
+        payload = journal.load_payload(row.get("payload_json"))
+    with db.get_engine().begin() as conn:
+        _delete_nzblog_anchor(conn, row, payload)
+        return bool(journal.stamp_resolution(rkey, journal.STATUS_IMPORTED, conn=conn))
 
 
 def _obligation_already_fulfilled(row):
@@ -749,7 +794,8 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
                 logger.warn(
                     "[RECOVERY] %s is `post_processing` but the inline PP re-drive "
                     "cap (%d) for this replay pass is reached — DEFERRING; it "
-                    "resumes next startup (replay is idempotent/re-runnable)." % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
+                    "resumes next startup (replay is idempotent/re-runnable)."
+                    % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
                 )
                 return "skip-pp-cap-deferred"
             if pp_cap is not None:
