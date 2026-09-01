@@ -85,9 +85,27 @@ def _validate_basename(value):
     return name
 
 
+def _is_boolean_flag(value):
+    """True when the value is one of the explicit boolean forms the boundary accepts.
+
+    Type-aware on purpose. ``bool`` subclasses ``int`` and numeric types compare
+    across themselves, so ``1.0 == 1 == True``; a plain membership test against
+    ``(None, True, False, 0, 1, "0", "1")`` therefore admits ``1.0`` and ``0.0``.
+    """
+    if value is None or isinstance(value, bool):
+        return True
+    if isinstance(value, int):  # bool is already handled above
+        return value in (0, 1)
+    return value in ("0", "1")
+
+
 def _is_failed_download(value):
     """True only for an explicit failed flag; anything else gets full validation."""
-    return value in (True, 1, "1")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):  # bool is already handled above
+        return value == 1
+    return value == "1"
 
 
 def validate_postprocess_item(item, roots=None, require_exists=True):
@@ -96,7 +114,13 @@ def validate_postprocess_item(item, roots=None, require_exists=True):
         raise PostProcessCommandError("post-processing command must be an object")
     command = dict(item)
     command["nzb_name"] = _validate_basename(command.get("nzb_name"))
-    if _is_failed_download(command.get("failed")):
+    # Prove the flags are boolean before anything branches on them, so an
+    # unsupported form is reported as itself rather than as a path rejection.
+    for key in ("failed", "apicall", "ddl", "oneoff"):
+        if key in command and not _is_boolean_flag(command[key]):
+            raise PostProcessCommandError("%s must be boolean" % key)
+    failed = _is_failed_download(command.get("failed"))
+    if failed:
         # A failed download is never imported from this folder. It routes to
         # failed-download handling, which only needs to know the release failed
         # so it can look for a different one. Its folder legitimately sits
@@ -113,9 +137,14 @@ def validate_postprocess_item(item, roots=None, require_exists=True):
         command["nzb_folder"] = str(
             validate_mapped_path(command.get("nzb_folder"), roots=roots, require_exists=require_exists)
         )
-    for key in ("failed", "apicall", "ddl", "oneoff"):
-        if key in command and command[key] not in (None, True, False, 0, 1, "0", "1"):
-            raise PostProcessCommandError("%s must be boolean" % key)
+    if "failed" in command:
+        # Normalize to a real bool. process.Process.post_process() only rewrites
+        # the string forms and then branches on `failed is False` / `is True`,
+        # so an integer 1 would match neither branch: no PostProcessor, no
+        # FailedProcessor, and the item silently does nothing. Canonicalizing
+        # here — the one place the command is proven safe — means every accepted
+        # truthy form actually reaches failed-download handling.
+        command["failed"] = failed
     for key in ("issueid", "comicid"):
         if key in command and command[key] is not None and not str(command[key]).strip():
             raise PostProcessCommandError("%s cannot be blank" % key)

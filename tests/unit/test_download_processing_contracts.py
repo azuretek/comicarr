@@ -142,20 +142,47 @@ def test_failed_download_is_not_required_to_sit_under_a_postprocess_root(tmp_pat
     )
     assert command["nzb_folder"] == str(interdir_parent.resolve())
 
-    # "1" is the other explicit truthy form the command boundary accepts.
-    assert pp_commands.validate_postprocess_item(
-        {"nzb_name": "Saga.001.cbz", "nzb_folder": str(interdir_parent), "failed": "1"},
-        roots=[root],
-    )
+    # Every explicit truthy form the command boundary accepts, normalized to a
+    # real bool. process.Process.post_process() rewrites only the string forms
+    # and then branches on `failed is False` / `is True`, so an integer 1 left
+    # as-is would match neither branch: no PostProcessor, no FailedProcessor,
+    # and the item silently does nothing.
+    for failed in (True, 1, "1"):
+        command = pp_commands.validate_postprocess_item(
+            {"nzb_name": "Saga.001.cbz", "nzb_folder": str(interdir_parent), "failed": failed},
+            roots=[root],
+        )
+        assert command["failed"] is True
 
     # A successful download stays confined to the configured roots, and an
     # unset or false flag must not inherit the relaxed path.
-    for failed in (False, "0", None):
+    for failed in (False, 0, "0", None):
         with pytest.raises(pp_commands.PostProcessCommandError):
             pp_commands.validate_postprocess_item(
                 {"nzb_name": "Saga.001.cbz", "nzb_folder": str(interdir_parent), "failed": failed},
                 roots=[root],
             )
+
+    # A falsey flag is normalized the same way, so `failed is False` reaches the
+    # import path instead of falling through both branches.
+    for failed in (False, 0, "0", None):
+        command = pp_commands.validate_postprocess_item(
+            {"nzb_name": "Saga.001.cbz", "nzb_folder": str(root), "failed": failed},
+            roots=[root],
+        )
+        assert command["failed"] is False
+
+    # bool subclasses int and numeric types compare across themselves, so
+    # `1.0 == 1 == True`. A membership test would let a float take the relaxed
+    # path; an unsupported form must be rejected as a non-boolean flag, and be
+    # reported as itself rather than as a path rejection.
+    for key in ("failed", "apicall", "ddl", "oneoff"):
+        for value in (1.0, 0.0, 2, "true", "yes"):
+            with pytest.raises(pp_commands.PostProcessCommandError, match="%s must be boolean" % key):
+                pp_commands.validate_postprocess_item(
+                    {"nzb_name": "Saga.001.cbz", "nzb_folder": str(root), key: value},
+                    roots=[root],
+                )
 
     # Traversal sanitising still applies to a failed download.
     with pytest.raises(pp_commands.PostProcessCommandError):
