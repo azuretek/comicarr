@@ -216,16 +216,30 @@ def test_searchforissue_passes_manga_numbers_to_search_init():
         assert "volume_number" in keywords
 
 
-def test_manga_volume_search_terms_marks_only_volume_targets():
-    """Volume terms are searched bare; chapter terms keep the issue number."""
+def test_manga_volume_search_terms_maps_volume_targets_to_the_real_name():
+    """Volume terms search bare AND match against the unsuffixed series name."""
     volume = manga_volume_search_terms("One-Punch Man", None, "1")
-    assert volume == {"One-Punch Man v01"}
+    assert volume == {"One-Punch Man v01": "One-Punch Man"}
+    # The mapped value is what the matcher compares against: the release
+    # "One-Punch Man v01 (2014) (Digital)" parses as "One-Punch Man", so
+    # comparing against the query term would fail every result.
+    assert volume["One-Punch Man v01"] == "One-Punch Man"
 
     # A chapter target must NOT be marked -- "<series> c001" is a real search
     # whose issue-number handling is unchanged.
-    assert manga_volume_search_terms("One Piece", "1161", None) == set()
+    assert manga_volume_search_terms("One Piece", "1161", None) == {}
     # Neither number available: nothing to search bare.
-    assert manga_volume_search_terms("One Piece", None, None) == set()
+    assert manga_volume_search_terms("One Piece", None, None) == {}
+
+
+def test_match_entry_prefers_the_manga_match_name():
+    """search_filer must compare against manga_match_name when it is set."""
+    filer_path = Path(__file__).resolve().parents[2] / "comicarr" / "search_filer.py"
+    source = filer_path.read_text(encoding="utf-8")
+    assert 'is_info.get("manga_match_name")' in source
+    # Both the parse and the match must use it, or the series comparison fails.
+    assert source.count("watchcomic=match_name") == 2
+    assert "watchcomic=ComicName" not in source
 
 
 def test_nzb_search_accepts_and_receives_manga_volume_terms():
