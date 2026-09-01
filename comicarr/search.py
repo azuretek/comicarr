@@ -316,6 +316,7 @@ def search_init(
         logger.fdebug("Story-ARC: %s" % SARC)
         logger.fdebug("IssueArcID: %s" % IssueArcID)
 
+    manga_volume_terms = set()
     if content_type == "manga":
         logger.fdebug("[SEARCH-MANGA] Manga content detected for %s" % ComicName)
         manga_terms = _build_manga_search_terms(ComicName, chapter_number, volume_number)
@@ -326,6 +327,7 @@ def search_init(
                 AlternateSearch = manga_alt_str + "##" + AlternateSearch
             else:
                 AlternateSearch = manga_alt_str
+            manga_volume_terms = manga_volume_search_terms(ComicName, chapter_number, volume_number)
 
     provider_list = provider_order(initial_run=True)
     if content_type == "manga":
@@ -665,6 +667,7 @@ def search_init(
                     "ignore_booktype": ignore_booktype,
                     "smode": smode,
                     "allow_packs": allow_packs,
+                    "manga_volume_terms": manga_volume_terms,
                     "findit": findit,
                 }
 
@@ -972,6 +975,7 @@ def NZB_SEARCH(
     chktpb=0,
     ignore_booktype=False,
     smode=None,
+    manga_volume_terms=None,
 ):
 
     if _allow_packs_enabled(allow_packs) and comicarr.CONFIG.ENABLE_TORRENT_SEARCH:
@@ -1137,7 +1141,16 @@ def NZB_SEARCH(
             findloop = 99
             break
 
-        if IssueNumber is not None:
+        if IssueNumber is not None and ComicName in (manga_volume_terms or ()):
+            # Manga VOLUME target. comsrc is already the volume search name
+            # ("<series> v01"), and volume releases are published without an
+            # issue number -- "One-Punch Man v01 (2014) (Digital)" -- so
+            # appending one gives "<series> v01 001" and matches nothing.
+            # Search the volume name as-is, the way the TPB pass does.
+            comsearch = comsrc
+            issdig = ""
+            mod_isssearch = ""
+        elif IssueNumber is not None:
             if cmloopit == 3:
                 comsearch = comsrc + "%2000" + str(isssearch)
                 issdig = "00"
@@ -4137,6 +4150,7 @@ def search_the_matrix(scarios):
         ignore_booktype=scarios["ignore_booktype"],
         smode=scarios["smode"],
         allow_packs=scarios.get("allow_packs"),
+        manga_volume_terms=scarios.get("manga_volume_terms"),
     )
 
 
@@ -4249,6 +4263,11 @@ def searchforissue_checker(issueid, storedate, issuedate, digitaldate, info):
         return {"status": False, "reason": "invalid issueid"}
 
 
+def _is_volume_target(chapter_num, volume_num):
+    """A target is a volume iff it has a volume number and no chapter number."""
+    return volume_num not in (None, "") and chapter_num in (None, "")
+
+
 def _build_manga_search_terms(series_name, chapter_num, volume_num):
     """Build manga-specific search query variations.
 
@@ -4258,9 +4277,24 @@ def _build_manga_search_terms(series_name, chapter_num, volume_num):
     """
     from comicarr.app.manga.acquisition import search_terms_for_target
 
-    if volume_num not in (None, "") and chapter_num in (None, ""):
+    if _is_volume_target(chapter_num, volume_num):
         return search_terms_for_target(series_name, {"kind": "volume", "number": volume_num})
     return search_terms_for_target(series_name, {"kind": "chapter", "number": chapter_num})
+
+
+def manga_volume_search_terms(series_name, chapter_num, volume_num):
+    """The generated manga terms that are VOLUME targets, as a set.
+
+    NZB_SEARCH takes this to decide which alternate names must be searched
+    bare. A volume term already carries its number in the search name
+    ("<series> v01") and volume releases are published without an issue number
+    -- "One-Punch Man v01 (2014) (Digital)" -- so appending one yields
+    "<series> v01 001", which matches nothing. Chapter terms are excluded:
+    they keep the normal issue-number handling.
+    """
+    if not _is_volume_target(chapter_num, volume_num):
+        return set()
+    return set(_build_manga_search_terms(series_name, chapter_num, volume_num))
 
 
 def get_findcomiciss(IssueNumber):
