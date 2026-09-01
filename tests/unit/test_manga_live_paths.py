@@ -164,3 +164,29 @@ def test_parse_kwargs_auto_passes_folder_bare_numbers():
     assert kwargs["bare_number_mode"] == "auto"
     assert kwargs["bare_numbers"] == ["1", "2"]
     assert kwargs["volume_count"] == 72
+
+
+def test_folder_scan_numbers_a_watchlisted_manga_series_by_volume():
+    """The folder scan must ask whether a series is numbered by volume.
+
+    Deriving the number inline meant a manga series fell through to the issue
+    branch, so a volume file yielded no number and matched no issue.
+    """
+    pp_path = Path(__file__).resolve().parents[2] / "comicarr" / "postprocessor.py"
+    tree = ast.parse(pp_path.read_text(encoding="utf-8"))
+
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "volume_identifies_file" in called, "the folder scan no longer consults the volume predicate"
+
+    watch_value_keys = {
+        key.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Dict)
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    assert "IsManga" in watch_value_keys, "WatchValues no longer carries the manga signal"
