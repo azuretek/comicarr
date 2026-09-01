@@ -85,15 +85,34 @@ def _validate_basename(value):
     return name
 
 
+def _is_failed_download(value):
+    """True only for an explicit failed flag; anything else gets full validation."""
+    return value in (True, 1, "1")
+
+
 def validate_postprocess_item(item, roots=None, require_exists=True):
     """Return a normalized copy after validating the PP side-effect boundary."""
     if not isinstance(item, dict):
         raise PostProcessCommandError("post-processing command must be an object")
     command = dict(item)
     command["nzb_name"] = _validate_basename(command.get("nzb_name"))
-    command["nzb_folder"] = str(
-        validate_mapped_path(command.get("nzb_folder"), roots=roots, require_exists=require_exists)
-    )
+    if _is_failed_download(command.get("failed")):
+        # A failed download is never imported from this folder. It routes to
+        # failed-download handling, which only needs to know the release failed
+        # so it can look for a different one. Its folder legitimately sits
+        # outside the post-processing roots: NZBGet leaves a FAILURE/* item
+        # under InterDir, so the folder reported here is InterDir's parent
+        # rather than the completed-download root.
+        #
+        # Requiring containment rejects the command before the failed path ever
+        # runs, so the release parks in manual_review, the failure is never
+        # recorded, and the identical release is grabbed again on every
+        # subsequent search. Sanitize the path, but do not require containment.
+        command["nzb_folder"] = str(_canonical_path(command.get("nzb_folder"), "nzb_folder"))
+    else:
+        command["nzb_folder"] = str(
+            validate_mapped_path(command.get("nzb_folder"), roots=roots, require_exists=require_exists)
+        )
     for key in ("failed", "apicall", "ddl", "oneoff"):
         if key in command and command[key] not in (None, True, False, 0, 1, "0", "1"):
             raise PostProcessCommandError("%s must be boolean" % key)
