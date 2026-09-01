@@ -892,7 +892,20 @@ class search_check(object):
             logger.fdebug("SCVersion: %s" % S_ComicVersion)
             logger.fdebug("ComicYear: %s" % ComicYear)
 
-            if all(
+            if manga_volume_pass and manga_volume_satisfies(fndcomicversion, findcomiciss):
+                # "vNN" means different things in the two formats. In a comic
+                # release it is which RUN of the series this is (Amazing
+                # Spider-Man v2), which is why the arms below compare it to the
+                # series' ComicVersion or year. In manga it is which BOOK --
+                # volume 30 of one continuous series -- so the only meaningful
+                # comparison is against the volume being searched for.
+                #
+                # Without this, a manga volume matches only when the series'
+                # ComicVersion happens to equal the volume number, i.e. volume 1
+                # of a v1 series, and every later volume is discarded with
+                # "Versions wrong" despite being the exact release requested.
+                logger.fdebug("[MANGA] volume %s matches the volume searched for" % fndcomicversion)
+            elif all(
                 [
                     annualize is True,
                     parsed_comic["issue_number"] is not None,
