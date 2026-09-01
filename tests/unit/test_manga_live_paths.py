@@ -246,6 +246,23 @@ def test_manga_volume_satisfies_defers_to_the_ledger_comparison():
     assert manga_volume_satisfies(None, "1") is False
 
 
+def test_manga_volume_arm_precedes_the_comic_version_comparison():
+    """The manga reading of "vNN" must win before the comic-version arms run.
+
+    Those arms compare the release's vNN to the series' ComicVersion/year,
+    which is the comic meaning (which RUN this is). For manga it is which BOOK,
+    so a later volume is otherwise discarded as "Versions wrong" -- only volume
+    1 of a v1 series would ever slip through.
+    """
+    filer_path = Path(__file__).resolve().parents[2] / "comicarr" / "search_filer.py"
+    source = filer_path.read_text(encoding="utf-8")
+    manga_arm = source.index("if manga_volume_pass and manga_volume_satisfies(")
+    versions_wrong = source.index('logger.fdebug("Versions wrong. Ignoring possible match.")')
+    assert manga_arm < versions_wrong
+    # It must be the opening `if`, not an `elif` reached after a comic arm.
+    assert "\n            if manga_volume_pass and manga_volume_satisfies(" in source
+
+
 def test_match_entry_prefers_the_manga_match_name():
     """search_filer must compare against manga_match_name when it is set."""
     filer_path = Path(__file__).resolve().parents[2] / "comicarr" / "search_filer.py"
