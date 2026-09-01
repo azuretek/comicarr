@@ -4281,11 +4281,6 @@ def searchforissue_checker(issueid, storedate, issuedate, digitaldate, info):
         return {"status": False, "reason": "invalid issueid"}
 
 
-def _is_volume_target(chapter_num, volume_num):
-    """A target is a volume iff it has a volume number and no chapter number."""
-    return volume_num not in (None, "") and chapter_num in (None, "")
-
-
 def _build_manga_search_terms(series_name, chapter_num, volume_num):
     """Build manga-specific search query variations.
 
@@ -4294,8 +4289,9 @@ def _build_manga_search_terms(series_name, chapter_num, volume_num):
     which kind to look for.
     """
     from comicarr.app.manga.acquisition import search_terms_for_target
+    from comicarr.app.manga.ledger import is_volume_target
 
-    if _is_volume_target(chapter_num, volume_num):
+    if is_volume_target(chapter_num, volume_num):
         return search_terms_for_target(series_name, {"kind": "volume", "number": volume_num})
     return search_terms_for_target(series_name, {"kind": "chapter", "number": chapter_num})
 
@@ -4318,7 +4314,9 @@ def manga_volume_search_terms(series_name, chapter_num, volume_num):
 
     Chapter terms are excluded: they keep the normal issue-number handling.
     """
-    if not _is_volume_target(chapter_num, volume_num):
+    from comicarr.app.manga.ledger import is_volume_target
+
+    if not is_volume_target(chapter_num, volume_num):
         return {}
     return {term: series_name for term in _build_manga_search_terms(series_name, chapter_num, volume_num)}
 
