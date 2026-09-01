@@ -32,16 +32,18 @@ never aborting the loop.
 """
 
 import time
+import traceback
 
 from sqlalchemy import and_, delete, or_, select
 
 import comicarr
 from comicarr import db, logger
+from comicarr.app.acquisition.evidence import has_verified_library_file
 from comicarr.app.attention import ManualReview, record
 from comicarr.app.downloads import journal, recovery_classify
 from comicarr.app.downloads.ddl_commands import DDLCommand, DDLCommandError
 from comicarr.app.downloads.pp_commands import PostProcessCommandError, validate_postprocess_item
-from comicarr.tables import ddl_info, nzblog, pipeline_journal, snatched, storyarcs
+from comicarr.tables import comics, ddl_info, issues, nzblog, pipeline_journal, snatched, storyarcs
 
 _ENQUEUE_THROTTLE_SECONDS = 0.05
 
@@ -468,22 +470,107 @@ def _resume_item_from_row(row, payload):
     return "nzb", item
 
 
+def _finish_db_facts_only(rkey, row, payload):
+    """Close an obligation whose physical move already committed: delete its
+    nzblog anchor and advance the journal to `post_processed`, in ONE atomic
+    begin(). Touches DB facts only — never re-imports or re-moves."""
+    issueid = row.get("issueid")
+    provider = row.get("provider")
+    story_arc = None
+    if isinstance(payload, dict) and "mode" in payload:
+        story_arc = payload.get("mode") == "story_arc"
+    if story_arc is None:
+        story_arc = _is_story_arc_obligation(issueid)
+    nzbname = (payload or {}).get("nzbname") if isinstance(payload, dict) else None
+    with db.get_engine().begin() as conn:
+        if story_arc is False:
+            id_pred = nzblog.c.IssueID == str(issueid)
+        elif story_arc is True:
+            id_pred = or_(
+                nzblog.c.IssueID == str(issueid),
+                nzblog.c.IssueID == "S" + str(issueid),
+            )
+        else:
+            if nzbname:
+                id_pred = and_(
+                    or_(
+                        nzblog.c.IssueID == str(issueid),
+                        nzblog.c.IssueID == "S" + str(issueid),
+                    ),
+                    nzblog.c.NZBName == nzbname,
+                )
+            else:
+                id_pred = nzblog.c.IssueID == str(issueid)
+        stmt = delete(nzblog).where(id_pred)
+        if provider:
+            stmt = stmt.where(nzblog.c.PROVIDER == provider)
+        conn.execute(stmt)
+        journal.record_transition(
+            rkey,
+            journal.POST_PROCESSED,
+            payload=payload,
+            conn=conn,
+            issueid=issueid,
+            provider=provider,
+        )
+
+
+def _obligation_already_fulfilled(row):
+    """Return whether this obligation's work is provably ALREADY DONE.
+
+    True only when the obligation's own issue row is `Downloaded` AND its
+    `Location` resolves to an existing file beneath its series root — the
+    shared `has_verified_library_file` evidence gate.
+
+    This is a DESTINATION probe, which is decidable, and is deliberately not
+    the source probe `finalize_post_processing` forbids: a surviving source is
+    undecidable under copy/hardlink/softlink FILE_OPTS, but a verified file in
+    the library proves the move committed in EVERY mode. Fails CLOSED — any
+    missing id, unreadable row, or unresolvable path returns False and the
+    caller re-drives exactly as before.
+    """
+    issueid = row.get("issueid")
+    if not issueid:
+        return False
+    try:
+        issue = db.select_one(
+            select(issues.c.Status, issues.c.Location, issues.c.ComicID).where(issues.c.IssueID == str(issueid))
+        )
+    except Exception as e:
+        logger.warn("[RECOVERY] fulfillment lookup failed for issue %s: %s" % (issueid, e))
+        return False
+    if not issue or issue.get("Status") != "Downloaded":
+        return False
+    try:
+        series = db.select_one(select(comics.c.ComicLocation).where(comics.c.ComicID == str(issue.get("ComicID"))))
+    except Exception as e:
+        logger.warn("[RECOVERY] fulfillment series lookup failed for issue %s: %s" % (issueid, e))
+        return False
+    if not series:
+        return False
+    return has_verified_library_file(series.get("ComicLocation"), issue.get("Location"))
+
+
 def finalize_post_processing(row, payload=None):
-    """Resolve a row already inside post-processing using the `moved` marker
-    as the SOLE discriminator — NO file probe anywhere on this path (a probe
-    is undecidable in copy/hardlink/softlink FILE_OPTS modes where the source
-    is never deleted):
+    """Resolve a row already inside post-processing. The `moved` marker is the
+    discriminator for whether the destructive move committed — there is NO
+    SOURCE probe anywhere on this path (a surviving source is undecidable in
+    copy/hardlink/softlink FILE_OPTS modes, where it is never deleted):
 
       * stage `moved`           -> the destructive move physically committed
         (source may already be gone). Finish the DB facts ONLY — mirror the
         U9 atomic block (single begin(): nzblog-delete + journal
         post_processed). NEVER re-import / re-move.
-      * stage `post_processing` -> the move did NOT commit (source intact).
-        Re-drive PP in FULL by invoking process.Process DIRECTLY, threading
-        the authoritative release_key so the postprocessor markers advance
-        THIS row. NOT via PP_QUEUE: the U4 claim is a downloaded ->
-        post_processing advance and a row already at post_processing would
-        LOSE that claim and be dropped — so the finalizer bypasses it.
+      * stage `post_processing` -> the move did not record a marker. Before
+        re-driving, check `_obligation_already_fulfilled`: a DESTINATION probe
+        (issue `Downloaded` + verified file under the series root) proves the
+        move committed and only the marker write was lost, so finish the DB
+        facts exactly like `moved`. Without that proof, re-drive PP in FULL by
+        invoking process.Process DIRECTLY, threading the authoritative
+        release_key so the postprocessor markers advance THIS row. NOT via
+        PP_QUEUE: the U4 claim is a downloaded -> post_processing advance and a
+        row already at post_processing would LOSE that claim and be dropped —
+        so the finalizer bypasses it.
 
     Returns a short string describing the action taken (for logging/tests).
     """
@@ -493,45 +580,7 @@ def finalize_post_processing(row, payload=None):
         payload = journal.load_payload(row.get("payload_json"))
 
     if stage == journal.MOVED:
-        issueid = row.get("issueid")
-        provider = row.get("provider")
-        story_arc = None
-        if isinstance(payload, dict) and "mode" in payload:
-            story_arc = payload.get("mode") == "story_arc"
-        if story_arc is None:
-            story_arc = _is_story_arc_obligation(issueid)
-        nzbname = (payload or {}).get("nzbname") if isinstance(payload, dict) else None
-        with db.get_engine().begin() as conn:
-            if story_arc is False:
-                id_pred = nzblog.c.IssueID == str(issueid)
-            elif story_arc is True:
-                id_pred = or_(
-                    nzblog.c.IssueID == str(issueid),
-                    nzblog.c.IssueID == "S" + str(issueid),
-                )
-            else:
-                if nzbname:
-                    id_pred = and_(
-                        or_(
-                            nzblog.c.IssueID == str(issueid),
-                            nzblog.c.IssueID == "S" + str(issueid),
-                        ),
-                        nzblog.c.NZBName == nzbname,
-                    )
-                else:
-                    id_pred = nzblog.c.IssueID == str(issueid)
-            stmt = delete(nzblog).where(id_pred)
-            if provider:
-                stmt = stmt.where(nzblog.c.PROVIDER == provider)
-            conn.execute(stmt)
-            journal.record_transition(
-                rkey,
-                journal.POST_PROCESSED,
-                payload=payload,
-                conn=conn,
-                issueid=issueid,
-                provider=provider,
-            )
+        _finish_db_facts_only(rkey, row, payload)
         logger.info(
             "[RECOVERY] %s was `moved` (physical move committed) — finished DB "
             "facts only (nzblog-delete + journal post_processed); did NOT "
@@ -540,6 +589,17 @@ def finalize_post_processing(row, payload=None):
         return "moved-finish-dbfacts"
 
     if stage == journal.POST_PROCESSING:
+        if _obligation_already_fulfilled(row):
+            _finish_db_facts_only(rkey, row, payload)
+            logger.info(
+                "[RECOVERY] %s was `post_processing`, but its issue is already "
+                "`Downloaded` with a verified file under the series root — the "
+                "move committed and only the marker was lost. Finished DB facts "
+                "only (nzblog-delete + journal post_processed); did NOT "
+                "re-drive." % rkey
+            )
+            return "post_processing-already-fulfilled"
+
         item = _pp_item_from_row(row, payload or {})
         from comicarr.app.downloads.service import _configured_postprocess_roots
 
@@ -610,7 +670,10 @@ def finalize_post_processing(row, payload=None):
                     provider=row.get("provider"),
                 )
             )
-            logger.error("[RECOVERY] %s PP redrive failed and was quarantined: %s" % (rkey, type(e).__name__))
+            logger.error(
+                "[RECOVERY] %s PP redrive failed and was quarantined: %s: %s\n%s"
+                % (rkey, type(e).__name__, e, traceback.format_exc())
+            )
             return "post_processing-manual-review"
         return "post_processing-redrive"
 
