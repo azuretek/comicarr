@@ -601,3 +601,138 @@ class TestProcessMangaChapterMatch:
 
         result = mock_queue.put.call_args[0][0]
         assert "0 files matched" in result[0]["self.log"]
+
+
+class TestMangaPostProcessAlwaysReleasesApilock:
+    """A manga post-process that bails early must not keep APILOCK.
+
+    APILOCK is global and the post-processing worker takes it per item, so a
+    leaked lock does not merely skip the failing series -- it stops ALL
+    imports, and the Folder Monitor meant to rescue them bails on the same
+    lock. One misplaced series froze the whole pipeline for 85 minutes.
+
+    These use a REAL ThreadSafeLock: the shared _make_pp() helper mocks
+    APILOCK, and a mock's locked() never reflects reality, so the leak is
+    invisible through it.
+
+    Each test also asserts WHICH bail-out it exercised. The early returns are
+    ordered (missing row -> missing dir -> no files -> no destination ->
+    outside destination -> makedirs), so a test that forgets to seed a .cbz
+    silently stops at "No manga files" and proves nothing about the branch
+    named in its title.
+    """
+
+    def _run_manga(self, tmp_path, comic_row, manga_dest, seed_file=True):
+        real_lock = comicarr.ThreadSafeLock()
+
+        if seed_file:
+            # Required to get PAST the "No manga files found" return.
+            (tmp_path / "Berserk v16.cbz").write_bytes(b"fake cbz")
+
+        config = MagicMock()
+        config.FILE_OPTS = "move"
+        config.ARC_FILEOPS = "move"
+        config.ARC_FILEOPS_SOFTLINK_RELATIVE = False
+        config.IGNORE_SEARCH_WORDS = []
+        config.PRE_SCRIPTS = None
+
+        with (
+            patch.object(comicarr, "APILOCK", real_lock),
+            patch.object(comicarr, "CONFIG", config),
+        ):
+            pp = PostProcessor(
+                nzb_name="Berserk v16.cbz",
+                nzb_folder=str(tmp_path),
+                comicid="42",
+                queue=MagicMock(spec=queue.Queue),
+                apicall=True,
+            )
+            # Process(apicall=True) takes the lock; that is the precondition.
+            assert real_lock.locked() is True, "expected __init__ to acquire APILOCK"
+
+            with (
+                patch("comicarr.postprocessor.get_manga_destination", return_value=manga_dest),
+                patch("comicarr.postprocessor.db") as mock_db,
+            ):
+                mock_db.select_one.side_effect = [comic_row, None, None, None]
+                pp._process_manga()
+
+            return real_lock, pp
+
+    def test_series_folder_outside_manga_destination_releases_the_lock(self, tmp_path):
+        """The real 2026-09-01 incident: a manga series whose ComicLocation sat
+        under the comics root."""
+        manga_dest = tmp_path / "Manga"
+        manga_dest.mkdir()
+        outside = tmp_path / "Comics" / "Berserk (2003)"
+        outside.mkdir(parents=True)
+
+        lock, pp = self._run_manga(
+            tmp_path,
+            {"ComicName": "Berserk", "ComicLocation": str(outside)},
+            str(manga_dest),
+        )
+
+        assert "outside manga destination" in pp.log, "did not reach the location refusal"
+        assert lock.locked() is False, "APILOCK leaked; every later import would block"
+
+    def test_no_manga_destination_configured_releases_the_lock(self, tmp_path):
+        lock, pp = self._run_manga(
+            tmp_path,
+            {"ComicName": "Berserk", "ComicLocation": str(tmp_path)},
+            None,
+        )
+
+        assert "No manga destination directory configured" in pp.log
+        assert lock.locked() is False
+
+    def test_missing_series_row_releases_the_lock(self, tmp_path):
+        lock, pp = self._run_manga(tmp_path, None, str(tmp_path / "Manga"))
+
+        assert "Cannot find manga series in database" in pp.log
+        assert lock.locked() is False
+
+    def test_no_manga_files_found_releases_the_lock(self, tmp_path):
+        """The earliest bail-out reachable with a valid series row."""
+        manga_dest = tmp_path / "Manga"
+        manga_dest.mkdir()
+
+        lock, pp = self._run_manga(
+            tmp_path,
+            {"ComicName": "Berserk", "ComicLocation": str(manga_dest / "Berserk")},
+            str(manga_dest),
+            seed_file=False,
+        )
+
+        assert "No manga files found" in pp.log
+        assert lock.locked() is False
+
+    def test_success_path_still_releases_exactly_once(self, tmp_path):
+        """Control: the body already released on success. The wrapper must not
+        double-release (RuntimeError) -- it checks locked() first."""
+        manga_dest = tmp_path / "Manga"
+        series = manga_dest / "Berserk"
+        series.mkdir(parents=True)
+
+        lock, pp = self._run_manga(
+            tmp_path,
+            {"ComicName": "Berserk", "ComicLocation": str(series)},
+            str(manga_dest),
+        )
+
+        assert "outside manga destination" not in pp.log
+        assert lock.locked() is False
+
+    def test_lock_not_taken_when_apicall_false(self, tmp_path):
+        """Control: with apicall False the Process never acquires, so the
+        wrapper must not release a lock it does not own."""
+        real_lock = comicarr.ThreadSafeLock()
+        with patch.object(comicarr, "APILOCK", real_lock), patch.object(comicarr, "CONFIG", MagicMock()):
+            PostProcessor(
+                nzb_name="x.cbz",
+                nzb_folder=str(tmp_path),
+                comicid="42",
+                queue=MagicMock(spec=queue.Queue),
+                apicall=False,
+            )
+        assert real_lock.locked() is False
