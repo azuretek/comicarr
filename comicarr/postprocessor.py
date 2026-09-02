@@ -2591,6 +2591,21 @@ class PostProcessor(object):
                                                 )
                                                 datematch = "True"
 
+                                            # The year-settle was added to the watchlist
+                                            # path and never copied here, so the same
+                                            # manga whose 2014-labelled file matched a
+                                            # 2015 ledger year was accepted on the
+                                            # watchlist and rejected when it arrived as
+                                            # part of a story arc.
+                                            if datematch == "False" and volume_settles_year_for_match(
+                                                arc_values, arcmatch
+                                            ):
+                                                logger.fdebug(
+                                                    "%s[ARC][MANGA][VOLUME MATCH] Volume %s matched, so the year in the filename (%s) does not decide this file."
+                                                    % (module, arcmatch["series_volume"], arcmatch["issue_year"])
+                                                )
+                                                datematch = "True"
+
                                             if datematch == "True":
                                                 passit = False
                                                 if len(manual_list) > 0:
@@ -4199,6 +4214,26 @@ class PostProcessor(object):
                     )
                 )
             )
+            if matching is None:
+                # The equality above is a string comparison between two sources
+                # that write the same volume differently: the parser turns `v01`
+                # into int 1, so it asks for '1', while MangaDex stores
+                # str(chapter.volume) and can hold '01'. The row then never
+                # matched and the file was placed untagged. Compare through the
+                # ledger rule, which already owns what a volume number means,
+                # rather than inventing a second padding convention here.
+                for row in db.select_all(
+                    select(issues).where(
+                        and_(
+                            issues.c.ComicID == self.comicid,
+                            issues.c.VolumeNumber.isnot(None),
+                        )
+                    )
+                ):
+                    wanted = normalize_volume_number(vol_str)
+                    if wanted is not None and normalize_volume_number(row.get("VolumeNumber")) == wanted:
+                        matching = row
+                        break
 
         return matching
 
@@ -4372,6 +4407,11 @@ class PostProcessor(object):
             # that gets placed and recorded has to be the tagged one.
             matching = self._match_manga_issue(parsed)
 
+            # Kept so the download original can be tidied after placement:
+            # cmtag.run copies into CACHE_DIR and returns the CACHE path, so
+            # what place() consumes is the copy, not the download.
+            pre_tag_path = filepath
+
             if matching is not None:
                 # Best effort: a row without an IssueID cannot be tagged, but it
                 # can still be placed and marked, so this must not raise.
@@ -4396,6 +4436,29 @@ class PostProcessor(object):
                 logger.fdebug("%s Manga file already placed, skipping placement: %s" % (module, filename))
             else:
                 logger.info("%s Placed manga file: %s -> %s" % (module, filename, series_folder))
+
+            # Under FILE_OPTS = move, place() consumed the TAGGED copy out of
+            # the cache, so the download original is still sitting there and
+            # the next pass picks it up again. The comic path tidies the
+            # pre-tag file after placement for the same reason; do it here per
+            # file rather than through tidyup(), which works on the whole
+            # folder and would take files this run has not placed yet.
+            #
+            # Skipped when tagging did not produce a new path: filepath is then
+            # the original, and place() has already dealt with it.
+            if (
+                filepath != pre_tag_path
+                and getattr(comicarr.CONFIG, "FILE_OPTS", None) == "move"
+                and os.path.isfile(pre_tag_path)
+            ):
+                try:
+                    os.remove(pre_tag_path)
+                    logger.fdebug("%s Removed the pre-tag download original: %s" % (module, pre_tag_path))
+                except OSError as e:
+                    logger.warn(
+                        "%s Unable to remove the pre-tag download original %s [%s] -- it will be re-processed"
+                        % (module, pre_tag_path, e)
+                    )
 
             self._journal_pp("post_processing")
 
