@@ -98,11 +98,19 @@ function hasLedgerNumber(value?: string | number | null): boolean {
  * Chapter wins over volume because a chapter number is the more specific
  * claim: a MangaDex chapter row also carries the volume that contains it,
  * while a volume row has no chapter number to offer.
+ *
+ * A ComicVine manga writes neither: it models the English volumes as the
+ * series' issues, so the volume lands in Issue_Number and VolumeNumber stays
+ * null. On a manga ledger a bare number is therefore a volume, which is why
+ * this needs the content kind — on a comic ledger the same row is an issue.
  */
-function getLedgerKind(issue: Issue): LedgerKind | null {
+function getLedgerKind(issue: Issue, isManga: boolean): LedgerKind | null {
   if (issue.annual) return "annual";
   if (hasLedgerNumber(issue.chapterNumber)) return "chapter";
   if (hasLedgerNumber(issue.volumeNumber)) return "volume";
+  if (isManga && hasLedgerNumber(issue.number ?? issue.Issue_Number)) {
+    return "volume";
+  }
   return null;
 }
 
@@ -419,16 +427,19 @@ export default function SeriesDetailPage() {
       });
     }
   };
-  const isManga =
+  // Boolean() because the optional chains make this boolean | undefined, and
+  // getLedgerKind takes it as a real argument rather than a truthiness test.
+  const isManga = Boolean(
     comic.ContentType === "manga" ||
     comicId?.startsWith("md-") ||
-    comicId?.startsWith("mal-");
+    comicId?.startsWith("mal-"),
+  );
   const contentKind: ContentType = isManga ? "manga" : "comic";
   const volumeCount = allIssues.filter(
-    (issue) => getLedgerKind(issue) === "volume",
+    (issue) => getLedgerKind(issue, isManga) === "volume",
   ).length;
   const chapterCount = allIssues.filter(
-    (issue) => getLedgerKind(issue) === "chapter",
+    (issue) => getLedgerKind(issue, isManga) === "chapter",
   ).length;
   // A blended manga ledger holds both, so name both rather than picking one.
   // Falling back to the content kind only when no row carries either number
@@ -1058,7 +1069,7 @@ export default function SeriesDetailPage() {
               );
               const status = getIssueStatus(issue);
               const separateIntent = getSeparateIntent(issue);
-              const ledgerKind = getLedgerKind(issue);
+              const ledgerKind = getLedgerKind(issue, isManga);
               return (
                 <div
                   key={`${issue.annual ? "annual" : "issue"}-${issueId}`}
