@@ -30,7 +30,7 @@ from sqlalchemy import select
 import comicarr
 from comicarr.app.downloads import journal, recovery_classify
 from comicarr.db import get_engine, shutdown_engine
-from comicarr.tables import ddl_info, issues, metadata, nzblog, pipeline_journal
+from comicarr.tables import annuals, ddl_info, issues, metadata, nzblog, pipeline_journal
 
 
 @pytest.fixture(autouse=True)
@@ -644,10 +644,17 @@ def test_issue_post_processed_status_still_a_done_signal():
 def test_oneoff_issue_not_placed_is_not_a_done_signal(status):
     """Widening the accepted statuses must not turn an in-flight or failed
     one-off into "done" — otherwise the fix is indistinguishable from
-    deleting the check."""
+    deleting the check.
+
+    Probed as "absent" rather than "still": absent is the only verdict that
+    reaches the done-signal cross-check at all, so GONE here is the exact
+    mirror of the happy path's COMPLETE. A "still" probe returns STILL before
+    has_done_signal is consulted, and so would pass even if this status were
+    wrongly read as placed.
+    """
     row = _imported_oneoff(status=status, location=None)
     assert recovery_classify.has_done_signal(row) is False
-    assert recovery_classify.classify(row, probes=_probe("still")) == recovery_classify.STILL
+    assert recovery_classify.classify(row, probes=_probe("absent")) == recovery_classify.GONE
 
 
 def test_oneoff_with_no_issues_row_is_not_a_done_signal():
@@ -660,3 +667,49 @@ def test_oneoff_with_no_issues_row_is_not_a_done_signal():
         downloader_type="nzb",
     )
     assert recovery_classify.has_done_signal(row) is False
+
+
+# --- annuals: completion is written to a DIFFERENT table --------------------
+
+
+def _imported_annual(issueid="1099556", provider="nzbgeek", status="Downloaded"):
+    """An imported annual, written exactly as updater.foundsearch writes one.
+
+    mode='want_ann' upserts Status onto *annuals*, never onto *issues*, so an
+    issues-only done-signal lookup cannot see this row. The IssueID is a real
+    ComicVine id above HIGHCOUNT_FLOOR — which is the ordinary case, not a
+    contrived one — so is_synthetic_oneoff() reads True and suppresses the
+    nzblog fallback. The nzblog row is left present and the stage left at
+    `snatched` so neither of the other two done-signals can fire either,
+    isolating the library lookup as the only one available.
+    """
+    with get_engine().begin() as conn:
+        conn.execute(annuals.insert().values(IssueID=issueid, Status=status))
+        conn.execute(nzblog.insert().values(IssueID=issueid, PROVIDER=provider))
+    return _insert_journal(
+        "annual|%s|Saga.Annual.2025.Digital.LuCaZ|Saga.Annual.2025.Digital.LuCaZ" % provider,
+        journal.SNATCHED,
+        issueid=issueid,
+        provider=provider,
+        downloader_type="nzb",
+    )
+
+
+def test_imported_annual_is_a_done_signal():
+    """An annual that imported cleanly must not be re-classified GONE.
+
+    Before the library lookup walked annuals, the row's completion was
+    invisible: every restart re-probed it, found the history evicted, and
+    failed it — while the library plainly showed the annual Downloaded.
+    """
+    row = _imported_annual()
+    assert recovery_classify.has_done_signal(row) is True
+    assert recovery_classify.classify(row, probes=_probe("absent")) == recovery_classify.COMPLETE
+
+
+@pytest.mark.parametrize("status", ["Wanted", "Snatched", "Failed"])
+def test_annual_not_placed_is_not_a_done_signal(status):
+    """Reading annuals must not make every annual look done."""
+    row = _imported_annual(status=status)
+    assert recovery_classify.has_done_signal(row) is False
+    assert recovery_classify.classify(row, probes=_probe("absent")) == recovery_classify.GONE
