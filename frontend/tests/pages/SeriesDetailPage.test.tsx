@@ -478,6 +478,23 @@ describe("SeriesDetailPage", () => {
   }
 
   it("names a ComicVine manga ledger by its volumes, not chapters", async () => {
+    // ComicVine models a licensed manga's English volumes as the series'
+    // issues: the volume lands in `number` and VolumeNumber is never written.
+    // This is the shape One-Punch Man actually arrives in.
+    serveLedger({ ContentType: "manga" }, [
+      ledgerRow("1", { number: "1" }),
+      ledgerRow("2", { number: "2" }),
+    ]);
+    renderDetail();
+
+    await screen.findByText("One-Punch Man");
+
+    expect(screen.getByTestId("ledger-label").textContent).toBe("Volumes");
+    expect(screen.getAllByText("Volume")).toHaveLength(2);
+    expect(screen.queryByText("Chapter")).toBeNull();
+  });
+
+  it("names a manga ledger by its volumes when VolumeNumber is written", async () => {
     serveLedger({ ContentType: "manga" }, [
       ledgerRow("1", { volumeNumber: "1" }),
       ledgerRow("2", { volumeNumber: "2" }),
@@ -526,7 +543,11 @@ describe("SeriesDetailPage", () => {
   });
 
   it("falls back to chapters for a manga ledger carrying no numbers", async () => {
-    serveLedger({ ContentType: "manga" }, [ledgerRow("1", {})]);
+    // A synthesised placeholder row: no issue number under either spelling,
+    // so there is nothing on the row to read a kind off.
+    serveLedger({ ContentType: "manga" }, [
+      ledgerRow("1", { Issue_Number: "", number: null }),
+    ]);
     renderDetail();
 
     await screen.findByText("One-Punch Man");
