@@ -772,8 +772,31 @@ class TestMangaPostProcessAlwaysReleasesApilock:
             return real_lock, pp, releases
 
     def test_series_folder_outside_manga_destination_releases_the_lock(self, tmp_path):
-        """The real 2026-09-01 incident: a manga series whose ComicLocation sat
-        under the comics root."""
+        """The 2026-09-01 incident: a ComicLocation under the comics root.
+
+        That exact case is now REPAIRED before the refusal is reached --
+        persist_manga_location_if_needed repoints it under the manga
+        destination. The refusal survives for a location the repair cannot
+        compute a replacement for, which is what this drives: a series with no
+        usable name leaves the outside path in place and is refused.
+        """
+        manga_dest = tmp_path / "Manga"
+        manga_dest.mkdir()
+        outside = tmp_path / "Comics" / "Berserk (2003)"
+        outside.mkdir(parents=True)
+
+        lock, pp, releases = self._run_manga(
+            tmp_path,
+            {"ComicName": "", "ComicLocation": str(outside)},
+            str(manga_dest),
+        )
+
+        assert "outside manga destination" in pp.log, "did not reach the location refusal"
+        assert lock.locked() is False, "APILOCK leaked; every later import would block"
+        assert releases == [True], "expected exactly one release"
+
+    def test_a_repointed_series_folder_also_releases_the_lock(self, tmp_path):
+        """The repaired path is now the common case, and it must not leak either."""
         manga_dest = tmp_path / "Manga"
         manga_dest.mkdir()
         outside = tmp_path / "Comics" / "Berserk (2003)"
@@ -785,7 +808,7 @@ class TestMangaPostProcessAlwaysReleasesApilock:
             str(manga_dest),
         )
 
-        assert "outside manga destination" in pp.log, "did not reach the location refusal"
+        assert "outside manga destination" not in pp.log, "the location should have been repaired"
         assert lock.locked() is False, "APILOCK leaked; every later import would block"
         assert releases == [True], "expected exactly one release"
 
