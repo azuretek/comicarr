@@ -154,10 +154,17 @@ def search_plan_for_series(series, issues):
 
 
 def _pad_volume(number):
+    # Keeps the fraction, the same way _pad_chapter does. Half volumes are
+    # real ("v01.5"), and truncating one to "v01" searches the wrong volume --
+    # the exact volume comparison in _pack_row_matches then rejects the 1 it
+    # got against the 1.5 it wanted, so the row can never snatch.
     try:
-        return "%02d" % int(float(number))
+        value = float(number)
     except (TypeError, ValueError):
         return str(number) if number not in (None, "") else None
+    if value == int(value):
+        return "%02d" % int(value)
+    return "%02d.%s" % (int(value), str(round(value % 1, 1))[2:])
 
 
 def _pad_chapter(number):
