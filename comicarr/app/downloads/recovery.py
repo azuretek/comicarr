@@ -794,8 +794,7 @@ def _resolve_row(snapshot_row, probes=None, pp_cap=None):
                 logger.warn(
                     "[RECOVERY] %s is `post_processing` but the inline PP re-drive "
                     "cap (%d) for this replay pass is reached — DEFERRING; it "
-                    "resumes next startup (replay is idempotent/re-runnable)."
-                    % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
+                    "resumes next startup (replay is idempotent/re-runnable)." % (rkey, _MAX_INLINE_PP_REDRIVE_PER_PASS)
                 )
                 return "skip-pp-cap-deferred"
             if pp_cap is not None:
