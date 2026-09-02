@@ -547,6 +547,14 @@ def close_fulfilled_band_row(row, payload=None):
     row admitted — the close would look like it worked and change nothing.
 
     Fails CLOSED: returns False unless fulfilment is proven and the stamp lands.
+
+    Stamps BEFORE deleting the anchor, and only deletes if the stamp landed.
+    `stamp_resolution` returns False without raising when the row is gone, is
+    not on a band stage, or is already resolved — so deleting first would let
+    the begin() block commit an anchor deletion alongside an unresolved
+    journal row. That is strictly worse than doing nothing: the anchor is what
+    a later pass uses to reconstruct the obligation, so the row would be left
+    open with nothing to rebuild it from.
     """
     if not _obligation_already_fulfilled(row):
         return False
@@ -556,8 +564,50 @@ def close_fulfilled_band_row(row, payload=None):
     if payload is None:
         payload = journal.load_payload(row.get("payload_json"))
     with db.get_engine().begin() as conn:
-        _delete_nzblog_anchor(conn, row, payload)
-        return bool(journal.stamp_resolution(rkey, journal.STATUS_IMPORTED, conn=conn))
+        if not journal.stamp_resolution(rkey, journal.STATUS_IMPORTED, conn=conn):
+            return False
+        if not _anchor_shared_with_open_row(conn, rkey, row):
+            _delete_nzblog_anchor(conn, row, payload)
+        return True
+
+
+def _anchor_shared_with_open_row(conn, rkey, row):
+    """Whether another OPEN journal row would lose its anchor to this delete.
+
+    The fulfilment gate is issue-wide — the issue is `Downloaded` with a
+    verified file under the series root — but nzblog is unique on
+    (IssueID, PROVIDER). A DDL release_key carries a discriminant, so a DDL
+    sibling for the same issue and provider is a DIFFERENT journal row sharing
+    ONE anchor. Deleting it while closing the parked row leaves that sibling
+    anchorless, and the same startup then reads the missing anchor as a
+    done-signal and marks it done although nothing ran for it.
+
+    The parked row still closes either way; only the shared anchor survives,
+    to be deleted by whichever obligation finishes last. A lookup failure
+    reports True — keeping an anchor is recoverable, deleting one is not.
+    """
+    issueid = row.get("issueid")
+    provider = row.get("provider")
+    if not issueid or not provider:
+        return False
+    try:
+        sibling = conn.execute(
+            select(pipeline_journal.c.release_key)
+            .where(pipeline_journal.c.release_key != rkey)
+            .where(pipeline_journal.c.issueid == str(issueid))
+            .where(pipeline_journal.c.provider == provider)
+            .where(pipeline_journal.c.stage.in_(journal.OPEN_STAGES))
+            .limit(1)
+        ).fetchone()
+    except Exception as e:
+        logger.warn("[RECOVERY] shared-anchor lookup failed for %s: %s — keeping the nzblog anchor." % (rkey, e))
+        return True
+    if sibling is not None:
+        logger.fdebug(
+            "[RECOVERY] keeping nzblog anchor for issue %s/%s — still open for %s" % (issueid, provider, sibling[0])
+        )
+        return True
+    return False
 
 
 def _obligation_already_fulfilled(row):
