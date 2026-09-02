@@ -11,19 +11,22 @@
 
 import ast
 import datetime
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from comicarr.app.manga.acquisition import search_plan_for_series
+import comicarr.search as search
+from comicarr.app.manga.acquisition import search_plan_for_series, search_terms_for_target
+from comicarr.app.manga.ledger import volume_numbers_match
 from comicarr.app.manga.parse import parse_in_series_context, parse_kwargs_for_series
 from comicarr.app.manga.sync import arm_manga_sync_job, next_interval_run
 from comicarr.rsscheck import mangaCheck
 from comicarr.search import _build_manga_search_terms, manga_volume_search_terms
-from comicarr.app.manga.ledger import volume_numbers_match
 from comicarr.search_filer import manga_volume_satisfies
 
 _INIT_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "__init__.py"
 _SEARCH_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "search.py"
+_FILECHECKER_PATH = Path(__file__).resolve().parents[2] / "comicarr" / "filechecker.py"
 
 
 def _is_search_init(func):
@@ -281,17 +284,11 @@ def test_nzb_search_accepts_and_receives_manga_volume_terms():
     parameter the query becomes "<series> v01 001" and matches nothing.
     """
     tree = ast.parse(_SEARCH_PATH.read_text(encoding="utf-8"))
-    signature = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "NZB_SEARCH"
-    )
+    signature = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "NZB_SEARCH")
     assert "manga_volume_terms" in {arg.arg for arg in signature.args.kwonlyargs + signature.args.args}
 
     handoff = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "search_the_matrix"
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "search_the_matrix"
     )
     passed = {
         kw.arg
@@ -309,3 +306,110 @@ def test_manga_rss_path_passes_manga_numbers_to_search_init():
     assert calls, "mangaCheck() no longer calls search_init()"
     for keywords in calls:
         assert {"content_type", "chapter_number", "volume_number"} <= keywords
+
+
+def test_gen_altnames_shreds_a_volume_term_carried_in_alternatesearch():
+    """Characterises WHY volume terms cannot ride AlternateSearch.
+
+    gen_altnames() splits that string on `!` and `#` (and reads `!!` as an
+    alt-priority marker), so a series whose title contains one never survives
+    the round trip. This is the reason manga_volume_altnames() builds the terms
+    from the finished name list instead.
+    """
+    names = [x["ComicName"] for x in search.gen_altnames("Gantz!", "Gantz! v01", None, "want")]
+    assert "Gantz! v01" not in names
+
+
+def test_manga_volume_altnames_leaves_no_bare_name_to_search_by_issue_number():
+    """Every pass for a volume target must be a volume query.
+
+    NZB_SEARCH appends the issue number to any name that is not a volume term,
+    and search_the_matrix stops on the first hit -- so leaving the bare series
+    name in the list lets "One-Punch Man 030", a CHAPTER release, snatch the
+    volume 30 row before the v30 pass ever runs.
+    """
+    altnames = [
+        {"ComicName": "One-Punch Man", "unaltered_ComicName": "One-Punch Man"},
+        {"ComicName": "Onepunchman", "unaltered_ComicName": "Onepunchman"},
+    ]
+
+    entries, terms = search.manga_volume_altnames(altnames, "30")
+
+    assert [x["ComicName"] for x in entries] == ["One-Punch Man v30", "Onepunchman v30"]
+    # the bare name is gone -- nothing left that would append an issue number
+    assert "One-Punch Man" not in [x["ComicName"] for x in entries]
+    # alternates keep their coverage rather than being dropped
+    assert terms == {"One-Punch Man v30": "One-Punch Man", "Onepunchman v30": "Onepunchman"}
+
+
+def test_manga_volume_altnames_keeps_a_bang_title_unsplit():
+    """ "Gantz!" and "Working!!" must produce a usable volume term.
+
+    The term is what NZB_SEARCH looks up to decide this is a volume pass, and
+    what the matcher maps back to the real series name. A split term matches
+    neither, so the lookup silently misses and the pass reverts to an
+    issue-number search.
+    """
+    altnames = search.gen_altnames("Gantz!", None, None, "want")
+
+    entries, terms = search.manga_volume_altnames(altnames, "1")
+
+    assert [x["ComicName"] for x in entries] == ["Gantz! v01"]
+    assert terms["Gantz! v01"] == "Gantz!"
+
+
+def test_manga_volume_altnames_falls_back_when_no_term_can_be_built():
+    """An unusable volume number must not leave the series unsearchable."""
+    altnames = [{"ComicName": "Berserk", "unaltered_ComicName": "Berserk"}]
+
+    entries, terms = search.manga_volume_altnames(altnames, None)
+
+    assert entries == altnames
+    assert terms == {}
+
+
+def test_half_volume_keeps_its_fraction_through_search_and_match():
+    """A v01.5 release must be searched for, parsed, and accepted.
+
+    _pad_volume() used to truncate through int(), so a 1.5 volume searched
+    "v01" and then failed the exact volume comparison (1 against 1.5) -- the
+    row could never snatch.
+    """
+    assert search_terms_for_target("Kanojo", {"kind": "volume", "number": "1.5"}) == ["Kanojo v01.5"]
+    # whole volumes keep their existing zero-padded form
+    assert search_terms_for_target("Kanojo", {"kind": "volume", "number": "2"}) == ["Kanojo v02"]
+
+    assert volume_numbers_match("v01.5", "1.5") is True
+    # and the truncated form must NOT satisfy the half volume
+    assert volume_numbers_match("v01", "1.5") is False
+
+
+def test_filechecker_captures_a_fractional_manga_volume():
+    """The volume pattern must keep the fraction, as the chapter pattern does."""
+    pattern = re.compile(r"(?:v(?:ol(?:ume)?)?\.?\s*)(\d+(?:\.\d+)?)", re.IGNORECASE)
+    source = _FILECHECKER_PATH.read_text(encoding="utf-8")
+    assert pattern.pattern in source, "filechecker no longer uses the fractional volume pattern"
+
+    assert pattern.search("Kanojo v01.5 (2020) (Digital)").group(1) == "01.5"
+    assert pattern.search("Kanojo v01 (2020) (Digital)").group(1) == "01"
+    # an extension must not be read as a fraction
+    assert pattern.search("Kanojo v01.cbz").group(1) == "01"
+
+
+def test_search_init_wires_volume_queries_instead_of_alternatesearch():
+    """The wiring the two findings above depend on, asserted at the seam.
+
+    search_init() is reached only through provider configuration and a global
+    search lock, so this is asserted from source -- the same approach
+    test_manga_volume_arm_precedes_the_comic_version_comparison() takes.
+    """
+    source = _SEARCH_PATH.read_text(encoding="utf-8")
+
+    # both search loops (rss and api) rewrite the finished name list
+    rewrite = "altnames, manga_volume_terms = manga_volume_altnames(altnames, volume_number)"
+    assert source.count(rewrite) == 2, "a search loop still iterates un-rewritten altnames"
+
+    # the AlternateSearch injection is reachable only for a NON-volume target
+    guard = source.index("if not manga_volume_target:")
+    injection = source.index('AlternateSearch = manga_alt_str + "##" + AlternateSearch')
+    assert guard < injection, "volume terms are being injected into AlternateSearch again"
