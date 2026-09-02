@@ -184,3 +184,23 @@ def test_nzbget_resolution_without_category_keeps_plain_join(tmp_path):
 
     assert result == "manga"
     assert processor.nzb_folder == str(tmp_path / "nzbget" / "Saga.001")
+
+
+def test_nzbget_resolution_keeps_plain_join_when_neither_path_exists(tmp_path):
+    """With a category set but nothing on disk, the plain join must survive.
+
+    The fallback is a probe, not a rewrite: if the categorised path is not
+    there either, there is no evidence the category is in play, and the
+    historical path is the one whose failure the caller already reports. This
+    is the branch that pins the `_path_exists(categorised)` guard -- without
+    it the resolver silently redirects every unresolvable NZBGet download into
+    a category subdirectory that does not exist, and the "unable to locate"
+    error then names a path the operator never configured.
+    """
+    config = _config(tmp_path, NZBGET_CATEGORY="Comics")
+    processor, _queue = _processor(tmp_path / "incoming", config=config, use_nzbget=1)
+
+    result, _manga = _run(processor, config, use_nzbget=1)
+
+    assert result == "manga"
+    assert processor.nzb_folder == str(tmp_path / "nzbget" / "Saga.001")
