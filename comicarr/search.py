@@ -1078,7 +1078,10 @@ def NZB_SEARCH(
 
     cm = re.sub("\\bthe\\b", "", cm.lower())
 
-    cm = re.sub(r"[\&\:\?\,]", "", str(cm))
+    # '#' joins the strip list because it is not merely awkward in a query, it
+    # TERMINATES the URL: everything after it is the fragment, so the apikey and
+    # every later parameter appended below never reach the provider.
+    cm = re.sub(r"[\&\:\?\,\#]", "", str(cm))
     cm = re.sub(r"\s+", " ", cm)
     cm = re.sub(" ", "%20", str(cm))
     cm = re.sub("'", "%27", str(cm))

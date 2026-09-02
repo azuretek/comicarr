@@ -413,3 +413,37 @@ def test_search_init_wires_volume_queries_instead_of_alternatesearch():
     guard = source.index("if not manga_volume_target:")
     injection = source.index('AlternateSearch = manga_alt_str + "##" + AlternateSearch')
     assert guard < injection, "volume terms are being injected into AlternateSearch again"
+
+
+def test_a_multi_digit_fraction_survives_padding():
+    """A volume/chapter fraction is carried as text, not through float rounding.
+
+    `round(value % 1, 1)` keeps only ONE fractional digit, so 1.25 searched
+    "v01.2" and 1.75 searched "v01.8" -- not truncations of the wanted volume
+    but DIFFERENT ones, which the exact comparison then rejects, so the row
+    could never snatch.
+    """
+    from comicarr.app.manga.acquisition import _pad_chapter, _pad_volume
+
+    assert _pad_volume("1.25") == "01.25"
+    assert _pad_volume("1.75") == "01.75"
+    assert _pad_volume("1.05") == "01.05"
+    assert _pad_chapter("1.25") == "001.25"
+    assert _pad_chapter("1.75") == "001.75"
+
+    # and the existing forms are unchanged
+    assert _pad_volume("1.5") == "01.5"
+    assert _pad_volume("2") == "02"
+    assert _pad_chapter("165") == "165"
+
+
+def test_a_fractional_volume_search_term_round_trips():
+    """The term that is searched must satisfy the volume that was wanted."""
+    from comicarr.app.manga.ledger import volume_numbers_match
+
+    (term,) = search_terms_for_target("Kanojo", {"kind": "volume", "number": "1.25"})
+
+    assert term == "Kanojo v01.25"
+    assert volume_numbers_match("v01.25", "1.25") is True
+    # the number the old rounding would have searched must NOT satisfy it
+    assert volume_numbers_match("v01.2", "1.25") is False

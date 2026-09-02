@@ -162,3 +162,27 @@ def test_normalize_volume_number_treats_none_sentinel_as_absent():
     assert normalize_volume_number("1.0") == "1"
     assert normalize_volume_number("none") is None
     assert normalize_volume_number("") is None
+
+
+class TestVolumeNumbersMatchIsExact:
+    """The matcher's own contract: no usable volume on either side means False.
+
+    normalize_volume_number is a DISPLAY normaliser -- it preserves arbitrary
+    text and formats floats to six significant digits -- so comparing through
+    it made two non-volumes equal each other and lost precision.
+    """
+
+    def test_two_identical_non_volumes_do_not_match(self):
+        """"TPB" is not a volume, so a TPB does not satisfy another TPB."""
+        assert volume_numbers_match("TPB", "TPB") is False
+
+    def test_precision_is_not_rounded_away(self):
+        assert volume_numbers_match("1.0000001", "1") is False
+
+    def test_padding_and_markers_still_match(self):
+        assert volume_numbers_match("v01", "1") is True
+        assert volume_numbers_match("01", "1") is True
+        assert volume_numbers_match("v01.5", "1.5") is True
+
+    def test_a_different_volume_still_does_not_match(self):
+        assert volume_numbers_match("v01", "1.5") is False

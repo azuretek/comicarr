@@ -15,6 +15,7 @@ Owning a volume covers only the chapters that mapping actually lists.
 """
 
 import re
+from decimal import Decimal, InvalidOperation
 
 from comicarr.app.acquisition.models import Fulfillment
 
@@ -64,11 +65,31 @@ def volume_numbers_match(left, right):
     Returns False whenever either side has no usable volume, so a parse
     failure can never be read as a match and claim an arbitrary volume.
     """
-    left_value = normalize_volume_number(_strip_volume_marker(left))
-    right_value = normalize_volume_number(_strip_volume_marker(right))
+    left_value = _exact_volume(_strip_volume_marker(left))
+    right_value = _exact_volume(_strip_volume_marker(right))
     if left_value is None or right_value is None:
         return False
     return left_value == right_value
+
+
+def _exact_volume(value):
+    """A volume reference as an exact number, or None when it is not one.
+
+    normalize_volume_number is a DISPLAY normaliser: it preserves arbitrary
+    text and formats floats to six significant digits. Comparing through it
+    therefore made "TPB" equal "TPB" -- two releases with no volume at all
+    reading as the same volume -- and "1.0000001" equal "1". Neither is a
+    volume identity, and the contract above says so.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text).normalize()
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def _strip_volume_marker(value):

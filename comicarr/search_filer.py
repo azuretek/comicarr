@@ -892,7 +892,14 @@ class search_check(object):
             logger.fdebug("SCVersion: %s" % S_ComicVersion)
             logger.fdebug("ComicYear: %s" % ComicYear)
 
-            if manga_volume_pass and manga_volume_satisfies(fndcomicversion, findcomiciss):
+            # fndcomicversion or the parsed volume: the version arms above only
+            # recognise an all-digit vNN, so a FRACTIONAL volume leaves
+            # fndcomicversion None even though FileChecker parsed `v01.5`
+            # perfectly well. The comparison then failed and the half volume
+            # this branch exists to accept was rejected before the post-gate
+            # fallback could run.
+            parsed_volume = fndcomicversion or parsed_comic.get("series_volume")
+            if manga_volume_pass and manga_volume_satisfies(parsed_volume, findcomiciss):
                 # "vNN" means different things in the two formats. In a comic
                 # release it is which RUN of the series this is (Amazing
                 # Spider-Man v2), which is why the arms below compare it to the
