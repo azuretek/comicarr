@@ -4041,6 +4041,22 @@ class PostProcessor(object):
 
         Releasing here is safe: the worker loop refuses to start an item while
         the lock is held, so if it is still held when this returns, it is ours.
+
+        This is the ONLY release site, deliberately. The body used to release
+        itself on the success path and then carry on -- journal "moved", the
+        nzblog deletes, journal "post_processed" -- with the lock already
+        given up. Keeping that release alongside this finally would leave two
+        sites and a real window between them: PostProcessor.__init__ gates
+        only on APILOCK.locked(), and startup recovery re-drives items inline
+        on the main thread with apicall=True (app/downloads/recovery.py) while
+        the PPPOOL worker is running. An acquirer landing in that window would
+        then have its lock released by this finally, and the two would overlap.
+        With one site the lock also covers the journal write, which is where
+        it belonged in the first place.
+
+        self.apicall is part of the guard, not redundant with locked(): an
+        apicall=False Process never acquired, so a held lock there is someone
+        else's and must not be released.
         """
         try:
             return self._process_manga_body()
@@ -4248,12 +4264,6 @@ class PostProcessor(object):
         else:
             self._log("Manga post-processing complete: 0 files matched to chapters")
         logger.info("%s Manga post-processing complete for %s: %d files" % (module, series_name, processed))
-
-        if self.apicall is True:
-            try:
-                comicarr.APILOCK.release()
-            except Exception:
-                pass
 
         if processed > 0:
             self._journal_pp("moved", issueid=last_matched_issueid)
