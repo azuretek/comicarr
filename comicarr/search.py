@@ -316,18 +316,28 @@ def search_init(
         logger.fdebug("Story-ARC: %s" % SARC)
         logger.fdebug("IssueArcID: %s" % IssueArcID)
 
-    manga_volume_terms = set()
+    from comicarr.app.manga.ledger import is_volume_target
+
+    manga_volume_terms = {}
+    manga_volume_target = content_type == "manga" and is_volume_target(chapter_number, volume_number)
     if content_type == "manga":
         logger.fdebug("[SEARCH-MANGA] Manga content detected for %s" % ComicName)
-        manga_terms = _build_manga_search_terms(ComicName, chapter_number, volume_number)
-        if manga_terms:
-            manga_alt_str = "##".join(manga_terms)
-            logger.fdebug("[SEARCH-MANGA] Generated %d search variations: %s" % (len(manga_terms), manga_terms))
-            if AlternateSearch and AlternateSearch != "None":
-                AlternateSearch = manga_alt_str + "##" + AlternateSearch
-            else:
-                AlternateSearch = manga_alt_str
-            manga_volume_terms = manga_volume_search_terms(ComicName, chapter_number, volume_number)
+        # A VOLUME target deliberately does not go through AlternateSearch.
+        # gen_altnames() splits that string on `!` and `#`, which shreds a term
+        # like "Gantz! v01", and whatever survived would be ordered AFTER the
+        # bare series name -- whose pass appends the issue number, so a
+        # same-numbered CHAPTER release ("One-Punch Man 030") wins on the first
+        # hit and the v30 pass never runs. Volume terms are built from the
+        # finished name list instead, below.
+        if not manga_volume_target:
+            manga_terms = _build_manga_search_terms(ComicName, chapter_number, volume_number)
+            if manga_terms:
+                manga_alt_str = "##".join(manga_terms)
+                logger.fdebug("[SEARCH-MANGA] Generated %d search variations: %s" % (len(manga_terms), manga_terms))
+                if AlternateSearch and AlternateSearch != "None":
+                    AlternateSearch = manga_alt_str + "##" + AlternateSearch
+                else:
+                    AlternateSearch = manga_alt_str
 
     provider_list = provider_order(initial_run=True)
     if content_type == "manga":
@@ -674,7 +684,11 @@ def search_init(
                 if searchmode == "rss":
                     logger.info("RSS searchmode enabled for %s" % ComicName)
                     scarios["RSS"] = "yes"
-                    for xx in gen_altnames(ComicName, AlternateSearch, filesafe, smode):
+                    altnames = gen_altnames(ComicName, AlternateSearch, filesafe, smode)
+                    if manga_volume_target:
+                        altnames, manga_volume_terms = manga_volume_altnames(altnames, volume_number)
+                        scarios["manga_volume_terms"] = manga_volume_terms
+                    for xx in altnames:
                         logger.info("comicname searched for: %s" % ComicName)
                         if all([findit["status"] is False, not provider_blocked]):
                             scarios["ComicName"] = xx["ComicName"]
@@ -696,6 +710,9 @@ def search_init(
                         ]
                     else:
                         altnames = gen_altnames(ComicName, AlternateSearch, filesafe, smode)
+                    if manga_volume_target:
+                        altnames, manga_volume_terms = manga_volume_altnames(altnames, volume_number)
+                        scarios["manga_volume_terms"] = manga_volume_terms
                     for xx in altnames:
                         logger.info("comicname searched for: %s" % ComicName)
                         if all([findit["status"] is False, not provider_blocked]):
@@ -4288,6 +4305,39 @@ def _build_manga_search_terms(series_name, chapter_num, volume_num):
     if is_volume_target(chapter_num, volume_num):
         return search_terms_for_target(series_name, {"kind": "volume", "number": volume_num})
     return search_terms_for_target(series_name, {"kind": "chapter", "number": chapter_num})
+
+
+def manga_volume_altnames(altnames, volume_num):
+    """Rewrite a finished name list into VOLUME queries.
+
+    Takes the list gen_altnames() produced -- the series name plus every
+    alternate, already split and de-duplicated -- and replaces each entry with
+    its volume query, so no pass is left searching a bare name with an issue
+    number appended. Alternate titles keep their coverage: each one gets its
+    own "<alt> vNN" rather than being dropped.
+
+    Returns ``(entries, terms)`` where ``terms`` maps each query back to the
+    name the release will actually parse as, which is what the matcher has to
+    compare against -- "<series> v01" is a query, never a series name.
+
+    Falls back to the original list when no term can be built (an unusable
+    volume number), so a series is never left unsearchable.
+    """
+    from comicarr.app.manga.acquisition import search_terms_for_target
+
+    entries = []
+    terms = {}
+    for entry in altnames or ():
+        name = entry.get("unaltered_ComicName") or entry.get("ComicName")
+        for term in search_terms_for_target(name, {"kind": "volume", "number": volume_num}):
+            if term in terms:
+                continue
+            terms[term] = name
+            entries.append({"ComicName": term, "unaltered_ComicName": term})
+    if not entries:
+        return list(altnames or ()), {}
+    logger.fdebug("[SEARCH-MANGA] Volume queries: %s" % ([e["ComicName"] for e in entries],))
+    return entries, terms
 
 
 def manga_volume_search_terms(series_name, chapter_num, volume_num):
