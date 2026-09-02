@@ -34,7 +34,11 @@ if "windows" not in platform.system().lower():
     from pwd import getpwnam
 
 
-_TRAILING_VOLUME_LABEL = re.compile(r"[\s._-]*\b(?:v|vol|vols|volume)\.?\s*0*(\d+)\s*$", re.IGNORECASE)
+# `\s*\.?\s*` rather than `\.?\s*`: the token walker splits `Vol.33` into
+# `Vol .33`, moving the separator dot AFTER the space, so a pattern that only
+# allowed the dot to come first matched the short form and missed the very
+# long form this exists to catch.
+_TRAILING_VOLUME_LABEL = re.compile(r"[\s._-]*\b(?:v|vol|vols|volume)\s*\.?\s*0*(\d+)\s*$", re.IGNORECASE)
 
 
 def strip_trailing_volume_label(series_name, volume_number):
