@@ -589,3 +589,74 @@ def test_reopen_candidate_story_arc_scoped_to_storyarcs_row():
     assert recovery_classify.false_terminal_reopen_candidate(reopenable) is True
     placed = _terminal_row("R11|nzb.su", "R11", payload={"mode": "story_arc"})
     assert recovery_classify.false_terminal_reopen_candidate(placed) is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: the issues done-signal must recognise the status post-processing
+# actually writes to the issues table ('Downloaded'), not the snatched-table
+# status ('Post-Processed').
+# ---------------------------------------------------------------------------
+
+
+def _imported_oneoff(issueid="1099554", provider="nzbgeek", status="Downloaded", location="v30.cbz"):
+    """A synthetic-HIGHCOUNT one-off whose file post-processing already placed.
+
+    Mirrors what postprocessor writes on success: 'Downloaded' + Location onto
+    issues (the 'Post-Processed' half of that same write goes to *snatched*).
+    The nzblog row is left PRESENT so nzblog-absence cannot supply the
+    done-signal, and the stage stays `snatched` so stage-rank cannot either —
+    isolating the issues test as the only remaining signal.
+    """
+    with get_engine().begin() as conn:
+        conn.execute(issues.insert().values(IssueID=issueid, Status=status, Location=location))
+        conn.execute(nzblog.insert().values(IssueID=issueid, PROVIDER=provider))
+    return _insert_journal(
+        "oneoff|%s|One-Punch.Man.v30.2025.Digital.LuCaZ|One-Punch.Man.v30.2025.Digital.LuCaZ" % provider,
+        journal.SNATCHED,
+        issueid=issueid,
+        provider=provider,
+        downloader_type="nzb",
+    )
+
+
+def test_oneoff_issue_downloaded_is_a_done_signal():
+    """An imported one-off must read as done.
+
+    is_synthetic_oneoff('1099554') is True (>= HIGHCOUNT_FLOOR), so
+    nzblog-presence is advisory only and the issues row is the ONLY
+    done-signal available while the stage is still `snatched`.
+    """
+    row = _imported_oneoff()
+    assert recovery_classify.has_done_signal(row) is True
+    assert recovery_classify.classify(row, probes=_probe("absent")) == recovery_classify.COMPLETE
+
+
+def test_issue_post_processed_status_still_a_done_signal():
+    """The pre-existing 'Post-Processed' acceptance must not regress."""
+    row = _imported_oneoff(status="Post-Processed", location=None)
+    assert recovery_classify.has_done_signal(row) is True
+
+
+# --- controls: these must STILL NOT be done-signals -------------------------
+
+
+@pytest.mark.parametrize("status", ["Wanted", "Snatched", "Failed"])
+def test_oneoff_issue_not_placed_is_not_a_done_signal(status):
+    """Widening the accepted statuses must not turn an in-flight or failed
+    one-off into "done" — otherwise the fix is indistinguishable from
+    deleting the check."""
+    row = _imported_oneoff(status=status, location=None)
+    assert recovery_classify.has_done_signal(row) is False
+    assert recovery_classify.classify(row, probes=_probe("still")) == recovery_classify.STILL
+
+
+def test_oneoff_with_no_issues_row_is_not_a_done_signal():
+    """No library row at all ⇒ no placement evidence ⇒ not done."""
+    row = _insert_journal(
+        "oneoff|nzbgeek|missing|missing",
+        journal.SNATCHED,
+        issueid="1099555",
+        provider="nzbgeek",
+        downloader_type="nzb",
+    )
+    assert recovery_classify.has_done_signal(row) is False

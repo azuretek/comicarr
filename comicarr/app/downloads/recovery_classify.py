@@ -23,8 +23,8 @@ STILL/COMPLETE/UNKNOWN.
 history is finite and operator/auto-pruned: a release that completed and was
 post-processed while the app was down, then had its history row evicted, reads
 as absent. Before classifying any "absent" as GONE we cross-check the
-authoritative done-signals (issues.Status == 'Post-Processed' / nzblog row
-absent / journal stage already post_processing+).
+authoritative done-signals (issues.Status shows placement / nzblog row absent
+/ journal stage already post_processing+).
 
 One-off caveat: synthetic-HIGHCOUNT IssueID one-offs have a non-persisted
 IssueID that diverges across restart, and nzblog() has a mid-flight
@@ -63,9 +63,25 @@ def _journal_stage_done(row):
     return rank is not None and pp_rank is not None and rank >= pp_rank
 
 
-def _issue_post_processed(issueid):
-    """True iff issues.Status == 'Post-Processed' for this IssueID — an
-    authoritative "already completed" signal that survives history eviction."""
+def _issue_completed(issueid):
+    """True iff the issues row shows this obligation already completed — an
+    authoritative "already done" signal that survives history eviction.
+
+    Accepts every status that means the file was placed (``_PLACED_STATUSES``),
+    not only 'Post-Processed'. Post-processing writes BOTH statuses in the same
+    block, to DIFFERENT tables (postprocessor ~4293-4306): 'Downloaded' +
+    Location onto *issues*, and 'Post-Processed' onto *snatched*. An issues row
+    therefore never carries 'Post-Processed', so testing for it here could
+    never return True.
+
+    That matters because this is the ONLY done-signal a synthetic-HIGHCOUNT
+    one-off can have: nzblog-presence is advisory for those (see
+    has_done_signal) and a stranded row's stage is still `snatched`. A fully
+    downloaded and imported one-off was therefore stranded at `snatched`
+    forever — each restart re-probed it and logged "UNKNOWN (downloader API
+    unreachable / transient)" while the library plainly showed the issue
+    Downloaded with a Location.
+    """
     if issueid is None:
         return False
     try:
@@ -73,7 +89,7 @@ def _issue_post_processed(issueid):
     except Exception as e:
         logger.warn("[RECOVERY-CLASSIFY] issues.Status lookup failed for %s: %s" % (issueid, e))
         return False
-    return bool(rec) and rec["Status"] == "Post-Processed"
+    return bool(rec) and (rec["Status"] or "") in _PLACED_STATUSES
 
 
 def _nzblog_present(issueid, provider, story_arc=None):
@@ -254,7 +270,7 @@ def has_done_signal(row):
 
     Returns True iff the release is authoritatively already complete:
       * journal stage is post_processing+, OR
-      * issues.Status == 'Post-Processed', OR
+      * the issues row shows placement (see _issue_completed), OR
       * nzblog row absent (deleted on PP success).
 
     One-off rule: for a synthetic-HIGHCOUNT one-off the nzblog-presence test
@@ -262,7 +278,9 @@ def has_done_signal(row):
     delete-reupsert window). For those rows the journal release_key/stage is
     AUTHORITATIVE and nzblog-presence is ADVISORY only — so we do NOT treat
     nzblog-absence as a done-signal for one-offs (an in-flight one-off must
-    not be misread as done/GONE).
+    not be misread as done/GONE). That rule makes _issue_completed the only
+    done-signal such a row can have while its stage is still `snatched`, so
+    that test must recognise the status post-processing actually writes.
     """
     row = row or {}
     if _journal_stage_done(row):
@@ -271,7 +289,7 @@ def has_done_signal(row):
     issueid = row.get("issueid")
     provider = row.get("provider")
 
-    if _issue_post_processed(issueid):
+    if _issue_completed(issueid):
         return True
 
     if journal.is_synthetic_oneoff(issueid):
