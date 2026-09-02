@@ -678,23 +678,17 @@ class TestMangaMetatagOnImport:
         return mock_place, mock_cmtag, mock_db, mock_queue, str(src), str(tagged)
 
     def test_import_tags_the_file_before_placing_it(self, tmp_path):
-        mock_place, mock_cmtag, _db, _q, src, tagged = self._run(
-            tmp_path, "TAGGED", self._meta_config()
-        )
+        mock_place, mock_cmtag, _db, _q, src, tagged = self._run(tmp_path, "TAGGED", self._meta_config())
 
         mock_cmtag.assert_called_once()
         assert mock_cmtag.call_args.kwargs["filename"] == src, (
             "the tagger must run on the download-location file, before placement"
         )
         assert mock_cmtag.call_args.kwargs["issueid"] == "md-csm-ch165"
-        assert mock_place.call_args[0][0] == tagged, (
-            "placement must move the TAGGED file, not the untagged original"
-        )
+        assert mock_place.call_args[0][0] == tagged, "placement must move the TAGGED file, not the untagged original"
 
     def test_the_recorded_location_is_the_tagged_filename(self, tmp_path):
-        _place, _cmtag, mock_db, _q, _src, _tagged = self._run(
-            tmp_path, "TAGGED", self._meta_config()
-        )
+        _place, _cmtag, mock_db, _q, _src, _tagged = self._run(tmp_path, "TAGGED", self._meta_config())
 
         mock_db.upsert.assert_any_call(
             "issues",
@@ -720,13 +714,9 @@ class TestMangaMetatagOnImport:
 
     @pytest.mark.parametrize("sentinel", ["fail", "corrupt", "unrar error"])
     def test_a_tagging_failure_never_costs_the_import(self, tmp_path, sentinel):
-        mock_place, _cmtag, mock_db, mock_queue, src, _tagged = self._run(
-            tmp_path, sentinel, self._meta_config()
-        )
+        mock_place, _cmtag, mock_db, mock_queue, src, _tagged = self._run(tmp_path, sentinel, self._meta_config())
 
-        assert mock_place.call_args[0][0] == src, (
-            "a sentinel is not a path; the original file must still be placed"
-        )
+        assert mock_place.call_args[0][0] == src, "a sentinel is not a path; the original file must still be placed"
         mock_db.upsert.assert_any_call(
             "issues",
             {"Status": "Downloaded", "Location": "Chainsaw Man 165.cbr"},
@@ -752,7 +742,7 @@ class TestMangaMetatagOnImport:
 
 
 class TestMangaMetatagWiring:
-    """The helper is only useful if _process_manga actually calls it."""
+    """The helper is only useful if the manga path actually calls it."""
 
     @staticmethod
     def _source():
@@ -760,12 +750,14 @@ class TestMangaMetatagWiring:
 
         from comicarr.postprocessor import PostProcessor
 
-        return inspect.getsource(PostProcessor._process_manga)
+        # The work lives in _process_manga_body(); _process_manga() is now a
+        # thin try/finally wrapper that guarantees the APILOCK release. Inspect
+        # the body, or these assertions read the wrapper and always fail.
+        return inspect.getsource(PostProcessor._process_manga_body)
 
     def test_process_manga_calls_the_tagger(self):
         assert "self._metatag_manga_file(" in self._source(), (
-            "_process_manga no longer tags its files; a manga volume will land "
-            "in the library with no ComicInfo.xml"
+            "_process_manga no longer tags its files; a manga volume will land in the library with no ComicInfo.xml"
         )
 
     def test_the_ledger_row_is_resolved_before_placement(self):
@@ -1126,9 +1118,9 @@ class TestRestoreTaggedFileModeWiring:
 
     def test_the_capture_precedes_the_restore(self):
         src = self._run_source()
-        assert src.index("og_file_mode = current_file_mode(") < src.index(
-            "restore_tagged_file_mode("
-        ), "the mode must be captured before it can be restored"
+        assert src.index("og_file_mode = current_file_mode(") < src.index("restore_tagged_file_mode("), (
+            "the mode must be captured before it can be restored"
+        )
 
 
 class TestMangaTagShapeWiring:
@@ -1160,8 +1152,7 @@ class TestMangaTagShapeWiring:
         """Both passes must land while the file is still the tagging copy."""
         source = self._run_source()
         assert source.index("clear_issue_number(") < source.index("restore_tagged_file_mode("), (
-            "the issue number would be cleared after the mode was restored, "
-            "reducing a library file's permissions again"
+            "the issue number would be cleared after the mode was restored, reducing a library file's permissions again"
         )
 
     def test_the_tag_options_no_longer_carry_a_doomed_issue_clear(self):
@@ -1234,6 +1225,8 @@ class TestClearIssueNumber:
         with patch.object(comicarr, "CONFIG", self._cfg()):
             with patch.object(cmtag.subprocess, "Popen", side_effect=OSError("no interpreter")):
                 assert cmtag.clear_issue_number("/app/comictagger.py", "/cache/a.cbz") is False
+
+
 class TestMangaPostProcessAlwaysReleasesApilock:
     """A manga post-process that bails early must not keep APILOCK.
 
