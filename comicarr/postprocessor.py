@@ -4449,9 +4449,18 @@ class PostProcessor(object):
             #
             # Skipped when tagging did not produce a new path: filepath is then
             # the original, and place() has already dealt with it.
+            #
+            # Also skipped when the series folder resolves back to the download
+            # folder and tagging did not rename the file, because then the file
+            # sitting at pre_tag_path is the one place() just wrote to dst.
+            # place() cannot catch this itself: it compares its own source, the
+            # cache copy, against dst, so the same-file short circuit misses.
+            # realpath rather than samefile, because dst need not exist here and
+            # samefile raises on a missing path.
             if (
                 filepath != pre_tag_path
                 and getattr(comicarr.CONFIG, "FILE_OPTS", None) == "move"
+                and os.path.realpath(pre_tag_path) != os.path.realpath(dst)
                 and os.path.isfile(pre_tag_path)
             ):
                 try:

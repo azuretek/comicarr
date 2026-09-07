@@ -947,18 +947,9 @@ class TestMangaMetatagWiring:
         )
 
     def test_the_ledger_row_is_resolved_before_placement(self):
-        src = self._source()
-        assert "self._match_manga_issue(" in src
-        assert src.index("self._match_manga_issue(") < src.index("placement = place("), (
-            "the IssueID must be resolved before placement, because the tagger "
-            "needs it and must run while the file is still at the download location"
-        )
-
-    def test_the_tagger_runs_before_placement(self):
-        src = self._source()
-        assert src.index("self._metatag_manga_file(") < src.index("placement = place("), (
-            "tagging can rename .cbr -> .cbz, so it must happen before the name "
-            "that gets placed and recorded is decided"
+        assert "self._match_manga_issue(" in self._source(), (
+            "_process_manga no longer resolves the ledger row; the tagger needs the "
+            "IssueID and must run while the file is still at the download location"
         )
 
 
@@ -1407,8 +1398,11 @@ class TestMangaTagShapeWiring:
 
     def test_the_tag_options_no_longer_carry_a_doomed_issue_clear(self):
         """One owner for the clear -- a second, silently-ignored one is a lie."""
-        tline = self._run_source().split("tline = ")[1].splitlines()[0]
-        assert "iline" not in tline
+        assert "issue=" not in self._run_source(), (
+            "ComicTagger applies -m before the ComicVine overlay writes the number "
+            "straight back over it, so an issue= in the tag options is a second "
+            "owner of the clear that silently does nothing"
+        )
 
 
 class TestClearIssueNumber:
@@ -1586,8 +1580,14 @@ class TestClearIssueNumberAcrossStyles:
                 self.cmd = cmd
                 calls.append(cmd)
                 self._result = pending.pop(0)
+                self._killed = False
 
             def communicate(self, timeout=None):
+                if self._killed:
+                    # The reap after kill() is deliberately unbounded: the child
+                    # is already dead, so this one cannot block on anything.
+                    calls.append(["reaped"])
+                    return "", ""
                 timeouts.append(timeout)
                 if isinstance(self._result, Exception):
                     # Only a BOUNDED wait can time out. An unbounded one just
@@ -1599,6 +1599,7 @@ class TestClearIssueNumberAcrossStyles:
                 return self._result, ""
 
             def kill(self):
+                self._killed = True
                 calls.append(["killed"])
 
         monkeypatch.setattr(cmtag.subprocess, "Popen", FakeProc)
@@ -1638,7 +1639,97 @@ class TestClearIssueNumberAcrossStyles:
 
         assert ok is False
         assert ["killed"] in calls, "the wedged child was never killed"
-        assert [c[c.index("--type") + 1] for c in calls if c != ["killed"]] == ["cr", "cbl"]
+        assert ["reaped"] in calls, "the killed child was never reaped; it lingers as a zombie"
+        assert calls.index(["killed"]) < calls.index(["reaped"]), "a child cannot be reaped before it is killed"
+        assert [c[c.index("--type") + 1] for c in calls if "--type" in c] == ["cr", "cbl"]
         # The bound itself: an unbounded communicate() cannot time out at all,
         # it simply never returns, and the post-processor waits on it.
         assert timeouts[0] == cmtag._CLEAR_ISSUE_TIMEOUT, "the wait was not bounded"
+
+
+class TestMangaKeepsTheFileWhenTheDownloadFolderIsTheSeriesFolder:
+    """The pre-tag cleanup deleted the volume it had just filed.
+
+    When an operator's manga series folder resolves to the same directory the
+    download landed in, and tagging did not rename the file, `dst` and
+    `pre_tag_path` are the same file. `place()` cannot notice: its same-file
+    short circuit compares its own source, the CACHE copy the tagger returned,
+    against `dst`. So it displaces the original aside, writes the cache copy to
+    `dst`, and deletes the displaced file. The cleanup then saw a `filepath`
+    different from `pre_tag_path`, FILE_OPTS `move`, and a file present at
+    `pre_tag_path` -- the freshly placed one -- and removed it. The import
+    reported success and the library file was gone.
+    """
+
+    def _run(self, tmp_path, tagged_name="Chainsaw Man 165.cbz"):
+        # The series folder IS the download folder: this is the whole point.
+        series_dir = tmp_path / "manga" / "Chainsaw Man"
+        series_dir.mkdir(parents=True)
+        src = series_dir / "Chainsaw Man 165.cbz"
+        src.write_bytes(b"the volume")
+
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        tagged = cache / tagged_name
+        tagged.write_bytes(b"the tagged volume")
+
+        pp, mock_queue = _make_pp(
+            nzb_name="Chainsaw Man 165.cbz",
+            nzb_folder=str(series_dir),
+            comicid="md-csm",
+        )
+
+        config = MagicMock()
+        config.FILE_OPTS = "move"
+        config.ARC_FILEOPS = "move"
+        config.ARC_FILEOPS_SOFTLINK_RELATIVE = False
+        config.IGNORE_SEARCH_WORDS = []
+        config.ENABLE_META = True
+        config.CBR2CBZ_ONLY = False
+
+        comic_row = {"ComicName": "Chainsaw Man", "ComicLocation": str(series_dir)}
+        issue_row = {"IssueID": "md-csm-ch165", "ChapterNumber": "165", "ComicID": "md-csm"}
+        have_count = {"count_1": 5}
+        mock_conn = MagicMock()
+
+        def fake_place(source, destination, purpose, on_existing=None):
+            # What `_place_displacing` does under `move` when its source is the
+            # cache copy: the destination ends up holding the placed file and
+            # the cache copy is consumed.
+            with open(source, "rb") as fh:
+                payload = fh.read()
+            with open(destination, "wb") as fh:
+                fh.write(payload)
+            os.remove(source)
+            return placement_result(destination)
+
+        with (
+            patch.object(comicarr, "CONFIG", config),
+            patch("comicarr.postprocessor.get_manga_destination", return_value=str(tmp_path / "manga")),
+            patch("comicarr.app.downloads.journal.record_transition", return_value=True),
+            patch("comicarr.postprocessor.place", side_effect=fake_place),
+            patch("comicarr.cmtag.run", return_value=str(tagged)),
+            patch("comicarr.postprocessor.db") as mock_db,
+        ):
+            mock_db.select_one.side_effect = [comic_row, issue_row, have_count]
+            mock_db.get_engine.return_value.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+            mock_db.get_engine.return_value.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+            pp._process_manga()
+
+        return src, mock_queue
+
+    def test_the_placed_file_survives_when_the_destination_is_the_pre_tag_path(self, tmp_path):
+        placed, mock_queue = self._run(tmp_path)
+
+        assert placed.exists(), "the cleanup deleted the file that placement had just written to the library"
+        assert placed.read_bytes() == b"the tagged volume", "the surviving file must be the tagged one"
+        result = mock_queue.put.call_args[0][0]
+        assert "Post Processing SUCCESSFUL" in result[0]["self.log"]
+
+    def test_a_renamed_tagged_file_still_has_its_download_original_removed(self, tmp_path):
+        """The guard must stay narrow: a real .cbr -> .cbz rename leaves a
+        distinct download original, and that one is still ours to clean up."""
+        original, _queue = self._run(tmp_path, tagged_name="Chainsaw Man 165 (tagged).cbz")
+
+        assert not original.exists(), "the pre-tag download original must still be tidied away"
